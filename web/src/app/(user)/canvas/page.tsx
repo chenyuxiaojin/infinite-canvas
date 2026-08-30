@@ -3,11 +3,12 @@
 import { useRef } from "react";
 import { useRouter } from "next/navigation";
 import { App, Button } from "antd";
-import { Download, FileUp, Plus } from "lucide-react";
+import { Database, Download, FileUp, Plus, TriangleAlert } from "lucide-react";
 
 import { readZip } from "@/lib/zip";
 import { setMediaBlob } from "@/services/file-storage";
 import { setImageBlob } from "@/services/image-storage";
+import { isDesktopRuntime } from "@/services/desktop-runtime";
 import { CanvasDeleteProjectsDialog } from "./components/canvas-delete-projects-dialog";
 import { CanvasProjectCard } from "./components/canvas-project-card";
 import type { CanvasExportFile } from "./export-types";
@@ -20,6 +21,8 @@ export default function CanvasPage() {
     const router = useRouter();
     const inputRef = useRef<HTMLInputElement>(null);
     const hydrated = useCanvasStore((state) => state.hydrated);
+    const desktopPersistenceStatus = useCanvasStore((state) => state.desktopPersistenceStatus);
+    const desktopPersistenceError = useCanvasStore((state) => state.desktopPersistenceError);
     const projects = useCanvasStore((state) => state.projects);
     const createProject = useCanvasStore((state) => state.createProject);
     const importProject = useCanvasStore((state) => state.importProject);
@@ -63,6 +66,19 @@ export default function CanvasPage() {
                     <div>
                         <p className="text-xs text-stone-500">画布库</p>
                         <h1 className="mt-3 text-3xl font-semibold">无限画布</h1>
+                        {isDesktopRuntime() ? (
+                            <p
+                                className={`mt-3 flex items-center gap-2 text-xs ${desktopPersistenceStatus === "database" ? "text-stone-500" : "text-red-600 dark:text-red-400"}`}
+                                title={desktopPersistenceError || undefined}
+                            >
+                                {desktopPersistenceStatus === "database" ? <Database className="size-3.5" /> : <TriangleAlert className="size-3.5" />}
+                                {desktopPersistenceStatus === "database"
+                                    ? "本机数据库与 Agent Bridge 已连接"
+                                    : desktopPersistenceStatus === "checking"
+                                      ? "正在连接本机数据库与 Agent Bridge"
+                                      : "本机数据库或 Agent Bridge 未连接；当前仅有浏览器本地数据，Agent 无法直接读写"}
+                            </p>
+                        ) : null}
                     </div>
                     <div className="flex items-center gap-2">
                         {selectedIds.length ? (

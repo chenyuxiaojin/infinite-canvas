@@ -51,6 +51,7 @@ export type CanvasProject = {
 
 type CanvasStore = {
     hydrated: boolean;
+    desktopPersistenceStatus: "not_applicable" | "checking" | "database" | "error";
     desktopPersistenceError: string | null;
     projects: CanvasProject[];
     createProject: (title?: string, options?: { agentConfig?: CanvasAgentConfig; pendingAgentRequest?: CanvasPendingAgentRequest }) => string;
@@ -104,10 +105,14 @@ function queueProjectSave(project: CanvasProject) {
                 void saveDesktopCanvasProject<CanvasProject>(project)
                     .then((saved) => {
                         adoptAuthoritativeDesktopProject(saved);
-                        useCanvasStore.setState({ desktopPersistenceError: null });
+                        useCanvasStore.setState({
+                            desktopPersistenceStatus: "database",
+                            desktopPersistenceError: null,
+                        });
                     })
                     .catch((error) => {
                         useCanvasStore.setState({
+                            desktopPersistenceStatus: "error",
                             desktopPersistenceError: error instanceof Error ? error.message : String(error),
                         });
                     });
@@ -208,6 +213,10 @@ const canvasStorage: PersistStorage<CanvasStore> = {
         if (isDesktopRuntime()) {
             try {
                 const desktopProjects = await listDesktopCanvasProjects<CanvasProject>();
+                useCanvasStore.setState({
+                    desktopPersistenceStatus: "database",
+                    desktopPersistenceError: null,
+                });
                 const desktopById = new Map(
                     desktopProjects.map((project) => [project.id, project]),
                 );
@@ -243,6 +252,10 @@ const canvasStorage: PersistStorage<CanvasStore> = {
                 }
             } catch (error) {
                 console.error("Failed to hydrate desktop canvas projects", error);
+                useCanvasStore.setState({
+                    desktopPersistenceStatus: "error",
+                    desktopPersistenceError: error instanceof Error ? error.message : String(error),
+                });
             }
         }
 
@@ -313,6 +326,7 @@ export const useCanvasStore = create<CanvasStore>()(
     persist(
         (set, get) => ({
             hydrated: false,
+            desktopPersistenceStatus: isDesktopRuntime() ? "checking" : "not_applicable",
             desktopPersistenceError: null,
             projects: [],
             createProject: (title = "未命名画布", options) => {
@@ -457,18 +471,30 @@ export const useCanvasStore = create<CanvasStore>()(
             },
             refreshFromDesktop: async () => {
                 if (!isDesktopRuntime()) return;
-                const desktopProjects = await listDesktopCanvasProjects<CanvasProject>();
-                set((state) => {
-                    const currentById = new Map(state.projects.map((project) => [project.id, project]));
-                    const desktopById = new Map(desktopProjects.map((project) => {
-                        const saved = migrateCanvasProject(project);
-                        const current = currentById.get(saved.id);
-                        return [saved.id, current ? mergeDesktopProject(saved, current) : saved] as const;
-                    }));
-                    const retained = state.projects.map((project) => desktopById.get(project.id) || project);
-                    const added = Array.from(desktopById.values()).filter((project) => !currentById.has(project.id));
-                    return { projects: [...added, ...retained] };
-                });
+                try {
+                    const desktopProjects = await listDesktopCanvasProjects<CanvasProject>();
+                    set((state) => {
+                        const currentById = new Map(state.projects.map((project) => [project.id, project]));
+                        const desktopById = new Map(desktopProjects.map((project) => {
+                            const saved = migrateCanvasProject(project);
+                            const current = currentById.get(saved.id);
+                            return [saved.id, current ? mergeDesktopProject(saved, current) : saved] as const;
+                        }));
+                        const retained = state.projects.map((project) => desktopById.get(project.id) || project);
+                        const added = Array.from(desktopById.values()).filter((project) => !currentById.has(project.id));
+                        return {
+                            projects: [...added, ...retained],
+                            desktopPersistenceStatus: "database" as const,
+                            desktopPersistenceError: null,
+                        };
+                    });
+                } catch (error) {
+                    set({
+                        desktopPersistenceStatus: "error",
+                        desktopPersistenceError: error instanceof Error ? error.message : String(error),
+                    });
+                    throw error;
+                }
             },
             syncWithRemote: async (token, syncEnabled) => {
                 accountCanvasSyncEnabled = syncEnabled;

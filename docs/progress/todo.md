@@ -7,5 +7,6 @@ description: 当前项目后续值得处理的事项
 
 本文档用来记录当前项目后续比较值得处理的事项。
 
-- 统一操作核心合并时，用其 mutation/result 协议替换画布共编 adapter 的临时执行边界；保留现有 `CanvasCollaborationState`、节点人工锁和 revision guard，不复制核心 reducer。
-- 总装后补一条真实零付费 Agent 多动作验收，覆盖执行中人工修改、锁定节点和冲突后的显式重试。
+- 备份正式 bundle ID 的 Application Support 与 WebKit 数据后，用总装分支桌面包
+  完成一次旧 IndexedDB 到 SQLite 的首次迁移验收；确认画布库连接状态、CLI 项目
+  列表、已打开 UI 即时写入和重启恢复后，才能把 P3.6 从“进行中”改回“通过”。

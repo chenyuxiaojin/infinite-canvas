@@ -38,9 +38,11 @@ web/src/app/(user)/canvas/protocol/canvas-operation-protocol.ts
 - 本地任务：发起为 human/agent `task.start`，执行结果为 system
   `task.update`，可在同批回填节点。
 
-持久化唯一来源是 SQLite `canvas_projects.project_data.operationState`，其中
-包含数值 revision、locks、tasks、requests 和 audit。WebView 通过 Tauri IPC
-读写这些行并轮询当前打开工程；内部 Next 端点是无状态 reducer 执行器。
+在包含本总装代码的桌面包内，持久化唯一来源是 SQLite
+`canvas_projects.project_data.operationState`，其中包含数值 revision、locks、
+tasks、requests 和 audit。WebView 通过 Tauri IPC 读写这些行并轮询当前打开
+工程；内部 Next 端点是无状态 reducer 执行器。浏览器独立构建和旧桌面包仍会
+使用 IndexedDB，不能把“隔离验收包通过”解释成旧桌面包已经自动获得 Bridge。
 
 ## 冲突决策与删除项
 
@@ -50,6 +52,8 @@ web/src/app/(user)/canvas/protocol/canvas-operation-protocol.ts
   水合期间设置同步栅栏，禁止旧节点视图回写成“人工删除”。
 - `use-canvas-store.ts` 保留 IndexedDB/账号同步兼容路径；桌面合并先比 revision，
   revision 相同才比 `updatedAt`，无差异 patch 不再制造保存。
+- 画布库明确显示“本机数据库与 Agent Bridge 已连接”；Tauri IPC 补水或保存失败
+  会显示错误状态，不再只写浏览器控制台后静默表现成可供 Agent 使用。
 - `canvas-collaboration-adapter.ts` 只从 `operationState` 映射状态、历史和节点标记；
   不拥有 reducer、revision、锁或 undo 快照。
 
@@ -80,6 +84,10 @@ web/src/app/(user)/canvas/protocol/canvas-operation-protocol.ts
 
 ## 真实零付费验收
 
+以下结果来自隔离 bundle `com.chenyuxiaojin.infinitecanvas.integrationtest`，证明
+总装代码的数据流成立，但不证明基线主检出生成的旧 `无限画布.app` 已包含这些
+代码。正式 bundle 的升级迁移必须单独验收，不能用本节代替。
+
 复现配置：
 
 ```bash
@@ -104,6 +112,25 @@ PATH=/Users/chenhuajin/.cargo/bin:$PATH \
    12 audit，历史身份与幂等已重绑定到副本 ID。
 6. 监听仅 loopback；标准 App 内 CLI 与 release CLI 哈希一致；真实凭据内容未在
    tracked files 或标准 App 可执行文件中出现。
+
+## 用户现场复核与交付断点
+
+现场复核时，实际运行进程来自主检出 `feat/macos-director-console` 的基线提交
+`e00acb7`，只启动 Next `127.0.0.1:3100` 和 Go `127.0.0.1:3101`，没有
+`127.0.0.1:3102` Agent Bridge；正式应用目录的 `canvas_projects` 为 0 行，画布
+仍在该旧包的 WKWebView IndexedDB。外部 Agent 因此只能读到空数据库，不能把
+操作直接写回已打开画布。
+
+修复不是修改协议，而是交付并启动本分支构建的桌面包。首次启动时由新 WebView
+读取同 bundle ID 下的旧 IndexedDB，经 Tauri IPC 写入 SQLite；迁移完成后必须
+同时满足：画布库显示数据库/Bridge 已连接、CLI `projects list` 可见原工程、
+SQLite 行数非零、已打开 UI 能看到 CLI 写入。为保护正式项目，自动化只在隔离
+数据上执行；正式升级应先成对备份 Application Support 与 WebKit，再由用户确认
+迁移结果。
+
+本分支最新技术包已安装到 `~/Applications/无限画布.app`，稳定 CLI 入口为
+`~/.local/bin/infinite-canvas`。现场旧包仍从主检出 worktree 运行；在用户明确允许
+关闭旧包并迁移正式画布前，不自动启动新包。
 
 ## 验证命令与结果
 
@@ -141,8 +168,9 @@ PATH=/Users/chenhuajin/.cargo/bin:$PATH bun run tauri build --bundles app
 
 - 当前标准 `.app` 是技术构建；Developer ID、公证、staple 和干净机升级仍按
   P4 矩阵执行，不能把 ad-hoc 包当发行包。
-- 正式发布前用标准 bundle ID 再做一次旧正式工程的只读盘点和备份后迁移验收；
-  本次只写隔离的一次性工程，不触碰正式用户项目。
+- 当前用户正在运行的仍是基线主检出旧包；必须切换到本分支技术包后，CLI/Bridge
+  才存在。正式发布前用标准 bundle ID 再做一次旧正式工程的只读盘点和备份后
+  迁移验收；自动化不触碰正式用户项目。
 - 发行签名后再次核对 CLI 仍在 `Contents/MacOS/infinite-canvas`、所有内嵌
   Mach-O 的签名顺序、Bridge loopback 监听和凭据文件权限。
 - 全仓 TypeScript 基线修复可另开任务；不应在本总装分支混入无关业务修正。

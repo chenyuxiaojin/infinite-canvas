@@ -12,7 +12,8 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 重复 request 不重复执行；过期 revision 明确拒绝；Agent 不能改动人工锁定节点；冲突批次原子回滚。
 - 成功 Agent 批次保存可持久化撤销快照；已有后续人工修改时拒绝直接快照恢复，避免覆盖人工结果。
 - 共编界面提供 Agent 状态、revision、审计历史、人工锁与最近 Agent 修改提示；界面只映射 `operationState`，不另存 reducer、revision、锁或撤销状态。
-- 自动化覆盖公共协议、Store 与共编状态映射；桌面 Bridge 真实闭环证据见总装 handoff 和统一验收矩阵。
+- 自动化覆盖公共协议、Store 与共编状态映射；隔离桌面 Bridge 闭环证据及正式旧
+  包尚未切换的边界见总装 handoff 和统一验收矩阵。
 
 ## 本机 Agent 适配层
 
@@ -20,9 +21,12 @@ description: 当前版本已实现但仍需人工验证的变更项
   `0600` 保存、可立即撤销替换的本机凭据。
 - 新增 `infinite-canvas` CLI：能力目录、项目列表/读取、画布操作
   dry-run/apply、运行时探测、任务状态/取消和零付费确定性测试片。
-- Agent 写入带 project/request/base revision/actor，使用 request journal 幂等；revision 冲突和人工锁定节点均拒绝覆盖。
+- Agent 写入带 project/request/base revision/actor，使用同一
+  `operationState.requests` 幂等；revision 冲突和人工锁定节点均拒绝覆盖。
 - 桌面 WebView 改由 Tauri IPC 与 Agent 共用现有 SQLite
   `canvas_projects` 表，首次加载会合并原 IndexedDB 项目。
+- 画布库显示本机数据库与 Agent Bridge 的连接状态；IPC 失败时明确提示当前只有
+  浏览器本地数据、Agent 无法直接读写，不再只在控制台记录。
 - 自动化已覆盖 loopback、鉴权、撤销、白名单、路径 schema、幂等、JSON 和
   CLI 退出码；仍需在总装后的签名 `.app` 中人工确认 CLI 打包位置、
   首次项目合并和长时间并发编辑体验。
