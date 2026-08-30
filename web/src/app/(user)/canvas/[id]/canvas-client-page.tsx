@@ -60,7 +60,12 @@ import { CanvasToolbar } from "../components/canvas-toolbar";
 import { AssetPickerModal, type AssetPickerTab } from "../components/asset-picker-modal";
 import { CanvasZoomControls } from "../components/canvas-zoom-controls";
 import { CANVAS_ASSET_DRAG_TYPE, CanvasSidePanel } from "../components/canvas-side-panel";
-import { DEFAULT_CANVAS_AGENT_PANEL, DEFAULT_CANVAS_SIDE_PANEL, useCanvasStore } from "../stores/use-canvas-store";
+import { DEFAULT_CANVAS_AGENT_PANEL, DEFAULT_CANVAS_SIDE_PANEL, useCanvasStore, type CanvasProject } from "../stores/use-canvas-store";
+import {
+    CANVAS_OPERATION_PROTOCOL_VERSION,
+    type CanvasOperation,
+    type CanvasOperationOutcome,
+} from "../protocol/canvas-operation-protocol";
 import { assistantReferenceContentFromNode, buildNodeMentionReferences, isCanvasReferenceNode } from "../utils/canvas-resource-references";
 import { buildCanvasAgentContext } from "../agent/canvas-agent-context";
 import type { CanvasAgentAction, CanvasAgentToolResult } from "../agent/canvas-agent-tools";
@@ -116,6 +121,10 @@ type CanvasHistoryEntry = Pick<CanvasClipboard, "nodes" | "connections"> & {
     backgroundMode: CanvasBackgroundMode;
     showImageInfo: boolean;
 };
+
+type AgentOperationCommit =
+    | { outcome: CanvasOperationOutcome<CanvasProject>; error?: never }
+    | { outcome?: never; error: CanvasAgentToolResult };
 
 const VIDEO_NODE_MAX_WIDTH = 420;
 const VIDEO_NODE_MAX_HEIGHT = 420;
@@ -349,6 +358,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const createProject = useCanvasStore((state) => state.createProject);
     const openProject = useCanvasStore((state) => state.openProject);
     const updateProject = useCanvasStore((state) => state.updateProject);
+    const applyOperationBatch = useCanvasStore((state) => state.applyOperationBatch);
     const renameProject = useCanvasStore((state) => state.renameProject);
     const deleteProjects = useCanvasStore((state) => state.deleteProjects);
     const currentProject = useCanvasStore((state) => state.projects.find((project) => project.id === projectId));
@@ -427,6 +437,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     );
 
     const nodesRef = useRef(nodes);
+    const agentExpectedRevisionRef = useRef<number | null>(null);
     const consumedAgentRequestProjectRef = useRef<string | null>(null);
     const connectionsRef = useRef(connections);
     const selectedNodeIdsRef = useRef(selectedNodeIds);
@@ -3171,8 +3182,10 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     );
 
     const getCanvasAgentContext = useCallback(
-        (agentState: CanvasAgentState) =>
-            buildCanvasAgentContext({
+        (agentState: CanvasAgentState) => {
+            const project = useCanvasStore.getState().projects.find((item) => item.id === projectId);
+            agentExpectedRevisionRef.current = project?.operationState.revision ?? null;
+            return buildCanvasAgentContext({
                 projectId,
                 projectTitle: currentProject?.title || "未命名画布",
                 nodes: nodesRef.current,
@@ -3180,7 +3193,8 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 selectedNodeIds: selectedNodeIdsRef.current,
                 config: agentEffectiveConfig,
                 agentState,
-            }),
+            });
+        },
         [agentEffectiveConfig, currentProject?.title, projectId],
     );
 
@@ -3201,13 +3215,37 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 setSelectedNodeIds(nextSelection);
                 setSelectedConnectionId(null);
             };
-            const commitNodes = (nextNodes: CanvasNodeData[]) => {
-                nodesRef.current = nextNodes;
-                setNodes(nextNodes);
-            };
-            const commitConnections = (nextConnections: CanvasConnection[]) => {
-                connectionsRef.current = nextConnections;
-                setConnections(nextConnections);
+            const actionId = action.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 180) || nanoid();
+            const operationId = (kind: string, index = 0) => `${kind}-${actionId}-${index}`;
+            const commitAgentOperations = (operations: CanvasOperation[]): AgentOperationCommit => {
+                const project = useCanvasStore.getState().projects.find((item) => item.id === projectId);
+                if (!project) return { error: { ok: false, code: "project_not_found", message: "当前画布已不存在" } };
+                const outcome = applyOperationBatch({
+                    protocolVersion: CANVAS_OPERATION_PROTOCOL_VERSION,
+                    actor: "agent",
+                    requestId: `canvas-agent-${actionId}`,
+                    projectId,
+                    baseRevision: agentExpectedRevisionRef.current ?? project.operationState.revision,
+                    timestamp: new Date().toISOString(),
+                    operations,
+                });
+                if (!outcome) return { error: { ok: false, code: "project_not_found", message: "当前画布已不存在" } };
+                if (!outcome.result.ok) {
+                    return {
+                        error: {
+                            ok: false,
+                            code: outcome.result.error?.code || "operation_rejected",
+                            message: outcome.result.error?.message || "Agent 画布操作被拒绝",
+                            revision: outcome.result.revision,
+                        },
+                    };
+                }
+                nodesRef.current = outcome.project.nodes;
+                connectionsRef.current = outcome.project.connections;
+                agentExpectedRevisionRef.current = outcome.project.operationState.revision;
+                setNodes(outcome.project.nodes);
+                setConnections(outcome.project.connections);
+                return { outcome };
             };
             const nextNodeCenter = (type: CanvasNodeType, sourceNodes: CanvasNodeData[], sizeOverride?: { width: number; height: number }) => {
                 const spec = sizeOverride ? { ...getNodeSpec(type), ...sizeOverride } : getNodeSpec(type);
@@ -3351,22 +3389,26 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                         content,
                         prompt: content,
                         status: NODE_STATUS_SUCCESS,
-                    });
+                    }, operationId("node"));
                     if (nodeSize) {
                         node.position = { x: nodeCenter.x - nodeSize.width / 2, y: nodeCenter.y - nodeSize.height / 2 };
                         node.width = nodeSize.width;
                         node.height = nodeSize.height;
                     }
                     node.title = stringValue("title") || content.slice(0, 32) || "文本";
-                    const createdConnections = sourceNodeIds.map((sourceNodeId) => ({ id: nanoid(), fromNodeId: sourceNodeId, toNodeId: node.id }));
-                    commitNodes([...nodesRef.current, node]);
-                    commitConnections([...connectionsRef.current, ...createdConnections]);
+                    const createdConnections = sourceNodeIds.map((sourceNodeId, index) => ({ id: operationId("connection", index), fromNodeId: sourceNodeId, toNodeId: node.id }));
+                    const committed = commitAgentOperations([
+                        { type: "node.create", node },
+                        ...createdConnections.map((connection): CanvasOperation => ({ type: "connection.create", connection })),
+                    ]);
+                    if (committed.error) return committed.error;
                     selectOnly(node.id);
                     const projectTitle = stringValue("projectTitle");
                     if (action.name === "create_primary_script_node" && autoTitlePending) {
                         renameProject(projectId, projectTitle);
                     }
-                    return { ok: true, nodeId: node.id, connectionIds: createdConnections.map((connection) => connection.id), node: canvasAgentNodeSummary(node) };
+                    const committedNode = getNode(node.id) || node;
+                    return { ok: true, nodeId: node.id, connectionIds: createdConnections.map((connection) => connection.id), node: canvasAgentNodeSummary(committedNode), duplicate: committed.outcome.result.duplicate };
                 }
 
                 if (action.name === "update_text_node") {
@@ -3376,34 +3418,46 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     if (node.type !== CanvasNodeType.Text) return { ok: false, code: "invalid_node_type", message: "只能用 update_text_node 修改文本节点" };
                     const title = stringValue("title");
                     const content = stringValue("content");
-                    const nextNodes = nodesRef.current.map((item) =>
-                        item.id === nodeId
-                            ? {
-                                ...item,
-                                title: title || item.title,
-                                metadata: content ? { ...item.metadata, content, prompt: content, status: NODE_STATUS_SUCCESS, errorDetails: undefined } : item.metadata,
-                            }
-                            : item,
-                    );
-                    commitNodes(nextNodes);
-                    return { ok: true, nodeId, node: canvasAgentNodeSummary(nextNodes.find((item) => item.id === nodeId)!) };
+                    const patch = {
+                        title: title || node.title,
+                        metadata: content ? { ...node.metadata, content, prompt: content, status: NODE_STATUS_SUCCESS, errorDetails: undefined } : node.metadata,
+                    };
+                    const committed = commitAgentOperations([{ type: "node.update", nodeId, patch }]);
+                    if (committed.error) return committed.error;
+                    return { ok: true, nodeId, node: canvasAgentNodeSummary(getNode(nodeId)!), duplicate: committed.outcome.result.duplicate };
                 }
 
                 if (action.name === "update_node") {
                     const nodeId = stringValue("nodeId");
-                    if (!getNode(nodeId)) return missingNodeResult(nodeId);
-                    const nextNodes = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, title: stringValue("title") || node.title } : node));
-                    commitNodes(nextNodes);
-                    return { ok: true, nodeId, node: canvasAgentNodeSummary(nextNodes.find((node) => node.id === nodeId)!) };
+                    const node = getNode(nodeId);
+                    if (!node) return missingNodeResult(nodeId);
+                    const committed = commitAgentOperations([{ type: "node.update", nodeId, patch: { title: stringValue("title") || node.title } }]);
+                    if (committed.error) return committed.error;
+                    return { ok: true, nodeId, node: canvasAgentNodeSummary(getNode(nodeId)!), duplicate: committed.outcome.result.duplicate };
                 }
 
                 if (action.name === "delete_node") {
                     const nodeId = stringValue("nodeId");
                     if (!getNode(nodeId)) return missingNodeResult(nodeId);
-                    const beforeNodeIds = nodesRef.current.map((node) => node.id);
-                    deleteNodes(new Set([nodeId]));
-                    const remainingNodeIds = new Set(nodesRef.current.map((node) => node.id));
-                    return { ok: true, deletedNodeIds: beforeNodeIds.filter((id) => !remainingNodeIds.has(id)) };
+                    const allIds = new Set([nodeId]);
+                    nodesRef.current.forEach((node) => {
+                        if (allIds.has(node.id)) node.metadata?.batchChildIds?.forEach((childId) => allIds.add(childId));
+                    });
+                    nodesRef.current.forEach((node) => {
+                        if (node.metadata?.isBatchRoot && node.metadata.batchChildIds?.every((childId) => allIds.has(childId))) allIds.add(node.id);
+                    });
+                    const committed = commitAgentOperations([...allIds].map((id) => ({ type: "node.delete", nodeId: id })));
+                    if (committed.error) return committed.error;
+                    deleteCanvasTaskRecords([...allIds]);
+                    setChatSessions((sessions) => sessions.map((session) => ({
+                        ...session,
+                        messages: session.messages.map((item) => ({
+                            ...item,
+                            references: item.references?.map((reference) => allIds.has(reference.id) ? { ...reference, dataUrl: undefined, url: undefined, storageKey: undefined } : reference),
+                        })),
+                    })));
+                    cleanupCanvasFiles({ projectId, nodes: committed.outcome.project.nodes, chatSessions });
+                    return { ok: true, deletedNodeIds: [...allIds], duplicate: committed.outcome.result.duplicate };
                 }
 
                 if (action.name === "create_connection") {
@@ -3419,9 +3473,10 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     }
                     const existing = connectionsRef.current.find((connection) => connection.fromNodeId === fromNodeId && connection.toNodeId === toNodeId);
                     if (existing) return { ok: true, connectionId: existing.id, alreadyExists: true };
-                    const connection = { id: nanoid(), fromNodeId, toNodeId };
-                    commitConnections([...connectionsRef.current, connection]);
-                    return { ok: true, connectionId: connection.id };
+                    const connection = { id: operationId("connection"), fromNodeId, toNodeId };
+                    const committed = commitAgentOperations([{ type: "connection.create", connection }]);
+                    if (committed.error) return committed.error;
+                    return { ok: true, connectionId: connection.id, duplicate: committed.outcome.result.duplicate };
                 }
 
                 if (action.name === "delete_connection") {
@@ -3429,22 +3484,39 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     if (!connectionsRef.current.some((connection) => connection.id === connectionId)) {
                         return { ok: false, code: "connection_not_found", message: "找不到连线 " + connectionId };
                     }
-                    deleteConnection(connectionId);
-                    return { ok: true, deletedConnectionId: connectionId };
+                    const committed = commitAgentOperations([{ type: "connection.delete", connectionId }]);
+                    if (committed.error) return committed.error;
+                    setSelectedConnectionId((current) => (current === connectionId ? null : current));
+                    return { ok: true, deletedConnectionId: connectionId, duplicate: committed.outcome.result.duplicate };
                 }
 
                 if (action.name === "create_group") {
                     const nodeIds = stringValues("nodeIds");
                     const missingNodeId = validateNodeIds(nodeIds);
                     if (missingNodeId) return missingNodeResult(missingNodeId);
-                    const groupId = createGroupFromSelection(nodeIds);
-                    if (!groupId) return { ok: false, code: "invalid_group", message: "分组至少需要两个未分组的普通节点" };
-                    const title = stringValue("title");
-                    if (title) {
-                        const nextNodes = nodesRef.current.map((node) => (node.id === groupId ? { ...node, title } : node));
-                        commitNodes(nextNodes);
+                    const selectedNodes = nodeIds.map((nodeId) => getNode(nodeId)!);
+                    if (selectedNodes.length < 2 || selectedNodes.some((node) => node.type === CanvasNodeType.Group || node.metadata?.groupId)) {
+                        return { ok: false, code: "invalid_group", message: "分组至少需要两个未分组的普通节点" };
                     }
-                    return { ok: true, groupId, nodeIds };
+                    const bounds = getNodeBounds(selectedNodes);
+                    const width = bounds.right - bounds.left + GROUP_PADDING * 2;
+                    const height = bounds.bottom - bounds.top + GROUP_PADDING * 2;
+                    const groupId = operationId("group");
+                    const group = createCanvasNode(CanvasNodeType.Group, {
+                        x: bounds.left - GROUP_PADDING + width / 2,
+                        y: bounds.top - GROUP_PADDING + height / 2,
+                    }, undefined, groupId);
+                    group.width = width;
+                    group.height = height;
+                    group.position = { x: bounds.left - GROUP_PADDING, y: bounds.top - GROUP_PADDING };
+                    group.title = stringValue("title") || group.title;
+                    const committed = commitAgentOperations([
+                        { type: "node.create", node: group },
+                        ...selectedNodes.map((node): CanvasOperation => ({ type: "node.update", nodeId: node.id, patch: { metadata: { ...node.metadata, groupId } } })),
+                    ]);
+                    if (committed.error) return committed.error;
+                    selectOnly(groupId);
+                    return { ok: true, groupId, nodeIds, duplicate: committed.outcome.result.duplicate };
                 }
 
                 if (action.name === "arrange_nodes") {
@@ -3482,9 +3554,9 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                                 .filter((node) => node.metadata?.groupId === group.id && !positions.has(node.id))
                                 .forEach((node) => positions.set(node.id, { x: node.position.x + offsetX, y: node.position.y + offsetY }));
                         });
-                    const nextNodes = nodesRef.current.map((node) => (positions.has(node.id) ? { ...node, position: positions.get(node.id)! } : node));
-                    commitNodes(nextNodes);
-                    return { ok: true, arrangedNodeIds: targetNodes.map((node) => node.id) };
+                    const committed = commitAgentOperations([{ type: "layout.apply", positions: Object.fromEntries(positions) }]);
+                    if (committed.error) return committed.error;
+                    return { ok: true, arrangedNodeIds: targetNodes.map((node) => node.id), duplicate: committed.outcome.result.duplicate };
                 }
 
                 if (action.name === "generate_image" || action.name === "edit_image" || action.name === "generate_video" || action.name === "generate_audio") {
@@ -3549,12 +3621,27 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     }
 
                     const layoutSourceNodes = mode === "image" ? [] : mode === "video" ? nodesRef.current.filter((node) => !node.metadata?.groupId && (node.type === CanvasNodeType.Text || isCanvasImageNodeType(node.type) || node.type === CanvasNodeType.Group)) : sourceNodes;
-                    const node = createCanvasNode(targetType, nextNodeCenter(targetType, layoutSourceNodes), metadata);
+                    const node = createCanvasNode(targetType, nextNodeCenter(targetType, layoutSourceNodes), metadata, operationId("node"));
                     node.title = stringValue("title") || prompt.slice(0, 32) || (mode === "video" ? "视频" : mode === "audio" ? "音频" : "图片");
-                    const createdConnections = sourceNodeIds.map((sourceNodeId) => ({ id: nanoid(), fromNodeId: sourceNodeId, toNodeId: node.id }));
-                    commitNodes([...nodesRef.current, node]);
-                    commitConnections([...connectionsRef.current, ...createdConnections]);
+                    const createdConnections = sourceNodeIds.map((sourceNodeId, index) => ({ id: operationId("connection", index), fromNodeId: sourceNodeId, toNodeId: node.id }));
+                    const committed = commitAgentOperations([
+                        { type: "node.create", node },
+                        ...createdConnections.map((connection): CanvasOperation => ({ type: "connection.create", connection })),
+                    ]);
+                    if (committed.error) return committed.error;
                     selectOnly(node.id);
+
+                    if (committed.outcome.result.duplicate) {
+                        const existingNode = getNode(node.id) || node;
+                        return {
+                            ok: true,
+                            duplicate: true,
+                            nodeId: node.id,
+                            createdNodeIds: [node.id],
+                            connectionIds: createdConnections.map((connection) => connection.id),
+                            ...canvasAgentTaskSummary(existingNode),
+                        };
+                    }
 
                     await handleGenerateNode(node.id, mode, prompt);
                     await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -3589,7 +3676,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 return { ok: false, code: "tool_error", message: error instanceof Error ? error.message : "画布工具执行失败" };
             }
         },
-        [agentEffectiveConfig, createGroupFromSelection, currentProject?.title, deleteConnection, deleteNodes, getCanvasCenter, handleGenerateNode, isAiConfigReady, projectId, renameProject, updateProject],
+        [agentEffectiveConfig, applyOperationBatch, chatSessions, cleanupCanvasFiles, currentProject?.title, deleteCanvasTaskRecords, getCanvasCenter, handleGenerateNode, isAiConfigReady, projectId, renameProject, updateProject],
     );
 
     const handleRetryNode = useCallback(

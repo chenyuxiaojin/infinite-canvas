@@ -19,6 +19,7 @@
 - [系统配置数据结构](backend/system-settings.md)
 - [后端数据库说明](backend/backend-database.md)
 - [画布数据结构](backend/canvas-data-structure.md)
+- [人与 Agent 共用画布操作协议 Handoff](development/human-agent-canvas-protocol-handoff.md)
 
 ## 商务合作
 
