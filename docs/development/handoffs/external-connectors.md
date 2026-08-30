@@ -35,7 +35,7 @@ Production code permits only these calls:
 1. `/usr/bin/pgrep -x Eagle`
 2. `/usr/bin/pgrep -x Resolve`
 3. `GET http://127.0.0.1:41595/api/v2/library/info`, with an 800 ms timeout and a 64 KiB response limit
-4. `/usr/bin/python3 <crate>/src/resolve_probe.py` with a cleared environment and only fixed module/library environment keys populated from standard Resolve installation candidates
+4. `/usr/bin/python3 <crate>/src/resolve_probe.py` with a cleared environment and only fixed module/library environment keys populated from standard Resolve installation candidates. The direct child has a 3 second deadline and separate 16 KiB stdout/stderr limits; timeout or overflow terminates and reaps it.
 
 The Resolve bridge invokes only these documented read methods:
 
@@ -52,23 +52,29 @@ It never asks for names and never calls `SaveProject`, render methods, media-poo
 Mock/fixture tests are kept separate from the live probe:
 
 ```text
-cargo test --all-targets
-14 passed; 0 failed
+cargo test --locked --all-targets
+20 passed; 0 failed
 ```
 
-The fixtures cover both providers across not installed, not running, permission missing, missing components, malformed responses, and available responses. Available-response fixtures contain fake private library/project/timeline names; assertions prove none of those values enter `ProviderReport`.
+The 16 provider fixture tests cover both providers across not installed, not running, permission missing, missing components, malformed responses, timeout, output-limit failure, and available responses. Available-response fixtures contain fake private library/project/timeline names; assertions prove none of those values enter `ProviderReport`.
+
+Four deterministic process-boundary tests cover normal dual-stream collection, timeout, stdout overflow, and stderr overflow. The timeout and overflow tests assert that the direct child is reaped before the runner returns. They can be reproduced independently with:
+
+```text
+cargo test --locked system::tests::bounded_child --lib
+```
 
 Static checks:
 
 ```text
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --locked --all-targets -- -D warnings
 ```
 
 Live probe command:
 
 ```text
-cargo run --bin external-connectors-probe -- all
+cargo run --locked --bin external-connectors-probe -- all
 ```
 
 Minimal live result from this handoff run:
@@ -114,6 +120,7 @@ Facts:
 - DaVinci Resolve was installed but not running.
 - The standard Resolve Python module and native scripting library were present.
 - `RESOLVE_SCRIPT_API`, `RESOLVE_SCRIPT_LIB`, and `PYTHONPATH` were each absent in the probe process; the bridge supplies only its own approved module/library values when a connection is attempted.
+- The fixed bridge runner enforces a 3 second deadline and retains at most 16 KiB from each output stream. Deterministic tests verified normal output, both stream limits, termination, and direct-child reaping.
 - The installed local Resolve scripting documentation was last updated 24 Jul 2026 and matched the paths and read methods used here.
 
 Inference:
@@ -124,14 +131,15 @@ Unknown:
 
 - The live Resolve version, whether a project is loaded, and whether a timeline is loaded remain unknown because Resolve was not running.
 - The user's current Resolve external-scripting preference remains unknown; this layer does not change preferences.
+- The 3 second bridge deadline has deterministic process tests but has not been exercised against a running Resolve instance on this machine.
 
 ## Assembly notes
 
 1. Add this crate to the future macOS Rust workspace or use it as a path dependency.
-2. Call probes off the UI thread because they perform bounded local process/HTTP checks.
+2. Call probes off the UI thread even though Eagle has an 800 ms HTTP timeout and the Resolve child has a 3 second deadline.
 3. Treat `ProviderReport.status` as the machine contract and display `diagnostic` unchanged for operator troubleshooting.
 4. Do not infer `available` from installation alone. Only the probe returns `available`.
 5. Preserve the production runtime allowlists. UI/API inputs may select only `all`, `eagle`, or `davinci`; they must never become URLs, shell arguments, Python source, or Resolve method names.
-6. Run `cargo test --all-targets` for fixtures. Run the CLI separately only when a live, read-only operator check is intended.
+6. Run `cargo test --locked --all-targets` for fixtures and process boundaries. Run the CLI separately only when a live, read-only operator check is intended.
 
 This branch does not modify `docs/development/macos-director-acceptance-matrix.md`; the sole assembly task can update broader acceptance tracking after merging.

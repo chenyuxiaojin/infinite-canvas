@@ -101,6 +101,21 @@ where
                 "DaVinci Resolve returned an unsupported response to the read-only scripting probe.",
                 facts(&discovery, running, None, false, false),
             ),
+            Err(RuntimeFailure::TimedOut) => report(
+                ProviderStatus::Error,
+                "The DaVinci Resolve read-only scripting probe timed out and was terminated.",
+                facts(&discovery, running, None, false, false),
+            ),
+            Err(RuntimeFailure::StdoutLimitExceeded) => report(
+                ProviderStatus::Error,
+                "The DaVinci Resolve read-only scripting probe exceeded its stdout safety limit and was terminated.",
+                facts(&discovery, running, None, false, false),
+            ),
+            Err(RuntimeFailure::StderrLimitExceeded) => report(
+                ProviderStatus::Error,
+                "The DaVinci Resolve read-only scripting probe exceeded its stderr safety limit and was terminated.",
+                facts(&discovery, running, None, false, false),
+            ),
             Err(_) => report(
                 ProviderStatus::Error,
                 "The DaVinci Resolve read-only scripting probe failed unexpectedly.",

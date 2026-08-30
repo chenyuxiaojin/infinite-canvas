@@ -98,6 +98,15 @@ where
                 "The Eagle read-only probe failed unexpectedly.",
                 facts(installed, running, false, false),
             ),
+            Err(
+                RuntimeFailure::TimedOut
+                | RuntimeFailure::StdoutLimitExceeded
+                | RuntimeFailure::StderrLimitExceeded,
+            ) => report(
+                ProviderStatus::Error,
+                "The Eagle read-only probe crossed a runtime safety boundary.",
+                facts(installed, running, false, false),
+            ),
         }
     }
 
