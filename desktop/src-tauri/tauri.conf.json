@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "无限画布",
+  "version": "0.5.5",
+  "identifier": "com.chenyuxiaojin.infinitecanvas",
+  "build": {
+    "beforeBuildCommand": "bun run stage",
+    "frontendDist": "../placeholder"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "externalBin": [
+      "binaries/infinite-canvas-api",
+      "binaries/node"
+    ],
+    "resources": {
+      "resources/licenses/": "licenses/",
+      "resources/web/": "web/"
+    },
+    "icon": ["icons/icon.icns"]
+  }
+}

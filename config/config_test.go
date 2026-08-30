@@ -31,3 +31,19 @@ func TestNormalizeDockerSQLiteDSNLeavesLocalPathWithoutMountedDataDir(t *testing
 		t.Fatalf("DatabaseDSN = %q, want relative local path", Cfg.DatabaseDSN)
 	}
 }
+
+func TestListenAddressPreservesDefaultNetworkBinding(t *testing.T) {
+	Cfg = Config{Port: "8080"}
+
+	if got := ListenAddress(); got != ":8080" {
+		t.Fatalf("ListenAddress() = %q, want %q", got, ":8080")
+	}
+}
+
+func TestListenAddressSupportsDesktopLoopbackBinding(t *testing.T) {
+	Cfg = Config{BindHost: " 127.0.0.1 ", Port: "3101"}
+
+	if got := ListenAddress(); got != "127.0.0.1:3101" {
+		t.Fatalf("ListenAddress() = %q, want %q", got, "127.0.0.1:3101")
+	}
+}

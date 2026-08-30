@@ -40,16 +40,16 @@
 
 | ID | 通过标准 | 状态 | 证据/复现入口 |
 | --- | --- | --- | --- |
-| P1.1 | Tauri 2 启动现有画布并生成真实 macOS `.app` | 待验证 | 记录 Tauri/Rust/Node 版本、开发启动命令、bundle 路径、`file` 与 `codesign -dv` 摘要 |
-| P1.2 | 无公网服务器时可打开画布并管理本地项目 | 待验证 | 断公网或阻断外部调用后，验证首页、画布、新建/保存/删除项目均可用；不得触发付费 Provider |
-| P1.3 | 开发/生产资源路径、退出重启、数据持久化通过 | 待验证 | 分别验证 dev 与打包 `.app`；记录数据库/项目目录位置；退出后重新启动并比对项目数据 |
-| P1.4 | React 网页层仍可单独构建 | 待验证 | `web` 原始构建命令退出码为 0，并记录产物与 Git 提交 |
+| P1.1 | Tauri 2 启动现有画布并生成真实 macOS `.app` | 通过 | Tauri Rust `2.11.5`、CLI `2.11.4`、Rust `1.92.0`、Node `24.12.0`；`PATH="/Users/chenhuajin/.cargo/bin:$PATH" bun run tauri build --bundles app` 成功生成 `desktop/src-tauri/target/release/bundle/macos/无限画布.app`，并可用 `open` 启动。主程序、Go、Node 均经 `file` 确认为 arm64 Mach-O；主程序 SHA-256 `d1425e8dcd4806970bc8ed1aeebae4c7348efe7ca5f8b5ebb4d812370b79a7a5` |
+| P1.2 | 无公网服务器时可打开画布并管理本地项目 | 通过 | App 内只由 Node `127.0.0.1:3100` 与 Go `127.0.0.1:3101` 监听；以无效外部代理并对 `127.0.0.1,localhost` 直连的进程环境启动后，首页、`/api/health`、画布库和已保存项目均可用，节点 `P1 桌面重启持久化 bdc1e556` 可读取；未调用任何生成 Provider |
+| P1.3 | 开发/生产资源路径、退出重启、数据持久化通过 | 通过 | 删除忽略的暂存资源后，`PATH="/Users/chenhuajin/.cargo/bin:$PATH" bun run dev` 会先重新暂存再启动 debug App，两个回环服务与动态画布路由均为 HTTP 200；生产 `.app` 新建项目 ID `10tinFLXxfwOwlc1r583o` 和文本节点后以 Cmd+Q 退出，重启及最终重建 `.app` 后项目、1 个节点、0 条连线和文本均恢复。后端数据在 `~/Library/Application Support/com.chenyuxiaojin.infinitecanvas/`，画布 IndexedDB 在 `~/Library/WebKit/com.chenyuxiaojin.infinitecanvas/`；截图 SHA-256 `01f0b2a0d6537c4a0a37e8a33c29b171a95567b849ce338adbd9eaacd317be1e`，本机证据在忽略目录 `data/p1-evidence/` |
+| P1.4 | React 网页层仍可单独构建 | 通过 | `web` 的 `bun run build` 多次独立成功，Next 16.2.9 仍生成 19 个页面/路由，包括动态 `/api/[...path]` 与 `/canvas/[id]`；桌面层复用 standalone 产物，未改 React 业务源码 |
 
 ### P1 事实、推断、未知
 
-- 事实：上游网页层是 Next.js 16/React 19，后端是 Go/Gin/GORM/SQLite。
-- 推断：Tauri 生产包若直接加载 Next standalone 服务，需要 sidecar/生命周期管理；若使用静态导出，则需先证明现有动态路由和 API 代理不受损。
-- 未知：现有 Next 路由能否无改动静态导出、Go 服务是否必须作为桌面 sidecar、正式产品名与图标。
+- 事实：Tauri 以固定参数启动打包的 Node standalone 与 Go sidecar，WebView 只允许导航到 `http://127.0.0.1:3100`；capability 没有 shell 权限。Go 新增可选 `BIND_HOST`，默认仍保持原有 `:PORT` 网络行为，桌面壳才显式绑定回环地址。端口被占用时 App 会在启动任何 sidecar 前输出明确错误并以状态 1 退出。Node v24.12.0 许可证随 App 打包，未写入凭据。
+- 推断：保留 Next/Go 并由 Tauri 管理生命周期，已经满足 P1 的浏览器复用和本地桌面资源路径；P2 的独立 Rust 模块可在审查后通过受限 Tauri IPC 接入，无需把 React 或 Go 整体重写。
+- 未知：当前只生成 Apple Silicon arm64 App，Intel/universal 发行尚未处理；正式产品名和新图标尚未选择，P1 只沿用上游“无限画布”和现有 Logo；Developer ID、Hardened Runtime、公证、DMG 与干净安装仍属于 P4。当前未提供签名身份时 bundle 显示 ad-hoc，`codesign --verify --deep --strict` 退出 1，不得把它当作可分发签名。
 
 ## P2 Rust 本地执行核心（框架与只读探测）
 

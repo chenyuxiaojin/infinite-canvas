@@ -1,0 +1,5 @@
+/node_modules/
+/src-tauri/binaries/
+/src-tauri/resources/web/
+/src-tauri/target/
+/src-tauri/gen/schemas/

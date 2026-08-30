@@ -1,0 +1,13 @@
+{
+  "name": "infinite-canvas-desktop",
+  "version": "0.5.5",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev-desktop.mjs",
+    "stage": "node scripts/prepare-desktop.mjs",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}
