@@ -33,6 +33,7 @@
 
 - [待测试](progress/pending-test.md)
 - [TODO](progress/todo.md)
+- [macOS 桌面导演台验收矩阵](development/macos-director-acceptance-matrix.md)
 
 ## 说明
 
