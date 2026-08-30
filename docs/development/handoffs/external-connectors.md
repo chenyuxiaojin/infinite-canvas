@@ -35,7 +35,7 @@ Production code permits only these calls:
 1. `/usr/bin/pgrep -x Eagle`
 2. `/usr/bin/pgrep -x Resolve`
 3. `GET http://127.0.0.1:41595/api/v2/library/info`, with an 800 ms timeout and a 64 KiB response limit
-4. `/usr/bin/python3 <crate>/src/resolve_probe.py` with a cleared environment and only fixed module/library environment keys populated from standard Resolve installation candidates. The direct child has a 3 second deadline and separate 16 KiB stdout/stderr limits; timeout or overflow terminates and reaps it.
+4. `/usr/bin/python3 -c <compile-time embedded resolve_probe.py>` with a cleared environment and only fixed module/library environment keys populated from standard Resolve installation candidates. The source is embedded into the Rust binary so a packaged app does not depend on the build machine checkout. The direct child has a 3 second deadline and separate 16 KiB stdout/stderr limits; timeout or overflow terminates and reaps it.
 
 The Resolve bridge invokes only these documented read methods:
 

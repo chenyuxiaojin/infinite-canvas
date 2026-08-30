@@ -19,7 +19,7 @@ const EAGLE_LIBRARY_INFO_URL: &str = "http://127.0.0.1:41595/api/v2/library/info
 const MAX_EAGLE_RESPONSE_BYTES: u64 = 64 * 1024;
 const PGRP_BIN: &str = "/usr/bin/pgrep";
 const PYTHON_BIN: &str = "/usr/bin/python3";
-const RESOLVE_BRIDGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/resolve_probe.py");
+const RESOLVE_BRIDGE_SOURCE: &str = include_str!("resolve_probe.py");
 const RESOLVE_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const RESOLVE_STDOUT_LIMIT_BYTES: usize = 16 * 1024;
 const RESOLVE_STDERR_LIMIT_BYTES: usize = 16 * 1024;
@@ -75,14 +75,16 @@ impl DaVinciRuntime for SystemDaVinciRuntime {
         let paths = resolve_paths();
         let module = paths.module.ok_or(RuntimeFailure::InvalidResponse)?;
         let library = paths.library.ok_or(RuntimeFailure::InvalidResponse)?;
-        if !Path::new(PYTHON_BIN).is_file() || !Path::new(RESOLVE_BRIDGE).is_file() {
+        if !Path::new(PYTHON_BIN).is_file() {
             return Err(RuntimeFailure::InvalidResponse);
         }
 
         // This is the only DaVinci command. The executable, script, arguments and
         // environment keys are fixed; paths come only from standard candidates below.
+        // The source is embedded at compile time so a packaged app never depends on
+        // the build machine's crate checkout.
         let mut child = Command::new(PYTHON_BIN)
-            .arg(RESOLVE_BRIDGE)
+            .args(["-c", RESOLVE_BRIDGE_SOURCE])
             .env_clear()
             .env("INFINITE_CANVAS_RESOLVE_MODULE", module)
             .env("RESOLVE_SCRIPT_LIB", library)
@@ -490,5 +492,21 @@ mod tests {
 
         assert_eq!(failure, RuntimeFailure::StderrLimitExceeded);
         assert!(child.try_wait().expect("child state should read").is_some());
+    }
+
+    #[test]
+    fn embedded_resolve_bridge_contains_only_the_fixed_read_contract() {
+        for method in [
+            "scriptapp(\"Resolve\")",
+            "GetVersionString()",
+            "GetProjectManager()",
+            "GetCurrentProject()",
+            "GetCurrentTimeline()",
+        ] {
+            assert!(RESOLVE_BRIDGE_SOURCE.contains(method));
+        }
+        for denied in ["SaveProject", "StartRendering", "AddItemListToMediaPool"] {
+            assert!(!RESOLVE_BRIDGE_SOURCE.contains(denied));
+        }
     }
 }

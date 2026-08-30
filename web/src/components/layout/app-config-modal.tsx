@@ -4,6 +4,7 @@ import { App, Button, Form, Input, Modal, Segmented, Select, Switch } from "antd
 import { useEffect, useState } from "react";
 
 import { ChannelModelSelectorModal } from "@/components/channel-model-selector-modal";
+import { DesktopRuntimePanel } from "@/components/layout/desktop-runtime-panel";
 import { GrokTtsVoiceSelect } from "@/components/grok-tts-voice-select";
 import { ModelPicker } from "@/components/model-picker";
 import { fetchImageModels } from "@/services/api/image";
@@ -300,6 +301,7 @@ export function AppConfigModal() {
             }
         >
             <div className="pt-1">
+                <DesktopRuntimePanel active={isConfigOpen} />
                 <Form layout="vertical" requiredMark={false}>
                     {allowCustomChannel && canUseRemoteChannel ? (
                         <Form.Item label="渠道模式" className="mb-5">

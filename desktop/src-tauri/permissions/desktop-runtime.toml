@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "desktop-runtime"
+description = "Allow the fixed loopback canvas to use the closed desktop probe and deterministic acceptance-task API."
+commands.allow = [
+  "probe_desktop_runtime",
+  "generate_desktop_test_clip",
+  "desktop_task_status",
+  "cancel_desktop_task",
+]

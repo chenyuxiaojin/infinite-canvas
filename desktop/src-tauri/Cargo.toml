@@ -6,7 +6,7 @@ authors = ["chenyuxiaojin and infinite-canvas contributors"]
 license = "MIT"
 repository = "https://github.com/chenyuxiaojin/infinite-canvas"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.85"
 
 [lib]
 name = "infinite_canvas_desktop_lib"
@@ -16,5 +16,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
+external-connectors = { package = "infinite-canvas-external-connectors", path = "../../integrations/external-connectors-rust" }
+local-ai-audio = { path = "../../integrations/local-ai-audio-rust" }
+local-executor = { package = "infinite-canvas-local-executor", path = "../../integrations/local-executor-rust" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tauri = { version = "2.11.5", features = [] }
 tauri-plugin-shell = "2.3.5"

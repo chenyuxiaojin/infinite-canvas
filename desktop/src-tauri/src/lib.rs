@@ -9,6 +9,10 @@ use std::{
 use tauri::{App, AppHandle, Manager, RunEvent, Runtime, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
+mod runtime;
+
+use runtime::DesktopRuntime;
+
 const WEB_PORT: u16 = 3100;
 const API_PORT: u16 = 3101;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -51,6 +55,12 @@ fn stop_sidecars<R: Runtime>(app: &AppHandle<R>) {
     let mut children = sidecars.0.lock().unwrap();
     for child in children.drain(..).rev() {
         let _ = child.kill();
+    }
+}
+
+fn stop_desktop_runtime<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(runtime) = app.try_state::<DesktopRuntime>() {
+        runtime.shutdown();
     }
 }
 
@@ -103,6 +113,7 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
         .map_err(|error| format!("cannot create app data directory: {error}"))?;
     std::fs::create_dir_all(&log_dir)
         .map_err(|error| format!("cannot create app log directory: {error}"))?;
+    app.manage(DesktopRuntime::initialize(&app_data_dir));
     if !web_dir.join("server.js").is_file() {
         return Err(format!(
             "packaged Next.js server is missing at {}",
@@ -161,8 +172,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(Sidecars::default())
+        .invoke_handler(tauri::generate_handler![
+            runtime::probe_desktop_runtime,
+            runtime::generate_desktop_test_clip,
+            runtime::desktop_task_status,
+            runtime::cancel_desktop_task,
+        ])
         .setup(|app| {
             if let Err(error) = start_desktop(app) {
+                stop_desktop_runtime(app.handle());
                 stop_sidecars(app.handle());
                 eprintln!("desktop startup failed: {error}");
                 std::process::exit(1);
@@ -173,6 +191,7 @@ pub fn run() {
         .expect("error while building the Tauri application")
         .run(|app, event| {
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                stop_desktop_runtime(app);
                 stop_sidecars(app);
             }
         });

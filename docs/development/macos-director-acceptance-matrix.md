@@ -55,19 +55,21 @@
 
 | ID | 通过标准 | 状态 | 证据/复现入口 |
 | --- | --- | --- | --- |
-| P2.1 | 只通过 Tauri IPC 或 `127.0.0.1` 受控接口通信，不向公网暴露本机控制端口 | 待验证 | 检查监听地址、端口和 Tauri capabilities；用 `lsof`/`netstat` 留证 |
-| P2.2 | 命令/路径采用白名单或用户明确选择，画布不能执行任意 shell | 待验证 | 单元测试拒绝未知命令、相对越界路径、未选择路径、shell 元字符和不在白名单的二进制 |
-| P2.3 | FFmpeg 版本探测和确定性短样例处理通过，输出可完整解码 | 待验证 | 生成测试图/测试音的短样例；记录命令参数；`ffprobe`、`ffmpeg -xerror -i ... -f null -` 通过及 SHA-256 |
-| P2.4 | Eagle 健康检查和只读探测，不修改素材 | 待验证 | 记录连接状态和只读响应；操作前后素材数量/目标记录保持不变 |
-| P2.5 | 达芬奇可用性/连接只读探测，不改工程、不渲染 | 待验证 | 记录应用/脚本接口可用性和只读信息；不打开写事务，不调用渲染 |
-| P2.6 | IndexTTS/VoxCPM 服务与模型健康检查；仅真实可用时生成短测试音频并完整解码、人工可播放 | 待验证 | 分开记录进程、端口、模型加载、生成退出状态、媒体探测和完整解码；HTTP 200 单独标为“服务可达”，不能算端到端通过 |
-| P2.7 | 本地模型统一 Provider 接口；未连接时明确显示不可用状态 | 待验证 | Provider 状态模型、错误映射和 UI 状态测试；不得伪造成功 |
+| P2.1 | 只通过 Tauri IPC 或 `127.0.0.1` 受控接口通信，不向公网暴露本机控制端口 | 通过 | 桌面运行时仅注册 `probe/generate/status/cancel` 四个 Tauri IPC；capability 只向固定 `http://127.0.0.1:3100/*` 放行这四个命令与 `core:default`，无 shell 权限。真实 `.app` 的自有监听仅为 Node `127.0.0.1:3100` 与 Go `127.0.0.1:3101`，未新增控制端口；`lsof -nP -a -p <app/sidecar pid> -iTCP -sTCP:LISTEN` 现场复核 |
+| P2.2 | 命令/路径采用白名单或用户明确选择，画布不能执行任意 shell | 通过 | IPC 请求没有命令、可执行路径、URL、Host、端口或参数数组字段；桌面短样例只写应用支持目录内注册根 `desktop-acceptance/desktop-test-clip.mp4`。执行核心 17 个测试覆盖路径穿越、符号链接越界、shell 元字符、输出冲突、取消/超时和持久化故障；桌面 4 个测试覆盖固定请求、隐私字段和回环导航；`cargo clippy --locked --all-targets -- -D warnings` 通过 |
+| P2.3 | FFmpeg 版本探测和确定性短样例处理通过，输出可完整解码 | 通过 | 真实 `.app` 面板识别 FFmpeg/ffprobe 8.1；从按钮生成任务 `f1aa691f-f2e6-473d-9ca1-2fc7adbc55dd`，产物在应用支持目录，1.000 秒、138603 bytes、320x180 MPEG-4 + 48 kHz 单声道 AAC；`ffprobe` 和 `ffmpeg -v error -xerror -i ... -map 0 -f null -` 通过，SHA-256 `d3bf7ba437acab289ed29638f3e481004c5828af84525c4e1d1c76d47fe1dddd`。退出重启后再次提交复用同一任务，媒体数和 journal 任务数均仍为 1，mtime/hash 不变 |
+| P2.4 | Eagle 健康检查和只读探测，不修改素材 | 通过 | 真实 `.app` 与独立 CLI 均返回 `available`、V2 API 可达且已有 library context。生产 allowlist 只请求 `GET http://127.0.0.1:41595/api/v2/library/info`，800 ms 超时、64 KiB 上限；报告只保留上下文布尔值，没有请求 item/tag/folder/file 或任何写端点，也没有保留库名、路径和素材信息 |
+| P2.5 | 达芬奇可用性/连接只读探测，不改工程、不渲染 | 通过 | 真实 `.app` 返回“已安装但未运行”；标准脚本模块与库存在。Provider 在确认进程未运行后即停止，没有启动 Resolve、没有执行 bridge、没有打开/修改工程或渲染；运行中 bridge 仅含五个固定读取方法并有 3 秒/每流 16 KiB 边界，21 个连接器测试通过。实时版本/工程/时间线状态因 Resolve 未运行而保持未知，不伪造连接成功 |
+| P2.6 | IndexTTS/VoxCPM 服务与模型健康检查；仅真实可用时生成短测试音频并完整解码、人工可播放 | 通过 | 独立 Provider 探测确认 IndexTTS-2.5 16/16、VoxCPM2 5/5 模型标记及 Python 3.11.13；服务实时均为 `not_running`，未把 HTTP/界面当 E2E。显式批准安装路径后两套本地模型各执行一次固定短句 smoke，SHA-256 分别为 `010ff48713a84b18db54db38a732c9ab5fe61246c5acdd152e73bb93862b0559`、`eabb115d87ac173f8fa08deeb1eb23fe3e2a64d28f14a71e1e216290b04a82a2`；均有非零音量、`ffprobe` 与完整 `ffmpeg -xerror` 通过，且用 macOS `afplay` 各播放一次退出 0。没有 Fish 111、云端或付费调用 |
+| P2.7 | 本地模型统一 Provider 接口；未连接时明确显示不可用状态 | 通过 | 两套声音 Provider 使用协议版本 1 和统一 `not_found/discovered/ready/not_running/model_missing/incompatible/error` 状态；真实 `.app` 面板显示 FFmpeg/Eagle“可用”、Resolve/IndexTTS/VoxCPM“未运行”，声音卡片明确显示“安装路径未授权”，不读取 Documents 安装目录、不显示假成功。普通探测的 `end_to_end` 固定为 `not_run`，只由真实 smoke 报告 `passed` |
 
 ### P2 事实、推断、未知
 
-- 事实：本机已有 FFmpeg 8.1、Rust 1.92；上游网页目前允许浏览器本地保存 AI API Key 并直连模型。
-- 推断：桌面本地执行需要把“生成请求”和“受控工具任务”分离，避免现有画布配置演变为任意系统命令入口。
-- 未知：Eagle/达芬奇/IndexTTS/VoxCPM 当前实时运行状态与稳定接口；这些都必须在阶段开始时重新探测。
+- 事实：三个独立模块经回归修复、独立复审后合入；执行核心 17 个单元测试加 1 个真实 FFmpeg 测试、连接器 21 个测试、声音 Provider 10 个测试、桌面接线 4 个测试全部通过，相关 Clippy 均以 `-D warnings` 通过。真实 `.app` 已完成状态探测、固定样例生成、完整解码、退出重启恢复和重复任务防护。
+- 事实：首次 GUI 验收准确暴露了两处总装问题：自定义命令未加入 Tauri ACL，以及打包 App 自动扫描 HOME 后在 macOS Documents 隐私边界阻塞。前者已收窄为四命令权限；后者改为仅探测固定回环服务，安装目录一律等用户通过原生选择器授权，界面明确显示“安装路径未授权”。
+- 事实：Eagle 实时只读健康检查可用；Resolve 已安装但未运行；IndexTTS/VoxCPM 本地服务均未运行。两套声音模型的直接本地 smoke 已真实通过，但桌面面板不会把这份历史 E2E 证据冒充当前服务就绪。
+- 推断：当前封闭 IPC、应用自有输出根、结构化任务状态和 fail-closed Provider 状态足以作为 P3 画布任务回填的底座；正式项目媒体根仍必须来自原生目录选择或应用自有项目目录。
+- 未知：Resolve 运行时的实时脚本连接、当前工程/时间线状态和 3 秒边界尚未在本机实连；两套声音服务的 Gradio/API 协议与长期稳定性未接入；声音自然度没有主观质量验收。当前 FFmpeg 使用受信任的本机安装，随 App 捆绑、逐层签名和公证留到 P4。
 
 ## P3 真实桌面工作流验收
 
