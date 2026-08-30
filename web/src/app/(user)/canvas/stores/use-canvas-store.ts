@@ -6,6 +6,7 @@ import { localForageStorage } from "@/lib/localforage-storage";
 import { listCanvasProjects, saveCanvasProject, syncCanvasProjects } from "@/services/api/canvas-tasks";
 import { fetchUserConfig } from "@/services/api/user-config";
 import { useUserStore } from "@/stores/use-user-store";
+import { isDesktopRuntime, listDesktopCanvasProjects, saveDesktopCanvasProject } from "@/services/desktop-runtime";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAgentConfig, CanvasAssistantSession, CanvasConnection, CanvasNodeData, CanvasPendingAgentRequest, ViewportTransform } from "../types";
 
@@ -80,6 +81,7 @@ function waitForUserStoreHydration() {
 }
 
 function queueProjectSave(project: CanvasProject) {
+    const desktop = isDesktopRuntime();
     const token = useUserStore.getState().token;
     const syncEnabled = accountCanvasSyncEnabled;
     const previous = projectSaveTimers.get(project.id);
@@ -89,6 +91,10 @@ function queueProjectSave(project: CanvasProject) {
         project.id,
         setTimeout(() => {
             projectSaveTimers.delete(project.id);
+            if (desktop) {
+                void saveDesktopCanvasProject(project).catch(() => undefined);
+                return;
+            }
             if (
                 !token ||
                 !syncEnabled ||
@@ -235,6 +241,42 @@ const canvasStorage: PersistStorage<CanvasStore> = {
             version: 0,
         } as StorageValue<CanvasStore>;
         const localHasData = localProjects.length > 0;
+
+        if (isDesktopRuntime()) {
+            try {
+                const desktopProjects = await listDesktopCanvasProjects<CanvasProject>();
+                const desktopById = new Map(
+                    desktopProjects.map((project) => [project.id, project]),
+                );
+                const projects = mergeCanvasProjects(
+                    desktopProjects,
+                    localProjects,
+                );
+                await Promise.all(
+                    localProjects
+                        .filter((project) => {
+                            const desktop = desktopById.get(project.id);
+                            return !desktop || Date.parse(project.updatedAt || "") > Date.parse(desktop.updatedAt || "");
+                        })
+                        .map((project) => saveDesktopCanvasProject(project)),
+                );
+                if (projects.length > 0 || localParsed) {
+                    const nextState = { projects };
+                    const parsed = {
+                        state: nextState,
+                        version: 0,
+                    } as StorageValue<CanvasStore>;
+                    queuedPersistState = nextState;
+                    await localForageStorage.setItem(
+                        name,
+                        JSON.stringify(parsed),
+                    );
+                    return parsed;
+                }
+            } catch (error) {
+                console.error("Failed to hydrate desktop canvas projects", error);
+            }
+        }
 
         if (token) {
             try {

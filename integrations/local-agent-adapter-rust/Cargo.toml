@@ -1,0 +1,35 @@
+[package]
+name = "infinite-canvas-local-agent-adapter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Loopback bridge and CLI for local agents using Infinite Canvas"
+
+[lib]
+name = "local_agent_adapter"
+
+[[bin]]
+name = "infinite-canvas"
+path = "src/bin/infinite-canvas.rs"
+
+[dependencies]
+axum = "0.7.9"
+base64 = "0.22.1"
+clap = { version = "4.5.27", features = ["derive"] }
+getrandom = "0.3.1"
+http = "1.2.0"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.138"
+sha2 = "0.10.8"
+subtle = "2.6.1"
+thiserror = "2.0.11"
+time = { version = "=0.3.37", features = ["formatting", "parsing"] }
+tokio = { version = "1.43.0", features = ["macros", "net", "rt", "sync"] }
+ureq = { version = "2.12.1", features = ["json"] }
+url = "2.5.4"
+
+[dev-dependencies]
+assert_cmd = "2.0.16"
+tempfile = "3.15.0"
