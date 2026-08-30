@@ -4,6 +4,7 @@ import { isGeminiConfig, isGeminiTtsModel } from "@/lib/gemini";
 import { supportsVideoAudioGeneration } from "@/lib/video-model-capabilities";
 import type { AiConfig } from "@/stores/use-config-store";
 import { CanvasNodeType, type CanvasAgentState, type CanvasConnection, type CanvasNodeData } from "../types";
+import type { CanvasOperationAuditEntry, CanvasOperationState } from "../protocol/canvas-operation-protocol";
 
 export type CanvasAgentContextNode = {
     id: string;
@@ -21,6 +22,9 @@ export type CanvasAgentContextNode = {
     taskId?: string;
     error?: string;
     groupId?: string;
+    lockedByHuman: boolean;
+    revision: number;
+    lastEditedBy?: "human" | "agent" | "system";
 };
 
 export type CanvasAgentContext = {
@@ -29,6 +33,7 @@ export type CanvasAgentContext = {
         title: string;
         nodeCount: number;
         connectionCount: number;
+        revision: number;
     };
     agentState: CanvasAgentState;
     selectedNodeIds: string[];
@@ -70,6 +75,7 @@ type BuildCanvasAgentContextInput = {
     selectedNodeIds: Iterable<string>;
     config: AiConfig;
     agentState: CanvasAgentState;
+    operationState: CanvasOperationState;
 };
 
 const MAX_CONTEXT_NODES = 120;
@@ -77,11 +83,7 @@ const MAX_TEXT_LENGTH = 4000;
 
 export function buildCanvasAgentContext(input: BuildCanvasAgentContextInput): CanvasAgentContext {
     const selectedNodeIds = Array.from(input.selectedNodeIds);
-    const prioritizedIds = new Set<string>([
-        ...selectedNodeIds,
-        ...input.agentState.approvedNodeIds,
-        ...input.agentState.referenceNodeIds,
-    ]);
+    const prioritizedIds = new Set<string>([...selectedNodeIds, ...input.agentState.approvedNodeIds, ...input.agentState.referenceNodeIds]);
     input.connections.forEach((connection) => {
         if (prioritizedIds.has(connection.fromNodeId) || prioritizedIds.has(connection.toNodeId)) {
             prioritizedIds.add(connection.fromNodeId);
@@ -92,10 +94,7 @@ export function buildCanvasAgentContext(input: BuildCanvasAgentContextInput): Ca
         if (node.metadata?.status === "loading" || node.metadata?.status === "error") prioritizedIds.add(node.id);
     });
 
-    const orderedNodes = [
-        ...input.nodes.filter((node) => prioritizedIds.has(node.id)),
-        ...input.nodes.filter((node) => !prioritizedIds.has(node.id)),
-    ].slice(0, MAX_CONTEXT_NODES);
+    const orderedNodes = [...input.nodes.filter((node) => prioritizedIds.has(node.id)), ...input.nodes.filter((node) => !prioritizedIds.has(node.id))].slice(0, MAX_CONTEXT_NODES);
     const includedIds = new Set(orderedNodes.map((node) => node.id));
     const videoModel = input.config.videoModel || input.config.model;
     const audioModel = input.config.audioModel;
@@ -107,10 +106,11 @@ export function buildCanvasAgentContext(input: BuildCanvasAgentContextInput): Ca
             title: input.projectTitle,
             nodeCount: input.nodes.length,
             connectionCount: input.connections.length,
+            revision: input.operationState.revision,
         },
         agentState: input.agentState,
         selectedNodeIds,
-        nodes: orderedNodes.map(summarizeNode),
+        nodes: orderedNodes.map((node) => summarizeNode(node, input.operationState)),
         connections: input.connections.filter((connection) => includedIds.has(connection.fromNodeId) && includedIds.has(connection.toNodeId)),
         generation: {
             textModel: input.config.textModel || input.config.model,
@@ -125,7 +125,14 @@ export function buildCanvasAgentContext(input: BuildCanvasAgentContextInput): Ca
             videoSeconds: input.config.videoSeconds,
             videoGenerateAudio: input.config.videoGenerateAudio,
             videoSupportsAudio: supportsVideoAudioGeneration(videoModel),
-            audioVoice: isGeminiTtsModel(audioModel) && isGeminiConfig({ ...input.config, model: audioModel }, audioModel) ? input.config.geminiTtsVoice : isGlmTtsModel(audioModel) ? input.config.glmTtsVoice : grokTts ? input.config.grokTtsVoice : input.config.audioVoice,
+            audioVoice:
+                isGeminiTtsModel(audioModel) && isGeminiConfig({ ...input.config, model: audioModel }, audioModel)
+                    ? input.config.geminiTtsVoice
+                    : isGlmTtsModel(audioModel)
+                      ? input.config.glmTtsVoice
+                      : grokTts
+                        ? input.config.grokTtsVoice
+                        : input.config.audioVoice,
             audioLanguage: grokTts ? input.config.grokTtsLanguage : "",
             audioFormat: isGlmTtsModel(audioModel) ? input.config.glmTtsFormat : grokTts ? input.config.grokTtsFormat : input.config.audioFormat,
             audioSpeed: isGlmTtsModel(audioModel) ? input.config.glmTtsSpeed : grokTts ? input.config.grokTtsSpeed : input.config.audioSpeed,
@@ -151,10 +158,11 @@ export function serializeCanvasAgentContext(context: CanvasAgentContext) {
     return JSON.stringify(context);
 }
 
-function summarizeNode(node: CanvasNodeData): CanvasAgentContextNode {
+function summarizeNode(node: CanvasNodeData, operationState: CanvasOperationState): CanvasAgentContextNode {
     const content = node.metadata?.content || "";
     const isText = node.type === CanvasNodeType.Text;
     const mediaUrl = !isText && content && !content.startsWith("data:") ? content : undefined;
+    const lastEdit = operationState.audit.findLast((entry) => entry.result.ok && auditTouchesNode(entry, node.id));
     return {
         id: node.id,
         type: node.type,
@@ -171,7 +179,23 @@ function summarizeNode(node: CanvasNodeData): CanvasAgentContextNode {
         taskId: mediaTaskId(node) || undefined,
         error: node.metadata?.errorDetails,
         groupId: node.metadata?.groupId,
+        lockedByHuman: Boolean(operationState.locks[node.id]),
+        revision: lastEdit?.result.revision || 0,
+        lastEditedBy: lastEdit?.batch.actor,
     };
+}
+
+function auditTouchesNode(entry: CanvasOperationAuditEntry, nodeId: string) {
+    if (entry.result.error?.nodeId === nodeId) return true;
+    if (entry.result.operationResults.some((result) => result.nodeId === nodeId || result.nodeIds?.includes(nodeId))) return true;
+    return entry.batch.operations.some((operation) => {
+        if (operation.type === "node.create") return operation.node.id === nodeId;
+        if (operation.type === "node.update" || operation.type === "node.delete" || operation.type === "lock.set") return operation.nodeId === nodeId;
+        if (operation.type === "connection.create") return operation.connection.fromNodeId === nodeId || operation.connection.toNodeId === nodeId;
+        if (operation.type === "layout.apply") return Object.prototype.hasOwnProperty.call(operation.positions, nodeId);
+        if (operation.type === "task.start") return operation.task.nodeId === nodeId;
+        return false;
+    });
 }
 
 function mediaTaskId(node: CanvasNodeData) {

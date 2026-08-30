@@ -80,6 +80,7 @@
 | P3.3 | 失败、取消、重启恢复、重复任务防护和输出冲突都有可验证行为 | 通过 | 执行核心自动测试覆盖验证失败清理 partial、queued/running 取消、哈希阶段取消、进程失败/超时、重启将未完成任务标记失败、并发/串行幂等和 Reject 冲突；真实 `.app` 退出重启后任务仍成功且媒体可用。回灌项目点击“本地测试片”只聚焦既有节点并提示“该画布已保留本地测试片及来源关系”，journal 仍为 2 个任务、媒体仍为 2 个文件。桌面 ZIP 发布测试证明同名目标拒绝覆盖且原字节不变 |
 | P3.4 | 全项目导出/重新导入后节点关系和本地媒体不丢失 | 通过 | 桌面原生保存框导出 `data/p3-evidence/P3-workflow-bedaac2.zip`（忽略目录），ZIP 192945 bytes、SHA-256 `8803df0e961dcdde3f054390b3a1d20083e97823b22a95d8f0ebdb716c97b9b9`，`unzip -t` 通过；含 v3 `projects.json` 与 3 份媒体。回灌后仍为 4 节点/1 连线；内嵌视频/音频/图片 SHA 分别为 `d3bf7ba437acab289ed29638f3e481004c5828af84525c4e1d1c76d47fe1dddd`、`c6b6fb62aa740f601ad8fabd41ea0889087eec458e12aabdfb7d6635164005c3`、`51ceaa223006f44c00831e742b7740e682e2c29ba96312e6b898a523d0e2717e`，均与导出前一致并由 FFmpeg 完整解码。退出重启后回灌项目和三份媒体仍可打开/播放 |
 | P3.5 | 原始资料、选中结果、失败结果和日志边界清楚，不覆盖用户文件 | 通过 | 用户测试图片/音频只作为独立 Blob 存储，不修改源文件；执行结果只发布到 `~/Library/Application Support/com.chenyuxiaojin.infinitecanvas/local-executor/acceptance/` 的哈希化固定文件名，画布只取得二次 SHA 校验后的受限副本。失败 partial 会清理，任务事件不记录路径/参数，导出只能经原生选择写 `.zip` 且 create-new 语义拒绝覆盖；ZIP 清单区分 `projects.json`、各项目 `files/` 和 storageKey |
+| P3.6 | 人工与 Agent 操作同一份画布，人工锁和 revision 冲突保护可见、可测、可撤销 | 通过 | `bun run test:collaboration` 为 9 passed；Next 独立构建通过。Playwright 在 1440×900、`?agent-collab-demo=1` 零付费路径验证 Agent 新建节点、文字状态、影响节点历史、人工锁、revision 2 后阻止旧批次撤销，以及新批次从 2 节点撤销回 1 节点并从 revision 3 更新至 4。未调用模型或修改真实媒体。统一操作核心的 adapter 替换仍列在 handoff。 |
 
 ### P3 事实、推断、未知
 

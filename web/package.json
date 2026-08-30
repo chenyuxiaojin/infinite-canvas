@@ -8,6 +8,8 @@
         "build": "next build",
         "start": "next start",
         "test:canvas-protocol": "bun test tests/canvas-operation-protocol.test.ts tests/canvas-store-operation.test.ts",
+        "test": "bun test",
+        "test:collaboration": "bun test src/app/\\(user\\)/canvas/agent/canvas-collaboration-adapter.test.ts src/app/\\(user\\)/canvas/components/canvas-collaboration-status.test.tsx",
         "format": "prettier --write .",
         "format:check": "prettier --check ."
     },

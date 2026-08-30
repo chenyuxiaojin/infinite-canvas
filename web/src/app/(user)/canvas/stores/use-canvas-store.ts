@@ -73,7 +73,7 @@ function waitForUserStoreHydration() {
     if (useUserStore.persist.hasHydrated()) return Promise.resolve();
 
     return new Promise<void>((resolve) => {
-        let unsubscribe = () => { };
+        let unsubscribe = () => {};
         unsubscribe = useUserStore.persist.onFinishHydration(() => {
             unsubscribe();
             resolve();
@@ -95,12 +95,7 @@ function queueProjectSave(project: CanvasProject) {
         project.id,
         setTimeout(() => {
             projectSaveTimers.delete(project.id);
-            if (
-                !token ||
-                !syncEnabled ||
-                !accountCanvasSyncEnabled ||
-                useUserStore.getState().token !== token
-            ) {
+            if (!token || !syncEnabled || !accountCanvasSyncEnabled || useUserStore.getState().token !== token) {
                 return;
             }
             void saveCanvasProject(token, project).catch(() => undefined);
@@ -117,40 +112,19 @@ function cancelProjectSaves(ids: string[]) {
     });
 }
 
-async function reconcileCanvasProjects(
-    token: string,
-    remoteProjects: CanvasProject[],
-    localProjects: CanvasProject[],
-) {
-    const remoteById = new Map(
-        remoteProjects.map((project) => [project.id, project]),
-    );
-    const missingProjects = localProjects.filter(
-        (project) => !remoteById.has(project.id),
-    );
-    const existingLocalProjects = localProjects.filter((project) =>
-        remoteById.has(project.id),
-    );
+async function reconcileCanvasProjects(token: string, remoteProjects: CanvasProject[], localProjects: CanvasProject[]) {
+    const remoteById = new Map(remoteProjects.map((project) => [project.id, project]));
+    const missingProjects = localProjects.filter((project) => !remoteById.has(project.id));
+    const existingLocalProjects = localProjects.filter((project) => remoteById.has(project.id));
     const projects = missingProjects.length
         ? await syncCanvasProjects(token, missingProjects)
-            .then((syncedProjects) =>
-                mergeCanvasProjects(
-                    syncedProjects,
-                    existingLocalProjects,
-                ),
-            )
-            .catch(() =>
-                mergeCanvasProjects(remoteProjects, localProjects),
-            )
+              .then((syncedProjects) => mergeCanvasProjects(syncedProjects, existingLocalProjects))
+              .catch(() => mergeCanvasProjects(remoteProjects, localProjects))
         : mergeCanvasProjects(remoteProjects, existingLocalProjects);
 
     localProjects.forEach((project) => {
         const remote = remoteById.get(project.id);
-        if (
-            remote &&
-            Date.parse(project.updatedAt || "") >
-            Date.parse(remote.updatedAt || "")
-        ) {
+        if (remote && Date.parse(project.updatedAt || "") > Date.parse(remote.updatedAt || "")) {
             queueProjectSave(project);
         }
     });
@@ -174,12 +148,8 @@ const canvasStorage: PersistStorage<CanvasStore> = {
 
         if (token) {
             try {
-                const [userConfig, remoteProjects] = await Promise.all([
-                    fetchUserConfig(token),
-                    listCanvasProjects(token),
-                ]);
-                accountCanvasSyncEnabled =
-                    userConfig.syncCapabilities?.userData === true;
+                const [userConfig, remoteProjects] = await Promise.all([fetchUserConfig(token), listCanvasProjects(token)]);
+                accountCanvasSyncEnabled = userConfig.syncCapabilities?.userData === true;
 
                 if (accountCanvasSyncEnabled && localHasData) {
                     const projects = await reconcileCanvasProjects(
@@ -194,10 +164,7 @@ const canvasStorage: PersistStorage<CanvasStore> = {
                         version: 0,
                     } as StorageValue<CanvasStore>;
                     queuedPersistState = nextState;
-                    await localForageStorage.setItem(
-                        name,
-                        JSON.stringify(parsed),
-                    );
+                    await localForageStorage.setItem(name, JSON.stringify(parsed));
                     return parsed;
                 }
 
@@ -211,17 +178,11 @@ const canvasStorage: PersistStorage<CanvasStore> = {
                         version: 0,
                     } as StorageValue<CanvasStore>;
                     queuedPersistState = nextState;
-                    await localForageStorage.setItem(
-                        name,
-                        JSON.stringify(parsed),
-                    );
+                    await localForageStorage.setItem(name, JSON.stringify(parsed));
                     return parsed;
                 }
             } catch (error) {
-                console.error(
-                    "Failed to hydrate canvas projects from remote",
-                    error,
-                );
+                console.error("Failed to hydrate canvas projects from remote", error);
             }
         }
 
@@ -235,10 +196,7 @@ const canvasStorage: PersistStorage<CanvasStore> = {
 
     setItem: (name, value) => {
         const nextState = value.state as PersistedCanvasState;
-        if (
-            queuedPersistState &&
-            queuedPersistState.projects === nextState.projects
-        ) {
+        if (queuedPersistState && queuedPersistState.projects === nextState.projects) {
             return;
         }
         queuedPersistState = nextState;
@@ -310,12 +268,9 @@ export const useCanvasStore = create<CanvasStore>()(
                 queueProjectSave(project);
                 return project.id;
             },
-            openProject: (id) =>
-                get().projects.find((item) => item.id === id) || null,
+            openProject: (id) => get().projects.find((item) => item.id === id) || null,
             renameProject: (id, title) => {
-                const project = get().projects.find(
-                    (item) => item.id === id,
-                );
+                const project = get().projects.find((item) => item.id === id);
                 if (!project) return;
                 const nextProject = {
                     ...project,
@@ -324,18 +279,14 @@ export const useCanvasStore = create<CanvasStore>()(
                     updatedAt: new Date().toISOString(),
                 };
                 set((state) => ({
-                    projects: state.projects.map((item) =>
-                        item.id === id ? nextProject : item,
-                    ),
+                    projects: state.projects.map((item) => (item.id === id ? nextProject : item)),
                 }));
                 queueProjectSave(nextProject);
             },
             deleteProjects: (ids) => {
                 cancelProjectSaves(ids);
                 set((state) => ({
-                    projects: state.projects.filter(
-                        (project) => !ids.includes(project.id),
-                    ),
+                    projects: state.projects.filter((project) => !ids.includes(project.id)),
                 }));
             },
             updateProject: (id, patch) => {
@@ -372,9 +323,7 @@ export const useCanvasStore = create<CanvasStore>()(
                     updatedAt: operations.length ? nextProject.updatedAt : new Date().toISOString(),
                 };
                 set((state) => ({
-                    projects: state.projects.map((item) =>
-                        item.id === id ? nextProject : item,
-                    ),
+                    projects: state.projects.map((item) => (item.id === id ? nextProject : item)),
                 }));
                 queueProjectSave(nextProject);
             },
@@ -408,10 +357,7 @@ export const useCanvasStore = create<CanvasStore>()(
                 const nextState = { projects };
                 queuedPersistState = nextState;
                 set(nextState);
-                await localForageStorage.setItem(
-                    CANVAS_STORE_KEY,
-                    JSON.stringify({ state: nextState, version: 0 }),
-                );
+                await localForageStorage.setItem(CANVAS_STORE_KEY, JSON.stringify({ state: nextState, version: 0 }));
             },
             setSyncEnabled: (enabled) => {
                 accountCanvasSyncEnabled = enabled;
@@ -431,10 +377,7 @@ export const useCanvasStore = create<CanvasStore>()(
     ),
 );
 
-export function mergeCanvasProjects(
-    remoteProjects: CanvasProject[],
-    localProjects: CanvasProject[],
-): CanvasProject[] {
+export function mergeCanvasProjects(remoteProjects: CanvasProject[], localProjects: CanvasProject[]): CanvasProject[] {
     const projects = new Map<string, CanvasProject>();
     [...localProjects, ...remoteProjects].map((project) => migrateCanvasProject(project)).forEach((project) => {
         const previous = projects.get(project.id);

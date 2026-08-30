@@ -149,6 +149,39 @@ export type CanvasConnection = {
     toNodeId: string;
 };
 
+export type CanvasAgentBatchStatus = "success" | "error" | "conflict";
+
+export type CanvasAgentChangeBatch = {
+    id: string;
+    actor: "Canvas Agent";
+    startedAt: string;
+    completedAt: string;
+    summary: string;
+    actionNames: string[];
+    affectedNodeIds: string[];
+    affectedNodeTitles?: Record<string, string>;
+    baseRevision: number;
+    revision: number;
+    status: CanvasAgentBatchStatus;
+    reversible: boolean;
+    error?: string;
+    undoneAt?: string;
+};
+
+export type CanvasCollaborationStatus = {
+    state: "idle" | "running" | "success" | "error" | "conflict";
+    message: string;
+    batchId?: string;
+    affectedNodeIds: string[];
+    updatedAt: string;
+};
+
+export type CanvasCollaborationState = {
+    revision: number;
+    batches: CanvasAgentChangeBatch[];
+    status: CanvasCollaborationStatus;
+};
+
 export type CanvasAssistantReference = {
     id: string;
     type: CanvasNodeType;
@@ -186,17 +219,7 @@ export type CanvasAssistantImage = {
     source?: "asset" | "library";
 };
 
-export type CanvasAgentPhase =
-    | "intake"
-    | "concept"
-    | "script"
-    | "breakdown"
-    | "references"
-    | "storyboard"
-    | "video"
-    | "audio"
-    | "review"
-    | "complete";
+export type CanvasAgentPhase = "intake" | "concept" | "script" | "breakdown" | "references" | "storyboard" | "video" | "audio" | "review" | "complete";
 
 export type CanvasAgentConfig = {
     imageQuality: string;
@@ -216,12 +239,7 @@ export type CanvasAgentState = {
     completedTaskIds: string[];
 };
 
-export type CanvasAgentContent =
-    | string
-    | Array<
-        | { type: "text"; text: string }
-        | { type: "image_url"; image_url: { url: string } }
-    >;
+export type CanvasAgentContent = string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
 
 export type CanvasAgentToolCall = {
     id: string;
@@ -272,14 +290,14 @@ export type SelectionBox = {
 
 export type ContextMenuState =
     | {
-        type: "node";
-        x: number;
-        y: number;
-        nodeId: string;
-    }
+          type: "node";
+          x: number;
+          y: number;
+          nodeId: string;
+      }
     | {
-        type: "connection";
-        x: number;
-        y: number;
-        connectionId: string;
-    };
+          type: "connection";
+          x: number;
+          y: number;
+          connectionId: string;
+      };

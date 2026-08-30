@@ -5,13 +5,14 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
-## 人与 Agent 共用画布协议
+## 人与 Agent 共用画布协议与共编界面
 
 - `CanvasProject` 新增向后兼容的操作状态，本地、远程、ZIP 导入导出仍使用同一工程 JSON。
 - UI 节点/连线改动和内置 Agent 结构操作经由同一 reducer，记录 actor、request ID、project ID、base revision、时间、结果和错误。
 - 重复 request 不重复执行；过期 revision 明确拒绝；Agent 不能改动人工锁定节点；冲突批次原子回滚。
 - 成功 Agent 批次保存可持久化撤销快照；已有后续人工修改时拒绝直接快照恢复，避免覆盖人工结果。
-- 已有自动化契约测试；待 UI 分支补锁定/解锁按钮和历史可视化，待 Agent Bridge 分支把受控 IPC 请求接到公共 store 入口。
+- 共编界面提供 Agent 状态、revision、审计历史、人工锁与最近 Agent 修改提示；界面只映射 `operationState`，不另存 reducer、revision、锁或撤销状态。
+- 自动化覆盖公共协议、Store 与共编状态映射；桌面 Bridge 真实闭环证据见总装 handoff 和统一验收矩阵。
 
 ## macOS Tauri 2 桌面壳
 

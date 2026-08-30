@@ -2,7 +2,7 @@ import type { CanvasProject } from "./stores/use-canvas-store";
 
 export type CanvasExportFile = {
     app: "infinite-canvas";
-    version: 3;
+    version: 4;
     exportedAt: string;
     projects: CanvasProjectExportItem[];
 };
