@@ -92,17 +92,18 @@
 
 | ID | 通过标准 | 状态 | 证据/复现入口 |
 | --- | --- | --- | --- |
-| P4.1 | 盘点本机 Apple Developer/Developer ID 条件，不输出私钥或敏感信息 | 待验证 | 只记录可用 identity 的类型/团队摘要、`notarytool` 配置是否存在，不打印证书内容和凭据 |
-| P4.2 | 所有内嵌可执行文件/辅助程序正确签名，启用 Hardened Runtime，明确 entitlements | 待验证 | `codesign --verify --deep --strict --verbose=2`、逐个嵌套二进制检查、entitlements 摘要 |
-| P4.3 | 生成 DMG，完成 notarization 与 stapling；缺权限时给精确证据 | 待验证 | 记录 DMG 路径、notary submission ID/最终状态、`stapler validate` 和 SHA-256；不记录凭据 |
-| P4.4 | 干净安装路径验证 Gatekeeper、首次启动、覆盖安装和数据保留 | 待验证 | `spctl --assess --type execute`、从 DMG 安装到 `/Applications` 的测试步骤和数据前后对比 |
-| P4.5 | 记录版本、提交、产物哈希和回滚方法 | 待验证 | 版本、Git SHA、DMG SHA-256、数据备份/旧版重新安装步骤 |
+| P4.1 | 盘点本机 Apple Developer/Developer ID 条件，不输出私钥或敏感信息 | 通过 | 仅聚合 `security find-identity -v -p codesigning` 的数量/类型：有效 identity 1，`Apple Development` 1，`Developer ID Application` 0，`Apple Distribution` 0；未输出身份哈希、证书内容、私钥或凭据。`notarytool 1.1.0 (39)`、stapler、Xcode 26.3 可用；环境中没有 Apple/notary 凭据变量名。Keychain profile 没有可安全枚举的标准入口，因此不猜 profile 名；Developer ID 缺失已是发行阻塞 |
+| P4.2 | 所有内嵌可执行文件/辅助程序正确签名，启用 Hardened Runtime，明确 entitlements | 阻塞 | 未签发行包的 Go/main/Sharp 为 ad-hoc，官方 Node 虽为 runtime 签名但带 `com.apple.security.get-task-allow`，外层 `codesign --verify --deep --strict` 退出 1。临时副本逐个签 Sharp dylib/`.node`、Go、Node、主程序后再签外层，5 个 Mach-O 均为 `runtime`，深度严格校验通过；无 entitlement 的 Node 启动 Next 时退出 133：`Failed to reserve virtual memory for CodeRange`。只给 Node 增加 `com.apple.security.cs.allow-jit` 后，Next `127.0.0.1:3199` 和完整 App 均真实启动，Go/主程序/Sharp 保持无 entitlement，`get-task-allow` 已移除；最小清单在 `desktop/src-tauri/entitlements/node.plist`。最终 Developer ID 签名仍因本机 `Developer ID Application=0` 阻塞 |
+| P4.3 | 生成 DMG，完成 notarization 与 stapling；缺权限时给精确证据 | 阻塞 | `bun run tauri build --bundles dmg` 成功生成 `desktop/src-tauri/target/release/bundle/dmg/无限画布_0.5.5_aarch64.dmg`，68704490 bytes，SHA-256 `28e8b5e7b433eee325f91216b480eb96758724a7206577158eee428a4124e24f`，`hdiutil verify` 为 VALID。该技术 DMG 未签名：`codesign` 退出 1，`spctl --type open` 退出 3 `source=no usable signature`，`stapler validate` 退出 65 `does not have a ticket stapled`。因缺 Developer ID，不提交必然无效的 notarization，也没有 submission ID |
+| P4.4 | 干净安装路径验证 Gatekeeper、首次启动、覆盖安装和数据保留 | 阻塞 | DMG 已只读挂载，包内 App 深度签名校验和 Gatekeeper 均失败；本机直接从只读镜像可启动首页/画布库，并读取 P3 的两个 4 节点/1 连线项目，证明 bundle ID 数据目录未被技术重打包破坏。临时 Hardened Runtime 副本同样启动并保留数据。但没有 Developer ID、公证 ticket 和 quarantine 来源条件，不能把本机启动冒充 Gatekeeper 干净安装；未写入 `/Applications`，覆盖安装/正式升级保持阻塞 |
+| P4.5 | 记录版本、提交、产物哈希和回滚方法 | 通过 | 技术候选版本 `0.5.5`、arm64、源提交 `7accabe0ea15cccb6848c8dd7196f898fe5c7e46`，DMG 哈希见 P4.3。回滚前先退出 App，并成对备份 `~/Library/Application Support/com.chenyuxiaojin.infinitecanvas/` 与 `~/Library/WebKit/com.chenyuxiaojin.infinitecanvas/`；在独立 worktree 从前一总装提交 `bedaac2845b69d03310d598bb6ca4546c79c6b72` 重建旧 App，保持相同 bundle ID 后覆盖应用本体但不删除数据。若数据迁移不兼容，只能在 App 退出时成对恢复备份；当前没有执行破坏性回滚 |
 
 ### P4 事实、推断、未知
 
-- 事实：首发分发目标是 Developer ID 签名、公证 DMG，不是 Mac App Store。
-- 推断：若捆绑 Go/FFmpeg 等 sidecar，每个 Mach-O 都必须先单独签名，再签外层 app；实际顺序以 Tauri 2 bundle 结构验证。
-- 未知：本机当前 Developer ID Application 证书、notary profile、Team 权限和最终品牌名/图标。
+- 事实：首发分发目标是 Developer ID 签名、公证 DMG，不是 Mac App Store。本机没有 Developer ID Application 身份；当前 DMG 完整但未签、未公证、未 stapling，Gatekeeper 明确拒绝，因此它只能是技术验收产物，不能对外发行。
+- 事实：包内共有 5 个 Mach-O：主程序、Go、Node、Sharp `.node` 和 libvips dylib。临时 ad-hoc 验证证明正确顺序是先签所有内嵌代码，再签外层 App；所有代码启用 Hardened Runtime，只有 Node 需要 `com.apple.security.cs.allow-jit`。没有该 entitlement 时出现可重复的 V8 CodeRange 失败；加入后 Next 和完整 App 均启动，证明不需要保留开发态 `get-task-allow`。
+- 推断：获得 Developer ID 后应使用同样的逐层顺序与最小 Node entitlement，严格校验 App 后再签 DMG，随后用明确的 keychain profile 或 App Store Connect API key 运行 notarization、等待 Accepted、staple 并重新执行 `spctl`；当前不能从 ad-hoc 结果推断 Apple 服务会接受。
+- 未知：Keychain 中是否另有未命名的 notarytool profile、Apple Team 是否有 Developer ID/公证权限、最终品牌名/图标、Intel/universal 产物和真正隔离机器上的升级行为。以上都需要用户提供外部条件或产品选择后才能继续。
 
 ## 阶段检查点
 
