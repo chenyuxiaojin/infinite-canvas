@@ -24,6 +24,17 @@ export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
 
+export type CanvasEditActor = "human" | "agent";
+
+export type CanvasNodeCollaboration = {
+    locked?: boolean;
+    revision: number;
+    lastEditedBy: CanvasEditActor;
+    lastHumanChangedAt?: string;
+    lastAgentChangedAt?: string;
+    lastAgentBatchId?: string;
+};
+
 export type CameraControlOptions = {
     enabled: boolean;
     camera: string;
@@ -141,12 +152,69 @@ export type CanvasNodeData = {
     width: number;
     height: number;
     metadata?: CanvasNodeMetadata;
+    collaboration?: CanvasNodeCollaboration;
 };
 
 export type CanvasConnection = {
     id: string;
     fromNodeId: string;
     toNodeId: string;
+};
+
+export type CanvasNodeUndoPatch = {
+    id: string;
+    index?: number;
+    full?: CanvasNodeData;
+    fields?: Partial<Pick<CanvasNodeData, "type" | "title" | "position" | "width" | "height" | "collaboration">>;
+    metadata?: Partial<CanvasNodeMetadata>;
+    removeMetadataKeys?: Array<keyof CanvasNodeMetadata>;
+};
+
+export type CanvasConnectionUndoPatch = {
+    index: number;
+    connection: CanvasConnection;
+};
+
+export type CanvasAgentBatchUndo = {
+    removeNodeIds: string[];
+    restoreNodes: CanvasNodeUndoPatch[];
+    removeConnectionIds: string[];
+    restoreConnections: CanvasConnectionUndoPatch[];
+};
+
+export type CanvasAgentBatchStatus = "success" | "error" | "conflict";
+
+export type CanvasAgentChangeBatch = {
+    id: string;
+    actor: "Canvas Agent";
+    startedAt: string;
+    completedAt: string;
+    summary: string;
+    actionNames: string[];
+    affectedNodeIds: string[];
+    affectedNodeTitles?: Record<string, string>;
+    baseRevision: number;
+    revision: number;
+    status: CanvasAgentBatchStatus;
+    reversible: boolean;
+    error?: string;
+    undo?: CanvasAgentBatchUndo;
+    undoneAt?: string;
+    undoneRevision?: number;
+};
+
+export type CanvasCollaborationStatus = {
+    state: "idle" | "running" | "success" | "error" | "conflict";
+    message: string;
+    batchId?: string;
+    affectedNodeIds: string[];
+    updatedAt: string;
+};
+
+export type CanvasCollaborationState = {
+    revision: number;
+    batches: CanvasAgentChangeBatch[];
+    status: CanvasCollaborationStatus;
 };
 
 export type CanvasAssistantReference = {
@@ -186,17 +254,7 @@ export type CanvasAssistantImage = {
     source?: "asset" | "library";
 };
 
-export type CanvasAgentPhase =
-    | "intake"
-    | "concept"
-    | "script"
-    | "breakdown"
-    | "references"
-    | "storyboard"
-    | "video"
-    | "audio"
-    | "review"
-    | "complete";
+export type CanvasAgentPhase = "intake" | "concept" | "script" | "breakdown" | "references" | "storyboard" | "video" | "audio" | "review" | "complete";
 
 export type CanvasAgentConfig = {
     imageQuality: string;
@@ -216,12 +274,7 @@ export type CanvasAgentState = {
     completedTaskIds: string[];
 };
 
-export type CanvasAgentContent =
-    | string
-    | Array<
-        | { type: "text"; text: string }
-        | { type: "image_url"; image_url: { url: string } }
-    >;
+export type CanvasAgentContent = string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
 
 export type CanvasAgentToolCall = {
     id: string;
@@ -272,14 +325,14 @@ export type SelectionBox = {
 
 export type ContextMenuState =
     | {
-        type: "node";
-        x: number;
-        y: number;
-        nodeId: string;
-    }
+          type: "node";
+          x: number;
+          y: number;
+          nodeId: string;
+      }
     | {
-        type: "connection";
-        x: number;
-        y: number;
-        connectionId: string;
-    };
+          type: "connection";
+          x: number;
+          y: number;
+          connectionId: string;
+      };

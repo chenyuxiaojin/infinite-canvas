@@ -34,6 +34,7 @@ type CanvasProject = {
   activeChatId: string | null;
   backgroundMode: "lines" | "dots" | "blank";
   viewport: { x: number; y: number; k: number };
+  collaboration: CanvasCollaborationState;
 };
 ```
 
@@ -48,6 +49,7 @@ type CanvasProject = {
 - `activeChatId`：当前选中的助手会话 ID。
 - `backgroundMode`：画布背景模式。
 - `viewport`：视口变换，`x/y` 是屏幕平移，`k` 是缩放比例。
+- `collaboration`：人与 Agent 共用的 revision、执行状态和最近 20 个 Agent 变更批次；不是独立于项目的影子 store。
 
 ## 节点结构
 
@@ -62,6 +64,7 @@ type CanvasNodeData = {
   width: number;
   height: number;
   metadata?: CanvasNodeMetadata;
+  collaboration?: CanvasNodeCollaboration;
 };
 ```
 
@@ -73,6 +76,38 @@ type CanvasNodeData = {
 - `position`：画布世界坐标，不是屏幕坐标。
 - `width` / `height`：画布世界坐标下的节点尺寸。
 - `metadata`：节点内容和业务状态。
+- `collaboration`：节点锁定、最近操作者、节点 revision 及 Agent 最近修改标记。人工锁只阻止 Agent 覆盖，不阻止用户继续拖拽、编辑提示词或调整生成配置。
+
+## 人与 Agent 共编结构
+
+画布项目中的 `collaboration` 与 `nodes/connections` 一起保存、导入、导出和远端同步。Agent 每次写操作都从当前项目 revision 开始；人工在运行期间提交修改会递增 revision，后续 Agent 写入会以冲突结束，不能静默覆盖。
+
+```ts
+type CanvasNodeCollaboration = {
+  locked?: boolean;
+  revision?: number;
+  lastEditedBy?: "human" | "agent";
+  lastHumanChangedAt?: string;
+  lastAgentChangedAt?: string;
+  lastAgentBatchId?: string;
+};
+
+type CanvasCollaborationState = {
+  revision: number;
+  status: {
+    state: "idle" | "running" | "success" | "error" | "conflict";
+    message: string;
+    batchId?: string;
+    affectedNodeIds: string[];
+    updatedAt: string;
+  };
+  batches: CanvasAgentChangeBatch[];
+};
+```
+
+每个 Agent 批次记录操作者、起止时间、摘要、动作名、影响节点、起止 revision、结果和可选 undo patch。undo 只保存发生变化的节点字段、metadata key 和连线 patch，不复制另一份持续运行的画布状态。媒体生成与节点删除当前标为不可逆；可逆批次也只有在画布仍停留在该批次 revision 时才能撤销，以保护后续人工结果。
+
+旧项目缺少 `collaboration` 时，在打开或导入时会初始化为 revision 0。ZIP 导出格式版本为 v4，协作字段作为项目 JSON 的一部分往返；媒体文件结构不变。
 
 `metadata` 当前常用字段：
 

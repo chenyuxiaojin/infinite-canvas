@@ -5,6 +5,12 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
+## 无限画布人与 Agent 共编
+
+- 组件和状态测试已覆盖人工锁阻止 Agent、revision 漂移阻止覆盖和撤销、文本批次字段级撤销、媒体/删除不可逆，以及状态/批次历史的可访问文字。
+- 1440×900 浏览器零付费验收已覆盖：本地 Agent demo 新建可编辑节点、`Agent 刚修改` 标识、人工锁、历史摘要与影响节点、最近批次撤销和后续人工 revision 保护。
+- 仍需在统一操作核心总装后，用真实但零付费的 Agent 动作流复验 adapter 接线；本分支没有调用付费模型，也没有实现 CLI、Agent HTTP 服务或 Rust 执行器。
+
 ## macOS Tauri 2 桌面壳
 
 - 新增 Apple Silicon macOS 桌面构建，复用现有 Next.js standalone 和 Go API，不改写 React 画布。

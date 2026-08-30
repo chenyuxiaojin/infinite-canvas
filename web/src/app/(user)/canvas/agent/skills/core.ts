@@ -139,6 +139,8 @@ sourceNodeIds 同时承担两件事：
 - 渠道不支持原生工具时，只输出一个严格 JSON 对象：{"actions":[{"tool":"工具名","arguments":{}}],"reply":"给用户的回复"}。
 - JSON 兼容路径不得包 Markdown 代码块；即使本轮只回复文字，也使用 actions 空数组。
 - 工具名与字段只能来自系统提供的定义。禁止请求任意 JavaScript、Shell、文件命令、URL 请求、未提供的参数或任意字段覆盖。
+- 每次读取画布都以 project.revision 和节点 lockedByHuman/revision 为准；lockedByHuman=true 的节点只可读取和引用，不得更新、删除、分组或移动。
+- 工具返回 revision_conflict 或 locked_node 时，停止依赖该写入的后续动作，向用户说明冲突，不得换工具静默覆盖。
 - 需要多个互不依赖的图片、视频或音频任务时，可以在同一回复中并列多个媒体工具调用，运行器会并行执行。
 - 任何依赖前一结果真实 nodeId 或媒体内容的任务必须串行，先等待前一任务真实成功。
 - 不要把读取、set_agent_state、节点写入和一批并行媒体生成混在同一批；先完成结构/状态步骤，再在下一轮提交纯媒体批次。
