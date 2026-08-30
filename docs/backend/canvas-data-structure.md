@@ -34,6 +34,7 @@ type CanvasProject = {
   activeChatId: string | null;
   backgroundMode: "lines" | "dots" | "blank";
   viewport: { x: number; y: number; k: number };
+  operationState: CanvasOperationState;
 };
 ```
 
@@ -48,6 +49,9 @@ type CanvasProject = {
 - `activeChatId`：当前选中的助手会话 ID。
 - `backgroundMode`：画布背景模式。
 - `viewport`：视口变换，`x/y` 是屏幕平移，`k` 是缩放比例。
+- `operationState`：人和 Agent 共用的结构化操作状态，包含 revision、人工锁、任务索引、幂等回执、审计历史和 Agent 撤销快照。
+
+旧工程没有 `operationState` 时会在读取时向前迁移，不改动原节点、连线、任务 metadata 或媒体引用。详细批次格式、错误码和接线示例见 [人与 Agent 共用画布操作协议 Handoff](../development/human-agent-canvas-protocol-handoff.md)。
 
 ## 节点结构
 
