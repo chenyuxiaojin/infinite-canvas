@@ -239,6 +239,8 @@ pub struct TaskError {
     pub message: String,
     pub exit_code: Option<i32>,
     pub retryable: bool,
+    #[serde(default)]
+    pub side_effects_may_exist: bool,
 }
 
 impl TaskError {
@@ -253,7 +255,13 @@ impl TaskError {
             message: message.into(),
             exit_code,
             retryable,
+            side_effects_may_exist: false,
         }
+    }
+
+    pub(crate) fn with_possible_side_effects(mut self) -> Self {
+        self.side_effects_may_exist = true;
+        self
     }
 }
 
