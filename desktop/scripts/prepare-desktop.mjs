@@ -11,6 +11,7 @@ import { spawnSync } from "node:child_process";
 const desktopDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryDir = resolve(desktopDir, "..");
 const webDir = join(repositoryDir, "web");
+const agentCliDir = join(repositoryDir, "integrations", "local-agent-adapter-rust");
 const tauriDir = join(desktopDir, "src-tauri");
 const binariesDir = join(tauriDir, "binaries");
 const webResourceDir = join(tauriDir, "resources", "web");
@@ -60,6 +61,13 @@ mkdirSync(join(webResourceDir, ".next"), { recursive: true });
 cpSync(staticDir, join(webResourceDir, ".next", "static"), { recursive: true });
 
 mkdirSync(binariesDir, { recursive: true });
+run("cargo", ["build", "--release", "--bin", "infinite-canvas"], {
+  cwd: agentCliDir,
+});
+cpSync(
+  join(agentCliDir, "target", "release", "infinite-canvas"),
+  join(binariesDir, `infinite-canvas-${targetTriple}`),
+);
 run(
   "go",
   [

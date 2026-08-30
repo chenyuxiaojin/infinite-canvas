@@ -27,6 +27,7 @@ export type CanvasNodeLock = {
 export type CanvasNodeUpdatePatch = Partial<Omit<CanvasNodeData, "id">>;
 
 export type CanvasOperation =
+    | { type: "project.update"; title: string }
     | { type: "node.create"; node: CanvasNodeData }
     | { type: "node.update"; nodeId: string; patch: CanvasNodeUpdatePatch }
     | { type: "node.delete"; nodeId: string }
@@ -86,6 +87,7 @@ export type CanvasOperationResultItem = {
     targetRequestId?: string;
     alreadyExists?: boolean;
     locked?: boolean;
+    title?: string;
 };
 
 export type CanvasOperationBatchResult = {
@@ -104,6 +106,7 @@ export type CanvasOperationBatchResult = {
 };
 
 export type CanvasProtocolUndoSnapshot = {
+    title?: string;
     nodes: CanvasNodeData[];
     connections: CanvasConnection[];
     locks: Record<string, CanvasNodeLock>;
@@ -133,6 +136,7 @@ export type CanvasOperationState = {
 
 export type CanvasProtocolProject = {
     id: string;
+    title?: string;
     updatedAt: string;
     nodes: CanvasNodeData[];
     connections: CanvasConnection[];
@@ -311,6 +315,13 @@ export function applyCanvasOperationBatch<TProject extends CanvasProtocolProject
 
 function applyOperation<TProject extends CanvasProtocolProject>(project: TProject & { operationState: CanvasOperationState }, batch: CanvasOperationBatch, operation: CanvasOperation, processedAt: string): CanvasOperationResultItem {
     switch (operation.type) {
+        case "project.update": {
+            if (typeof operation.title !== "string" || !operation.title.trim() || operation.title.length > 256) {
+                fail("invalid_batch", "画布标题无效");
+            }
+            project.title = operation.title.trim();
+            return { type: operation.type, title: project.title };
+        }
         case "node.create": {
             validateNode(operation.node);
             if (findNode(project, operation.node.id)) fail("node_exists", `节点 ${operation.node.id} 已存在`, { nodeId: operation.node.id });
@@ -321,7 +332,13 @@ function applyOperation<TProject extends CanvasProtocolProject>(project: TProjec
             const index = project.nodes.findIndex((node) => node.id === operation.nodeId);
             if (index < 0) fail("node_not_found", `找不到节点 ${operation.nodeId}`, { nodeId: operation.nodeId });
             assertAgentMayTouchNode(project, batch.actor, operation.nodeId);
-            const nextNode = { ...project.nodes[index], ...clone(operation.patch), id: operation.nodeId };
+            const patch = clone(operation.patch);
+            const nextNode = {
+                ...project.nodes[index],
+                ...patch,
+                ...(patch.metadata ? { metadata: { ...project.nodes[index].metadata, ...patch.metadata } } : {}),
+                id: operation.nodeId,
+            };
             validateNode(nextNode);
             project.nodes[index] = nextNode;
             return { type: operation.type, nodeId: operation.nodeId };
@@ -460,6 +477,7 @@ function applyOperation<TProject extends CanvasProtocolProject>(project: TProjec
             }
             project.nodes = clone(target.undoSnapshot.nodes);
             project.connections = clone(target.undoSnapshot.connections);
+            if (target.undoSnapshot.title !== undefined) project.title = target.undoSnapshot.title;
             project.operationState.locks = clone(target.undoSnapshot.locks);
             project.operationState.tasks = clone(target.undoSnapshot.tasks);
             target.undoneByRequestId = batch.requestId;
@@ -527,6 +545,7 @@ function rejectedResult(batch: CanvasOperationBatch, revision: number, processed
 
 function snapshot(project: CanvasProtocolProject & { operationState: CanvasOperationState }): CanvasProtocolUndoSnapshot {
     return {
+        title: project.title,
         nodes: clone(project.nodes),
         connections: clone(project.connections),
         locks: clone(project.operationState.locks),

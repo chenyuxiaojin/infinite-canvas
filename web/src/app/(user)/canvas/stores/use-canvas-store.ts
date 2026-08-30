@@ -6,6 +6,7 @@ import { localForageStorage } from "@/lib/localforage-storage";
 import { listCanvasProjects, saveCanvasProject, syncCanvasProjects } from "@/services/api/canvas-tasks";
 import { fetchUserConfig } from "@/services/api/user-config";
 import { useUserStore } from "@/stores/use-user-store";
+import { isDesktopRuntime, listDesktopCanvasProjects, saveDesktopCanvasProject } from "@/services/desktop-runtime";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAgentConfig, CanvasAssistantSession, CanvasConnection, CanvasNodeData, CanvasPendingAgentRequest, ViewportTransform } from "../types";
 import {
@@ -57,6 +58,7 @@ type CanvasStore = {
     deleteProjects: (ids: string[]) => void;
     updateProject: (id: string, patch: Partial<Pick<CanvasProject, "nodes" | "connections" | "chatSessions" | "activeChatId" | "agentConfig" | "autoTitlePending" | "backgroundMode" | "showImageInfo" | "viewport" | "sidePanel" | "agentPanel" | "pendingAgentRequest">>) => void;
     applyOperationBatch: (batch: CanvasOperationBatch) => CanvasOperationOutcome<CanvasProject> | null;
+    refreshFromDesktop: () => Promise<void>;
     syncWithRemote: (token: string, syncEnabled: boolean) => Promise<void>;
     setSyncEnabled: (enabled: boolean) => void;
 };
@@ -86,6 +88,7 @@ function waitForUserStoreHydration() {
 }
 
 function queueProjectSave(project: CanvasProject) {
+    const desktop = isDesktopRuntime();
     const token = useUserStore.getState().token;
     const syncEnabled = accountCanvasSyncEnabled;
     const previous = projectSaveTimers.get(project.id);
@@ -95,12 +98,59 @@ function queueProjectSave(project: CanvasProject) {
         project.id,
         setTimeout(() => {
             projectSaveTimers.delete(project.id);
-            if (!token || !syncEnabled || !accountCanvasSyncEnabled || useUserStore.getState().token !== token) {
+            if (desktop) {
+                void saveDesktopCanvasProject<CanvasProject>(project)
+                    .then((saved) => adoptAuthoritativeDesktopProject(saved))
+                    .catch(() => undefined);
+                return;
+            }
+            if (
+                !token ||
+                !syncEnabled ||
+                !accountCanvasSyncEnabled ||
+                useUserStore.getState().token !== token
+            ) {
                 return;
             }
             void saveCanvasProject(token, project).catch(() => undefined);
         }, 400),
     );
+}
+
+function adoptAuthoritativeDesktopProject(source: CanvasProject) {
+    const saved = migrateCanvasProject(source);
+    const current = useCanvasStore.getState().projects.find((project) => project.id === saved.id);
+    if (!current) {
+        useCanvasStore.setState((state) => ({ projects: mergeCanvasProjects([saved], state.projects) }));
+        return;
+    }
+    const merged = mergeDesktopProject(saved, current);
+    if (merged !== current) {
+        useCanvasStore.setState((state) => ({
+            projects: state.projects.map((project) => project.id === saved.id ? merged : project),
+        }));
+    }
+}
+
+function mergeDesktopProject(saved: CanvasProject, current: CanvasProject) {
+    const savedRevision = saved.operationState.revision;
+    const currentRevision = current.operationState.revision;
+    if (savedRevision > currentRevision) return saved;
+    if (savedRevision < currentRevision) return current;
+    const operationStateChanged = JSON.stringify(saved.operationState) !== JSON.stringify(current.operationState);
+    if (operationStateChanged) {
+        return {
+            ...current,
+            title: saved.title,
+            nodes: saved.nodes,
+            connections: saved.connections,
+            updatedAt: saved.updatedAt,
+            operationState: saved.operationState,
+        };
+    }
+    return (Date.parse(saved.updatedAt || "") || 0) > (Date.parse(current.updatedAt || "") || 0)
+        ? saved
+        : current;
 }
 
 function cancelProjectSaves(ids: string[]) {
@@ -145,6 +195,42 @@ const canvasStorage: PersistStorage<CanvasStore> = {
         ).map((project) => migrateCanvasProject(project));
         const localHasData =
             Array.isArray(localProjects) && localProjects.length > 0;
+
+        if (isDesktopRuntime()) {
+            try {
+                const desktopProjects = await listDesktopCanvasProjects<CanvasProject>();
+                const desktopById = new Map(
+                    desktopProjects.map((project) => [project.id, project]),
+                );
+                const projects = mergeCanvasProjects(
+                    desktopProjects,
+                    localProjects,
+                );
+                await Promise.all(
+                    localProjects
+                        .filter((project) => {
+                            const desktop = desktopById.get(project.id);
+                            return !desktop || Date.parse(project.updatedAt || "") > Date.parse(desktop.updatedAt || "");
+                        })
+                        .map((project) => saveDesktopCanvasProject(project)),
+                );
+                if (projects.length > 0 || localParsed) {
+                    const nextState = { projects };
+                    const parsed = {
+                        state: nextState,
+                        version: 0,
+                    } as StorageValue<CanvasStore>;
+                    queuedPersistState = nextState;
+                    await localForageStorage.setItem(
+                        name,
+                        JSON.stringify(parsed),
+                    );
+                    return parsed;
+                }
+            } catch (error) {
+                console.error("Failed to hydrate desktop canvas projects", error);
+            }
+        }
 
         if (token) {
             try {
@@ -337,6 +423,21 @@ export const useCanvasStore = create<CanvasStore>()(
                 queueProjectSave(outcome.project);
                 return outcome;
             },
+            refreshFromDesktop: async () => {
+                if (!isDesktopRuntime()) return;
+                const desktopProjects = await listDesktopCanvasProjects<CanvasProject>();
+                set((state) => {
+                    const currentById = new Map(state.projects.map((project) => [project.id, project]));
+                    const desktopById = new Map(desktopProjects.map((project) => {
+                        const saved = migrateCanvasProject(project);
+                        const current = currentById.get(saved.id);
+                        return [saved.id, current ? mergeDesktopProject(saved, current) : saved] as const;
+                    }));
+                    const retained = state.projects.map((project) => desktopById.get(project.id) || project);
+                    const added = Array.from(desktopById.values()).filter((project) => !currentById.has(project.id));
+                    return { projects: [...added, ...retained] };
+                });
+            },
             syncWithRemote: async (token, syncEnabled) => {
                 accountCanvasSyncEnabled = syncEnabled;
                 if (!syncEnabled) return;
@@ -383,10 +484,12 @@ export function mergeCanvasProjects(remoteProjects: CanvasProject[], localProjec
         const previous = projects.get(project.id);
         const projectTime = Date.parse(project.updatedAt || "") || 0;
         const previousTime = Date.parse(previous?.updatedAt || "") || 0;
+        const projectRevision = project.operationState.revision;
+        const previousRevision = previous?.operationState.revision ?? -1;
         if (
             !previous ||
-            projectTime > previousTime ||
-            (projectTime === previousTime && project.operationState.revision >= previous.operationState.revision)
+            projectRevision > previousRevision ||
+            (projectRevision === previousRevision && projectTime >= previousTime)
         ) {
             projects.set(project.id, project);
         }

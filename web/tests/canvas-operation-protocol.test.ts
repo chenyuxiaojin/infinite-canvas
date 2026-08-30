@@ -174,6 +174,20 @@ describe("人与 Agent 共用画布操作协议", () => {
         expect(completedCancellation.project.operationState.revision).toBe(3);
     });
 
+    test("Bridge 映射可经公共协议更新标题并合并节点 metadata", () => {
+        const initial = project([{ ...node("n1"), metadata: { content: "旧内容", fontSize: 18 } }]);
+        const changed = applyCanvasOperationBatch(initial, batch("agent", "bridge-edit", 0, [
+            { type: "project.update", title: "Agent 工程名" },
+            { type: "node.update", nodeId: "n1", patch: { metadata: { content: "新内容", prompt: "新内容" } } },
+        ]), { now: () => TIME });
+        const undone = applyCanvasOperationBatch(changed.project, batch("human", "undo-bridge-edit", 1, [{ type: "batch.undo", targetRequestId: "bridge-edit" }]), { now: () => TIME });
+
+        expect(changed.project.title).toBe("Agent 工程名");
+        expect(changed.project.nodes[0].metadata).toMatchObject({ content: "新内容", prompt: "新内容", fontSize: 18 });
+        expect(undone.project.title).toBe("协议测试");
+        expect(undone.project.nodes[0].metadata).toMatchObject({ content: "旧内容", fontSize: 18 });
+    });
+
     test("旧工程迁移不改节点连线，保存后重载一致", () => {
         const oldProject = {
             id: "project-1",

@@ -42,7 +42,7 @@ import { createVideoGenerationTask, pollVideoGenerationTaskStatus, VIDEO_POLL_IN
 import { channelProtocolForConfig, defaultConfig, type AiConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { collectImageStorageKeys, deleteStoredImages, resolveImageUrl, uploadImage, uploadRemoteImageToServer, type UploadedImage } from "@/services/image-storage";
 import { resolveMediaUrl, uploadMediaFile, uploadRemoteMediaToServer, type UploadedFile } from "@/services/file-storage";
-import { cancelDesktopTask, fetchDesktopTaskStatus, generateCanvasTestClip, isDesktopRuntime } from "@/services/desktop-runtime";
+import { cancelDesktopTask, fetchDesktopTaskStatus, generateCanvasTestClip, isDesktopRuntime, type DesktopTaskSnapshot } from "@/services/desktop-runtime";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
@@ -421,6 +421,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const openProject = useCanvasStore((state) => state.openProject);
     const updateProject = useCanvasStore((state) => state.updateProject);
     const applyOperationBatch = useCanvasStore((state) => state.applyOperationBatch);
+    const refreshFromDesktop = useCanvasStore((state) => state.refreshFromDesktop);
     const renameProject = useCanvasStore((state) => state.renameProject);
     const deleteProjects = useCanvasStore((state) => state.deleteProjects);
     const currentProject = useCanvasStore((state) => state.projects.find((project) => project.id === projectId));
@@ -504,6 +505,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     );
 
     const nodesRef = useRef(nodes);
+    const loadedProjectVersionRef = useRef("");
     const agentExpectedRevisionRef = useRef<number | null>(null);
     const consumedAgentRequestProjectRef = useRef<string | null>(null);
     const connectionsRef = useRef(connections);
@@ -539,6 +541,65 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             cleanupAssetImages({ extra, history: historyRef.current, lastHistory: lastHistoryRef.current });
         },
         [cleanupAssetImages],
+    );
+
+    const commitLocalTaskSnapshot = useCallback(
+        (nodeId: string, task: DesktopTaskSnapshot, metadata: CanvasNodeMetadata) => {
+            const project = useCanvasStore.getState().openProject(projectId);
+            if (!project) return null;
+            const operations: CanvasOperation[] = [];
+            const currentNode = project.nodes.find((node) => node.id === nodeId);
+            if (!currentNode) return null;
+            const existingTask = project.operationState.tasks[task.id];
+            if (!existingTask) {
+                operations.push({
+                    type: "task.start",
+                    task: {
+                        id: task.id,
+                        nodeId,
+                        kind: "deterministic_test_clip",
+                        status: task.status === "queued" ? "queued" : "running",
+                        requestId: `desktop-task-${task.id}`,
+                    },
+                });
+            }
+            if (task.status !== "queued" && existingTask?.status !== task.status) {
+                operations.push({
+                    type: "task.update",
+                    taskId: task.id,
+                    status: task.status,
+                    details: {
+                        action: task.action,
+                        ...(task.result ? { result: task.result } : {}),
+                        ...(task.error ? { error: task.error } : {}),
+                    },
+                });
+            }
+            const nextMetadata = { ...currentNode.metadata, ...metadata };
+            if (JSON.stringify(currentNode.metadata || {}) !== JSON.stringify(nextMetadata)) {
+                operations.push({ type: "node.update", nodeId, patch: { metadata: nextMetadata } });
+            }
+            if (!operations.length) return null;
+            const outcome = applyOperationBatch({
+                protocolVersion: CANVAS_OPERATION_PROTOCOL_VERSION,
+                actor: "system",
+                requestId: `system-task-${task.id}-${task.status}-${project.operationState.revision}`,
+                projectId,
+                baseRevision: project.operationState.revision,
+                timestamp: new Date().toISOString(),
+                operations,
+            });
+            if (!outcome?.result.ok) {
+                console.error("Failed to commit the desktop task snapshot", outcome?.result.error);
+                return outcome;
+            }
+            nodesRef.current = outcome.project.nodes;
+            connectionsRef.current = outcome.project.connections;
+            setNodes(outcome.project.nodes);
+            setConnections(outcome.project.connections);
+            return outcome;
+        },
+        [applyOperationBatch, projectId],
     );
 
     const getBatchGroupNodes = useCallback(
@@ -623,10 +684,46 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 showImageInfo: project.showImageInfo || false,
             };
             setHistoryState({ canUndo: false, canRedo: false });
+            loadedProjectVersionRef.current = `${project.operationState.revision}:${project.updatedAt}`;
             setProjectLoaded(true);
         };
         void restore();
     }, [hydrated, openProject, projectId, router]);
+
+    useEffect(() => {
+        if (!desktopRuntime || !hydrated) return;
+        let active = true;
+        const refresh = () => {
+            if (!active) return;
+            void refreshFromDesktop().catch((error) => {
+                console.error("Failed to refresh the shared desktop canvas", error);
+            });
+        };
+        refresh();
+        const timer = window.setInterval(refresh, 500);
+        return () => {
+            active = false;
+            window.clearInterval(timer);
+        };
+    }, [desktopRuntime, hydrated, refreshFromDesktop]);
+
+    useEffect(() => {
+        if (!projectLoaded || !currentProject) return;
+        const version = `${currentProject.operationState.revision}:${currentProject.updatedAt}`;
+        if (loadedProjectVersionRef.current === version) return;
+        loadedProjectVersionRef.current = version;
+        let active = true;
+        void hydrateCanvasImages(currentProject.nodes).then((restoredNodes) => {
+            if (!active || loadedProjectVersionRef.current !== version) return;
+            nodesRef.current = restoredNodes;
+            connectionsRef.current = currentProject.connections;
+            setNodes(restoredNodes);
+            setConnections(currentProject.connections);
+        });
+        return () => {
+            active = false;
+        };
+    }, [currentProject, projectLoaded]);
 
     useEffect(() => {
         if (!projectLoaded || applyingHistoryRef.current || historyPausedRef.current) return;
@@ -715,46 +812,37 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     .then(async (task) => {
                         if (task.status === "succeeded") {
                             const media = await persistDesktopTaskMedia(taskId);
-                            setNodes((prev) =>
-                                prev.map((item) =>
-                                    item.id === node.id
-                                        ? {
-                                              ...item,
-                                              title: "本地固定测试片",
-                                              metadata: {
-                                                  ...item.metadata,
-                                                  content: media.url,
-                                                  storageKey: media.storageKey,
-                                                  status: NODE_STATUS_SUCCESS,
-                                                  progress: 100,
-                                                  naturalWidth: media.width,
-                                                  naturalHeight: media.height,
-                                                  bytes: media.bytes,
-                                                  mimeType: media.mimeType,
-                                                  durationMs: media.durationMs,
-                                                  localTaskSha256: media.sha256,
-                                                  errorDetails: undefined,
-                                              },
-                                          }
-                                        : item,
-                                ),
-                            );
+                            commitLocalTaskSnapshot(node.id, task, {
+                                ...node.metadata,
+                                content: media.url,
+                                storageKey: media.storageKey,
+                                status: NODE_STATUS_SUCCESS,
+                                progress: 100,
+                                naturalWidth: media.width,
+                                naturalHeight: media.height,
+                                bytes: media.bytes,
+                                mimeType: media.mimeType,
+                                durationMs: media.durationMs,
+                                localTaskSha256: media.sha256,
+                                errorDetails: undefined,
+                            });
                             return;
                         }
                         if (task.status === "failed" || task.status === "cancelled") {
-                            setNodes((prev) =>
-                                prev.map((item) =>
-                                    item.id === node.id
-                                        ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: task.error?.message || (task.status === "cancelled" ? "本地任务已取消，未覆盖任何输出。" : "本地任务失败，未写入画布媒体。") } }
-                                        : item,
-                                ),
-                            );
+                            commitLocalTaskSnapshot(node.id, task, {
+                                ...node.metadata,
+                                status: NODE_STATUS_ERROR,
+                                errorDetails: task.error?.message || (task.status === "cancelled" ? "本地任务已取消，未覆盖任何输出。" : "本地任务失败，未写入画布媒体。"),
+                            });
                             return;
                         }
-                        setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, progress: task.status === "running" ? 60 : 15 } } : item)));
+                        commitLocalTaskSnapshot(node.id, task, {
+                            ...node.metadata,
+                            progress: task.status === "running" ? 60 : 15,
+                        });
                     })
                     .catch((error) => {
-                        setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: error instanceof Error ? error.message : "本地任务状态读取失败" } } : item)));
+                        console.error("Failed to read the desktop task status", error);
                     })
                     .finally(() => {
                         pollingLocalNodeIdsRef.current.delete(node.id);
@@ -764,7 +852,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         pollCanvasTasks();
         const timer = window.setInterval(pollCanvasTasks, VIDEO_POLL_INTERVAL_MS);
         return () => window.clearInterval(timer);
-    }, [desktopRuntime, effectiveConfig, isAiConfigReady, projectLoaded]);
+    }, [commitLocalTaskSnapshot, desktopRuntime, effectiveConfig, isAiConfigReady, projectLoaded]);
 
     useEffect(() => {
         if (!hasLoadingTimedNodes && !hasRecentAgentNodes) return;
@@ -1186,24 +1274,77 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
 
         try {
             const submitted = await generateCanvasTestClip(projectId);
-            setNodes((prev) => prev.map((node) => (node.id === resultNode.id ? { ...node, metadata: { ...node.metadata, localTaskId: submitted.task_id, localTaskDuplicate: submitted.duplicate } } : node)));
+            const project = useCanvasStore.getState().openProject(projectId);
+            if (!project) throw new Error("当前画布已不存在");
+            const outcome = applyOperationBatch({
+                protocolVersion: CANVAS_OPERATION_PROTOCOL_VERSION,
+                actor: "human",
+                requestId: `ui-task-start-${submitted.task_id}`,
+                projectId,
+                baseRevision: project.operationState.revision,
+                timestamp: new Date().toISOString(),
+                operations: [
+                    {
+                        type: "task.start",
+                        task: {
+                            id: submitted.task_id,
+                            nodeId: resultNode.id,
+                            kind: "deterministic_test_clip",
+                            status: "queued",
+                            requestId: `desktop-task-${submitted.task_id}`,
+                            details: { paid: false, duplicate: submitted.duplicate },
+                        },
+                    },
+                    {
+                        type: "node.update",
+                        nodeId: resultNode.id,
+                        patch: {
+                            metadata: {
+                                localTaskId: submitted.task_id,
+                                localTaskDuplicate: submitted.duplicate,
+                            },
+                        },
+                    },
+                ],
+            });
+            if (!outcome?.result.ok) {
+                throw new Error(outcome?.result.error?.message || "本地任务无法写入公共画布历史");
+            }
+            nodesRef.current = outcome.project.nodes;
+            connectionsRef.current = outcome.project.connections;
+            setNodes(outcome.project.nodes);
+            setConnections(outcome.project.connections);
             message.info(submitted.duplicate ? "已恢复该画布的同一幂等任务，没有重复生成" : "已提交零付费本地测试任务");
         } catch (error) {
             setNodes((prev) => prev.map((node) => (node.id === resultNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails: error instanceof Error ? error.message : "本地任务提交失败" } } : node)));
             message.error(error instanceof Error ? error.message : "本地任务提交失败");
         }
-    }, [commitHumanNodeMutation, getCanvasCenter, message, projectId]);
+    }, [applyOperationBatch, commitHumanNodeMutation, getCanvasCenter, message, projectId]);
 
     const cancelLocalTestClip = useCallback(async () => {
         const task = nodesRef.current.find((node) => node.metadata?.localTaskId && node.metadata.status === NODE_STATUS_LOADING);
         if (!task?.metadata?.localTaskId) return;
         try {
+            const project = useCanvasStore.getState().openProject(projectId);
+            if (!project) throw new Error("当前画布已不存在");
+            const outcome = applyOperationBatch({
+                protocolVersion: CANVAS_OPERATION_PROTOCOL_VERSION,
+                actor: "human",
+                requestId: `ui-task-cancel-${task.metadata.localTaskId}`,
+                projectId,
+                baseRevision: project.operationState.revision,
+                timestamp: new Date().toISOString(),
+                operations: [{ type: "task.cancel", taskId: task.metadata.localTaskId, reason: "用户在画布中请求取消" }],
+            });
+            if (!outcome?.result.ok) {
+                throw new Error(outcome?.result.error?.message || "取消请求无法写入公共画布历史");
+            }
             const accepted = await cancelDesktopTask(task.metadata.localTaskId);
             message.info(accepted ? "已请求取消本地任务" : "本地任务已经进入终态");
         } catch (error) {
             message.error(error instanceof Error ? error.message : "取消本地任务失败");
         }
-    }, [message]);
+    }, [applyOperationBatch, message, projectId]);
 
     const deleteCanvasTaskRecords = useCallback(
         (nodeIds?: string[]) => {

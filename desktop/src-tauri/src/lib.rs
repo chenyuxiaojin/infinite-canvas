@@ -3,7 +3,7 @@ use std::{
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -12,12 +12,15 @@ use tauri::{App, AppHandle, Manager, RunEvent, Runtime, WebviewUrl, WebviewWindo
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
+mod agent_bridge;
 mod runtime;
 
+use agent_bridge::DesktopAgentBridge;
 use runtime::DesktopRuntime;
 
 const WEB_PORT: u16 = 3100;
 const API_PORT: u16 = 3101;
+const AGENT_BRIDGE_PORT: u16 = 3102;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CANVAS_EXPORT_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
@@ -133,7 +136,7 @@ fn loopback_address(port: u16) -> SocketAddr {
 }
 
 fn ensure_ports_available() -> Result<(), String> {
-    for port in [WEB_PORT, API_PORT] {
+    for port in [WEB_PORT, API_PORT, AGENT_BRIDGE_PORT] {
         TcpListener::bind(loopback_address(port))
             .map_err(|error| format!("local port {port} is unavailable: {error}"))?;
     }
@@ -167,8 +170,14 @@ fn stop_sidecars<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn stop_desktop_runtime<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(runtime) = app.try_state::<DesktopRuntime>() {
+    if let Some(runtime) = app.try_state::<Arc<DesktopRuntime>>() {
         runtime.shutdown();
+    }
+}
+
+fn stop_agent_bridge<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(bridge) = app.try_state::<DesktopAgentBridge>() {
+        bridge.stop();
     }
 }
 
@@ -221,7 +230,8 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
         .map_err(|error| format!("cannot create app data directory: {error}"))?;
     std::fs::create_dir_all(&log_dir)
         .map_err(|error| format!("cannot create app log directory: {error}"))?;
-    app.manage(DesktopRuntime::initialize(&app_data_dir));
+    let desktop_runtime = Arc::new(DesktopRuntime::initialize(&app_data_dir));
+    app.manage(desktop_runtime.clone());
     if !web_dir.join("server.js").is_file() {
         return Err(format!(
             "packaged Next.js server is missing at {}",
@@ -245,6 +255,9 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
         ],
     )?;
     wait_for_port(API_PORT)?;
+
+    let agent_bridge = DesktopAgentBridge::start(&app_data_dir, &database_path, desktop_runtime)?;
+    app.manage(agent_bridge);
 
     spawn_sidecar(
         app.handle(),
@@ -288,10 +301,15 @@ pub fn run() {
             runtime::desktop_task_status,
             runtime::desktop_task_media,
             runtime::cancel_desktop_task,
+            agent_bridge::desktop_canvas_projects,
+            agent_bridge::save_desktop_canvas_project,
+            agent_bridge::delete_desktop_canvas_projects,
+            agent_bridge::desktop_canvas_project_revision,
             save_canvas_export,
         ])
         .setup(|app| {
             if let Err(error) = start_desktop(app) {
+                stop_agent_bridge(app.handle());
                 stop_desktop_runtime(app.handle());
                 stop_sidecars(app.handle());
                 eprintln!("desktop startup failed: {error}");
@@ -303,6 +321,7 @@ pub fn run() {
         .expect("error while building the Tauri application")
         .run(|app, event| {
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                stop_agent_bridge(app);
                 stop_desktop_runtime(app);
                 stop_sidecars(app);
             }
