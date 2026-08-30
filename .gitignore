@@ -9,3 +9,5 @@ data/
 *.tsbuildinfo
 .DS_Store
 .idea
+/integrations/local-ai-audio-rust/.acceptance/
+/integrations/local-ai-audio-rust/target/
