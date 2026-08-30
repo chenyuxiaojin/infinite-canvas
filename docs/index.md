@@ -20,6 +20,7 @@
 - [后端数据库说明](backend/backend-database.md)
 - [画布数据结构](backend/canvas-data-structure.md)
 - [人与 Agent 共用画布操作协议 Handoff](development/human-agent-canvas-protocol-handoff.md)
+- [人与本机 Agent 共用无限画布总装 Handoff](development/human-agent-canvas-integration-handoff.md)
 - [本机 Agent 适配层与 CLI](development/local-agent-adapter.md)
 - [本机 Agent 适配层总装交接](development/local-agent-adapter-handoff.md)
 

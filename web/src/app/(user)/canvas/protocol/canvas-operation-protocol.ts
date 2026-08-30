@@ -180,6 +180,7 @@ export function migrateCanvasProject<TProject extends CanvasProtocolProject>(pro
 
     return {
         ...project,
+        nodes: project.nodes.map(canonicalizeStoredNode),
         operationState: {
             version: CANVAS_OPERATION_PROTOCOL_VERSION,
             revision: nonNegativeInteger(source?.revision) ?? 0,
@@ -191,10 +192,35 @@ export function migrateCanvasProject<TProject extends CanvasProtocolProject>(pro
     };
 }
 
+export function rebindCanvasProjectIdentity<TProject extends CanvasProtocolProject>(sourceProject: TProject, projectId: string): TProject & { operationState: CanvasOperationState } {
+    const project = clone(migrateCanvasProject(sourceProject));
+    project.id = projectId;
+    project.operationState.audit = project.operationState.audit.map((sourceEntry) => {
+        const entry = clone(sourceEntry);
+        entry.batch.projectId = projectId;
+        entry.result.projectId = projectId;
+        return entry;
+    });
+    project.operationState.requests = Object.fromEntries(
+        project.operationState.audit
+            .filter((entry) => validId(entry.batch.requestId))
+            .map((entry) => [
+                entry.batch.requestId,
+                {
+                    fingerprint: fingerprintBatch(entry.batch),
+                    result: clone(entry.result),
+                },
+            ]),
+    );
+    return project;
+}
+
 export function buildCanvasStructureOperations(current: Pick<CanvasProtocolProject, "nodes" | "connections">, nextNodes: CanvasNodeData[], nextConnections: CanvasConnection[]): CanvasOperation[] {
     const operations: CanvasOperation[] = [];
-    const currentNodes = new Map(current.nodes.map((node) => [node.id, node]));
-    const targetNodes = new Map(nextNodes.map((node) => [node.id, node]));
+    const canonicalCurrentNodes = current.nodes.map(canonicalizeStoredNode);
+    const canonicalNextNodes = nextNodes.map(canonicalizeStoredNode);
+    const currentNodes = new Map(canonicalCurrentNodes.map((node) => [node.id, node]));
+    const targetNodes = new Map(canonicalNextNodes.map((node) => [node.id, node]));
     const currentConnections = new Map(current.connections.map((connection) => [connection.id, connection]));
     const targetConnections = new Map(nextConnections.map((connection) => [connection.id, connection]));
 
@@ -204,10 +230,10 @@ export function buildCanvasStructureOperations(current: Pick<CanvasProtocolProje
             operations.push({ type: "connection.delete", connectionId: connection.id });
         }
     });
-    current.nodes.forEach((node) => {
+    canonicalCurrentNodes.forEach((node) => {
         if (!targetNodes.has(node.id)) operations.push({ type: "node.delete", nodeId: node.id });
     });
-    nextNodes.forEach((node) => {
+    canonicalNextNodes.forEach((node) => {
         const previous = currentNodes.get(node.id);
         if (!previous) {
             operations.push({ type: "node.create", node: clone(node) });
@@ -638,6 +664,27 @@ function embeddedStatus(status?: CanvasNodeMetadata["status"]): CanvasProtocolTa
     if (status === "success") return "succeeded";
     if (status === "error") return "failed";
     return "queued";
+}
+
+function canonicalizeStoredNode(node: CanvasNodeData): CanvasNodeData {
+    const storageKey = node.metadata?.storageKey;
+    const content = node.metadata?.content;
+    if (
+        typeof storageKey !== "string"
+        || !storageKey
+        || storageKey.startsWith("server:")
+        || typeof content !== "string"
+        || (!content.startsWith("blob:") && !content.startsWith("data:"))
+    ) {
+        return node;
+    }
+    return {
+        ...node,
+        metadata: {
+            ...node.metadata,
+            content: storageKey,
+        },
+    };
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

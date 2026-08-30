@@ -4,7 +4,10 @@
   "description": "Allow only the fixed local canvas origin to use non-shell Tauri core APIs.",
   "windows": ["main"],
   "remote": {
-    "urls": ["http://127.0.0.1:3100/*"]
+    "urls": [
+      "http://127.0.0.1:3100/*",
+      "http://127.0.0.1:3210/*"
+    ]
   },
   "permissions": ["core:default", "desktop-runtime"]
 }

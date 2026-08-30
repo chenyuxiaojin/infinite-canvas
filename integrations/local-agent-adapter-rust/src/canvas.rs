@@ -312,7 +312,8 @@ impl CanonicalCanvasAdapter {
                     && current_project.get("operationState") != project.get("operationState");
                 if current_revision > incoming_revision
                     || state_conflict
-                    || timestamp_is_newer(&current_updated, &metadata.updated_at)?
+                    || (current_revision == incoming_revision
+                        && timestamp_is_newer(&current_updated, &metadata.updated_at)?)
                 {
                     current_project
                 } else {
@@ -857,6 +858,38 @@ fn timestamp_is_newer(current: &str, incoming: &str) -> Result<bool, BridgeError
 mod tests {
     use super::*;
 
+    struct UnusedProtocol;
+
+    impl CanvasProtocolExecutor for UnusedProtocol {
+        fn apply(
+            &self,
+            _project: Value,
+            _batch: Value,
+            _now: &str,
+        ) -> Result<ProtocolOutcome, BridgeError> {
+            Err(BridgeError::internal("unused test protocol"))
+        }
+    }
+
+    fn project(revision: u64, updated_at: &str) -> Value {
+        json!({
+            "id": "project-1",
+            "title": "Acceptance",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": updated_at,
+            "nodes": [],
+            "connections": [],
+            "operationState": {
+                "version": 1,
+                "revision": revision,
+                "locks": {},
+                "tasks": {},
+                "requests": {},
+                "audit": []
+            }
+        })
+    }
+
     #[test]
     fn external_operations_map_to_the_canonical_protocol_only() {
         let request = AgentOperationRequest {
@@ -920,5 +953,33 @@ mod tests {
         ] {
             assert!(HttpCanvasProtocolExecutor::new(endpoint).is_err());
         }
+    }
+
+    #[test]
+    fn a_higher_canvas_revision_wins_even_if_its_wall_clock_is_older() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("canvas.db");
+        Connection::open(&database)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE canvas_projects (
+                    user_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    project_data TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (user_id, id)
+                );",
+            )
+            .unwrap();
+        let adapter = CanonicalCanvasAdapter::open(database, Arc::new(UnusedProtocol)).unwrap();
+        adapter
+            .save_human_project(project(1, "2026-01-02T00:00:00Z"))
+            .unwrap();
+        adapter
+            .save_human_project(project(2, "2026-01-01T12:00:00Z"))
+            .unwrap();
+        assert_eq!(adapter.get_project("project-1").unwrap().revision, 2);
     }
 }

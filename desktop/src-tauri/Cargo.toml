@@ -8,6 +8,9 @@ repository = "https://github.com/chenyuxiaojin/infinite-canvas"
 edition = "2021"
 rust-version = "1.85"
 
+[features]
+integration-acceptance = []
+
 [lib]
 name = "infinite_canvas_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

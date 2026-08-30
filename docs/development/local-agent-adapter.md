@@ -12,14 +12,15 @@
   或付费生成入口。
 - Agent 写请求必须包含 `project_id`、`request_id`、`base_revision` 和
   `actor: "agent"`。人类编辑造成 revision 变化时，Agent 写入以
-  `REVISION_CONFLICT` 失败，不覆盖较新的人工版本。
-- 节点带有 `locked: true`、`metadata.locked: true` 或
-  `metadata.agentLocked: true` 时，Agent 不能修改该节点。
+  `STALE_REVISION` 失败，不覆盖较新的人工版本。
+- 人工锁只来自 `CanvasProject.operationState.locks`；Agent 不能修改、删除、
+  布局或连接任何锁定节点。
 
 桌面 WebView 通过 Tauri IPC 读写同一份 SQLite `canvas_projects` 表；
-Agent Bridge 也通过隔离的 `CanvasOperationAdapter` 使用该表。不存在
-第二份 Agent 画布数据库。旧的桌面 IndexedDB 项目会在桌面版下次加载时
-按 `updatedAt` 合并到该表。
+Agent Bridge 通过 `CanonicalCanvasAdapter` 使用该表，并把 CLI 白名单操作
+映射成公共 `CanvasOperationBatch`，交给同一个 `applyCanvasOperationBatch`
+执行。不存在第二份 Agent 画布数据库、revision 或 request journal。旧的
+桌面 IndexedDB 项目按 revision 优先、同 revision 再按 `updatedAt` 合并。
 
 ## 安装 CLI
 
@@ -70,7 +71,7 @@ infinite-canvas credentials revoke
 {
   "project_id": "PROJECT_ID",
   "request_id": "agent-run-0001",
-  "base_revision": "PROJECT_REVISION_SHA256",
+  "base_revision": 12,
   "actor": "agent",
   "operations": [
     {
@@ -105,7 +106,7 @@ infinite-canvas credentials revoke
 {
   "project_id": "PROJECT_ID",
   "request_id": "local-test-clip-0001",
-  "base_revision": "PROJECT_REVISION_SHA256",
+  "base_revision": 12,
   "actor": "agent"
 }
 ```
@@ -119,32 +120,31 @@ infinite-canvas credentials revoke
 - Rust DesktopRuntime：FFmpeg、只读外部连接器、本地声音服务探测和受限任务执行。
 - Agent Bridge：凭据、项目读取、白名单操作、dry-run、revision、幂等和结构化错误。
 
-## 总装接线与核心协议替换点
+## 总装后的公共接线
 
-当前基线没有统一的人/Agent 画布操作协议，因此本分支刻意把临时
-SQLite 实现隔离在
-`integrations/local-agent-adapter-rust/src/canvas.rs` 的
-`CanvasOperationAdapter` trait 后面。
+最终调用链只有一条：
 
-总装时：
+```text
+CLI / Bridge 白名单 JSON
+  -> CanonicalCanvasAdapter
+  -> POST /internal/canvas-operation
+  -> applyCanvasOperationBatch
+  -> 原子写回同一 canvas_projects.project_data
+  -> 已打开 WebView 每 500 ms 读取同一工程 revision
+```
 
-1. 保留 Bridge 路由、CLI JSON、凭据和退出码契约。
-2. 若统一操作层分支已提供 canonical operation service，新建其 `CanvasOperationAdapter` 实现。
-3. 在 `desktop/src-tauri/src/agent_bridge.rs` 的
-   `DesktopAgentBridge::start` 中，把 `SqliteCanvasAdapter` 构造替换为
-   canonical adapter；这是唯一运行时替换点。
-4. canonical adapter 必须继续使用桌面 Go sidecar 的同一数据库/工程，不得复制 `project_data` 到第二个存储。
-5. canonical adapter 接管 revision、锁定规则、request journal 后，可删除
-   Rust 初始化的 `agent_operation_requests` 表和对应 SQL；迁移前保持现有表
-   以维持幂等。
-6. 若 canonical operation 名称不同，在 adapter 内做一次映射，不要让 CLI 与 HTTP 再分叉一套协议。
+`CanvasOperationAdapter` 仍是 Bridge 的端口抽象，但实现只剩
+`CanonicalCanvasAdapter`；旧 `SqliteCanvasAdapter`、SHA revision、
+`agent_operation_requests` 和重复锁/reducer 已删除。
 
-涉及总装的文件：
+涉及接线的文件：
 
-- `integrations/local-agent-adapter-rust/`：Bridge、CLI、凭据、能力目录、临时 adapter 和测试。
+- `integrations/local-agent-adapter-rust/`：Bridge、CLI、凭据、能力目录、公共 adapter 和测试。
 - `desktop/src-tauri/src/agent_bridge.rs`：Tauri/Bridge 组合根。
 - `desktop/src-tauri/src/runtime.rs`：DesktopRuntime 的 Agent 白名单实现。
 - `web/src/app/(user)/canvas/stores/use-canvas-store.ts`：
-  桌面 IPC 与 IndexedDB 合并。
+  公共 Store、桌面 IPC 与 IndexedDB 合并。
+- `web/src/app/internal/canvas-operation/route.ts`：只调用公共 reducer 的
+  loopback 内部执行入口，不持有状态。
 - `desktop/scripts/prepare-desktop.mjs`、
   `desktop/src-tauri/tauri.conf.json`：CLI 打包。

@@ -92,6 +92,7 @@ import { CANVAS_ASSET_DRAG_TYPE, CanvasSidePanel } from "../components/canvas-si
 import { DEFAULT_CANVAS_AGENT_PANEL, DEFAULT_CANVAS_SIDE_PANEL, useCanvasStore, type CanvasProject } from "../stores/use-canvas-store";
 import {
     CANVAS_OPERATION_PROTOCOL_VERSION,
+    buildCanvasStructureOperations,
     type CanvasOperation,
     type CanvasOperationOutcome,
     type CanvasOperationState,
@@ -417,6 +418,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const addAsset = useAssetStore((state) => state.addAsset);
     const cleanupAssetImages = useAssetStore((state) => state.cleanupImages);
     const hydrated = useCanvasStore((state) => state.hydrated);
+    const desktopPersistenceError = useCanvasStore((state) => state.desktopPersistenceError);
     const createProject = useCanvasStore((state) => state.createProject);
     const openProject = useCanvasStore((state) => state.openProject);
     const updateProject = useCanvasStore((state) => state.updateProject);
@@ -506,6 +508,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
 
     const nodesRef = useRef(nodes);
     const loadedProjectVersionRef = useRef("");
+    const applyingProjectVersionRef = useRef<string | null>(null);
     const agentExpectedRevisionRef = useRef<number | null>(null);
     const consumedAgentRequestProjectRef = useRef<string | null>(null);
     const connectionsRef = useRef(connections);
@@ -613,6 +616,10 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     );
 
     useEffect(() => {
+        if (desktopPersistenceError) message.error(`桌面画布保存失败：${desktopPersistenceError}`);
+    }, [desktopPersistenceError, message]);
+
+    useEffect(() => {
         if (!previewNodeId) return;
         const handlePreviewKeyDown = (event: KeyboardEvent) => {
             const pn = previewNodeId ? nodesRef.current.find((n) => n.id === previewNodeId) : null;
@@ -712,12 +719,20 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         const version = `${currentProject.operationState.revision}:${currentProject.updatedAt}`;
         if (loadedProjectVersionRef.current === version) return;
         loadedProjectVersionRef.current = version;
+        applyingProjectVersionRef.current = version;
         let active = true;
         void hydrateCanvasImages(currentProject.nodes).then((restoredNodes) => {
             if (!active || loadedProjectVersionRef.current !== version) return;
             nodesRef.current = restoredNodes;
             connectionsRef.current = currentProject.connections;
             setNodes(restoredNodes);
+            setConnections(currentProject.connections);
+        }).catch((error) => {
+            if (!active || loadedProjectVersionRef.current !== version) return;
+            console.error("Failed to hydrate the refreshed desktop canvas", error);
+            nodesRef.current = currentProject.nodes;
+            connectionsRef.current = currentProject.connections;
+            setNodes(currentProject.nodes);
             setConnections(currentProject.connections);
         });
         return () => {
@@ -753,8 +768,13 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
 
     useEffect(() => {
         if (!projectLoaded || historyPausedRef.current) return;
+        if (applyingProjectVersionRef.current && currentProject) {
+            const synchronized = buildCanvasStructureOperations(currentProject, nodes, connections).length === 0;
+            if (synchronized) applyingProjectVersionRef.current = null;
+            return;
+        }
         updateProject(projectId, { nodes, connections, chatSessions, activeChatId, agentConfig, backgroundMode, showImageInfo });
-    }, [activeChatId, agentConfig, backgroundMode, chatSessions, connections, nodes, projectId, projectLoaded, showImageInfo, updateProject]);
+    }, [activeChatId, agentConfig, backgroundMode, chatSessions, connections, currentProject, nodes, projectId, projectLoaded, showImageInfo, updateProject]);
 
     useEffect(() => {
         if (!projectLoaded) return;

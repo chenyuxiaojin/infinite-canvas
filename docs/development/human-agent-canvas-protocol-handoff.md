@@ -38,6 +38,7 @@ type CanvasOperationBatch = {
 
 已支持的语义操作：
 
+- `project.update`
 - `node.create` / `node.update` / `node.delete`
 - `connection.create` / `connection.delete`
 - `layout.apply`
@@ -152,6 +153,10 @@ useCanvasStore.getState().applyOperationBatch({
 - 旧节点 metadata 中的 `imageTaskId` / `videoTaskId` / `audioTaskId` / `localTaskId` 会迁移成协议任务索引，原 metadata 不删除。
 - Zustand 本地补水、远程列表/同步、新建和导入都调用迁移。
 - ZIP 仍使用现有 export version `3`，`project` 对象会原样带上 `operationState`；旧 version `3` 文件仍可导入。
+- 导入副本生成新 project ID 后，`rebindCanvasProjectIdentity` 会同步重绑定
+  审计批次、回执和 request 指纹；结构、锁、任务、历史与幂等语义不丢失。
+- 带 `storageKey` 的本地媒体不会把恢复时生成的临时 `blob:` / `data:` URL
+  当成画布修改；持久化引用统一为稳定 storage key。
 - Go 后端将整个 project JSON 作为 `ProjectData` 保存，无需数据库表迁移。
 
 ## 自动化证据
@@ -161,4 +166,4 @@ cd web
 bun run test:canvas-protocol
 ```
 
-契约测试覆盖：人和 Agent 共用 reducer、重复 request、锁定、过期 revision、原子冲突、安全撤销、任务发起/取消、旧工程迁移与 JSON 重载一致。
+契约测试覆盖：人和 Agent 共用 reducer、重复 request、锁定、过期 revision、原子冲突、安全撤销、任务发起/取消、媒体恢复不制造 revision、导入身份重绑定、旧工程迁移与 JSON 重载一致。

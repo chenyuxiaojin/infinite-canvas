@@ -17,30 +17,20 @@
 - CLI 作为 Tauri `externalBin` 随 `.app` 打包；不接受 token 参数，仅从私有凭据文件读取。
 - React 画布 UI 未重做，只改了桌面持久化接线和首次本地项目合并。
 
-## 总装顺序
+## 总装结果
 
-1. 将本分支提交合入总装分支。
-2. 若统一人/Agent 操作层尚未合入，保留 `SqliteCanvasAdapter`，功能可独立运行。
-3. 若统一操作层已合入，按
-   [本机 Agent 适配层](local-agent-adapter.md#总装接线与核心协议替换点)
-   替换 `DesktopAgentBridge::start` 中的 adapter 构造。
-4. 合并其他 Rust 集成分支时，手工保留 `desktop/src-tauri/Cargo.toml`
-   的全部 path dependency，并重新生成 `desktop/src-tauri/Cargo.lock`；
-   不要选择某一侧整文件覆盖。
-5. 合并其他桌面启动分支时，保留端口预检 `3100/3101/3102`、Bridge 在
-   Go AutoMigrate 后启动、退出时先停 Bridge 再停 DesktopRuntime 的顺序。
-6. 合并画布 store 分支时，保留桌面分支优先：`isDesktopRuntime()` 时先读取桌面 IPC，再按 `updatedAt` 合并 IndexedDB；网页账号同步逻辑继续作为非桌面路径。
-7. 执行本文件“验证命令”，再做签名 `.app` 人工验收。
-
-## 精确替换点
-
-统一操作层只需替换：
+本 handoff 的替换任务已在 `feat/human-agent-canvas-integration` 完成：
 
 ```text
 desktop/src-tauri/src/agent_bridge.rs
   DesktopAgentBridge::start
-    SqliteCanvasAdapter::open(...) -> canonical CanvasOperationAdapter
+    CanonicalCanvasAdapter::open(...)
 ```
+
+端口预检仍为正式 `3100/3101/3102`，Bridge 在 Go 初始化后启动，退出时先停
+Bridge 再停 DesktopRuntime。桌面 Store 合并改为 revision 优先、同 revision
+再比 `updatedAt`。完整决策和真实验收见
+[人与本机 Agent 共用无限画布总装 Handoff](human-agent-canvas-integration-handoff.md)。
 
 必须保持的外部协议：
 
@@ -56,12 +46,8 @@ desktop/src-tauri/src/agent_bridge.rs
 - `POST /v1/credentials/revoke`
 - CLI 命令名、JSON envelope 和退出码
 
-统一层接管后可删除的临时实现仅限：
-
-- `SqliteCanvasAdapter` 内直接查询/更新 `canvas_projects` 的 SQL。
-- `agent_operation_requests` 的建表和 journal SQL。
-
-Bridge、CredentialStore、CLI、AgentRuntime trait、测试和文档不是临时替换对象。
+旧 adapter 的直接 reducer/SQL、SHA revision 和独立 request journal 已删除。
+Bridge、CredentialStore、CLI、AgentRuntime trait、外部 JSON 和退出码保持兼容。
 
 ## 验证命令
 
@@ -88,11 +74,10 @@ bun run build
 报错文件均未被本分支修改。生产 `next build` 已通过，但总装若修复全仓
 TypeScript 基线，可再把 `tsc --noEmit` 设为硬门禁。
 
-## 未完成与人工验收
+## 总装后的剩余发行事项
 
-- 尚未把本分支自行合并进任何主线；应由总装任务处理。
-- 技术 `.app` 已确认 CLI 位于 `Contents/MacOS/infinite-canvas`
-  且为 arm64 Mach-O；仍需在总装后的发行签名 `.app` 中复核并验证
-  `/usr/local/bin` 软链方案。
-- 需要用真实旧版桌面 IndexedDB 项目人工确认首次合并和打开后编辑；自动化只验证 Rust 协议与独立 Web 构建。
-- 没有调用付费模型，没有修改 Eagle/达芬奇真实数据，没有生成或提交真实凭据。
+- 标准技术 `.app` 已确认 CLI 位于 `Contents/MacOS/infinite-canvas` 且为 arm64；
+  Developer ID 签名、公证后的包需要再次复核 CLI 和软链方案。
+- 真实共享状态、锁、stale revision、撤销、重启与 ZIP 往返已在隔离 bundle ID
+  下通过；正式旧项目仍应在备份后做发布前迁移验收。
+- 没有调用付费模型，没有修改 Eagle/达芬奇或正式用户项目，没有提交真实凭据。

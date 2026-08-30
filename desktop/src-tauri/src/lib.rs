@@ -18,9 +18,18 @@ mod runtime;
 use agent_bridge::DesktopAgentBridge;
 use runtime::DesktopRuntime;
 
+#[cfg(not(feature = "integration-acceptance"))]
 const WEB_PORT: u16 = 3100;
+#[cfg(feature = "integration-acceptance")]
+const WEB_PORT: u16 = 3210;
+#[cfg(not(feature = "integration-acceptance"))]
 const API_PORT: u16 = 3101;
+#[cfg(feature = "integration-acceptance")]
+const API_PORT: u16 = 3211;
+#[cfg(not(feature = "integration-acceptance"))]
 const AGENT_BRIDGE_PORT: u16 = 3102;
+#[cfg(feature = "integration-acceptance")]
+const AGENT_BRIDGE_PORT: u16 = 3212;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CANVAS_EXPORT_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
@@ -241,6 +250,7 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
 
     let database = database_path.to_string_lossy();
     let logs = log_dir.to_string_lossy();
+    let api_base_url = format!("http://127.0.0.1:{API_PORT}");
     spawn_sidecar(
         app.handle(),
         "infinite-canvas-api",
@@ -256,7 +266,13 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
     )?;
     wait_for_port(API_PORT)?;
 
-    let agent_bridge = DesktopAgentBridge::start(&app_data_dir, &database_path, desktop_runtime)?;
+    let agent_bridge = DesktopAgentBridge::start(
+        &app_data_dir,
+        &database_path,
+        desktop_runtime,
+        WEB_PORT,
+        AGENT_BRIDGE_PORT,
+    )?;
     app.manage(agent_bridge);
 
     spawn_sidecar(
@@ -265,7 +281,7 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
         &web_dir,
         &["server.js"],
         &[
-            ("API_BASE_URL", "http://127.0.0.1:3101"),
+            ("API_BASE_URL", api_base_url.as_str()),
             ("HOSTNAME", "127.0.0.1"),
             ("NODE_ENV", "production"),
             ("PORT", &WEB_PORT.to_string()),
@@ -273,18 +289,17 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
     )?;
     wait_for_port(WEB_PORT)?;
 
-    WebviewWindowBuilder::new(
-        app,
-        "main",
-        WebviewUrl::External("http://127.0.0.1:3100".parse().unwrap()),
-    )
-    .title("无限画布")
-    .inner_size(1440.0, 900.0)
-    .min_inner_size(1100.0, 700.0)
-    .resizable(true)
-    .on_navigation(is_canvas_url)
-    .build()
-    .map_err(|error| format!("cannot create desktop window: {error}"))?;
+    let web_url = format!("http://127.0.0.1:{WEB_PORT}")
+        .parse()
+        .map_err(|error| format!("cannot prepare desktop canvas URL: {error}"))?;
+    WebviewWindowBuilder::new(app, "main", WebviewUrl::External(web_url))
+        .title("无限画布")
+        .inner_size(1440.0, 900.0)
+        .min_inner_size(1100.0, 700.0)
+        .resizable(true)
+        .on_navigation(is_canvas_url)
+        .build()
+        .map_err(|error| format!("cannot create desktop window: {error}"))?;
     Ok(())
 }
 
@@ -335,13 +350,19 @@ mod tests {
     #[test]
     fn navigation_is_limited_to_the_fixed_loopback_origin() {
         assert!(is_canvas_url(
-            &"http://127.0.0.1:3100/canvas/test".parse().unwrap()
+            &format!("http://127.0.0.1:{WEB_PORT}/canvas/test")
+                .parse()
+                .unwrap()
         ));
         assert!(!is_canvas_url(
-            &"http://localhost:3100/canvas/test".parse().unwrap()
+            &format!("http://localhost:{WEB_PORT}/canvas/test")
+                .parse()
+                .unwrap()
         ));
         assert!(!is_canvas_url(
-            &"http://127.0.0.1:3101/api/health".parse().unwrap()
+            &format!("http://127.0.0.1:{API_PORT}/api/health")
+                .parse()
+                .unwrap()
         ));
         assert!(!is_canvas_url(&"https://example.com".parse().unwrap()));
     }

@@ -6,6 +6,7 @@ import {
     applyCanvasOperationBatch,
     buildCanvasStructureOperations,
     migrateCanvasProject,
+    rebindCanvasProjectIdentity,
     type CanvasOperation,
     type CanvasOperationActor,
     type CanvasOperationBatch,
@@ -186,6 +187,41 @@ describe("人与 Agent 共用画布操作协议", () => {
         expect(changed.project.nodes[0].metadata).toMatchObject({ content: "新内容", prompt: "新内容", fontSize: 18 });
         expect(undone.project.title).toBe("协议测试");
         expect(undone.project.nodes[0].metadata).toMatchObject({ content: "旧内容", fontSize: 18 });
+    });
+
+    test("本地媒体恢复生成的临时 URL 不会制造画布 revision", () => {
+        const stored = project([{
+            ...node("media"),
+            type: CanvasNodeType.Video,
+            metadata: { content: "blob:http://127.0.0.1:3210/old", storageKey: "local-task:media-1" },
+        }]);
+        const hydrated = [{
+            ...stored.nodes[0],
+            metadata: { ...stored.nodes[0].metadata, content: "blob:http://127.0.0.1:3210/new" },
+        }];
+
+        expect(stored.nodes[0].metadata?.content).toBe("local-task:media-1");
+        expect(buildCanvasStructureOperations(stored, hydrated, [])).toEqual([]);
+        expect(stored.operationState.revision).toBe(0);
+    });
+
+    test("导入副本重绑定工程身份并保留 request id 幂等", () => {
+        const created = applyCanvasOperationBatch(project(), batch("agent", "imported-request", 0, [
+            { type: "node.create", node: node("imported-node") },
+        ]), { now: () => TIME });
+        const imported = rebindCanvasProjectIdentity(created.project, "project-copy");
+        const retry = applyCanvasOperationBatch(imported, {
+            ...batch("agent", "imported-request", 0, [{ type: "node.create", node: node("imported-node") }]),
+            projectId: "project-copy",
+        }, { now: () => TIME });
+
+        expect(imported.id).toBe("project-copy");
+        expect(imported.operationState.audit[0].batch.projectId).toBe("project-copy");
+        expect(imported.operationState.audit[0].result.projectId).toBe("project-copy");
+        expect(retry.result.ok).toBe(true);
+        expect(retry.result.duplicate).toBe(true);
+        expect(retry.project.nodes).toHaveLength(1);
+        expect(retry.project.operationState.revision).toBe(1);
     });
 
     test("旧工程迁移不改节点连线，保存后重载一致", () => {

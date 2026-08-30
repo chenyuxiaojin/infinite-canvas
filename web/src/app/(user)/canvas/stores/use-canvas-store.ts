@@ -15,6 +15,7 @@ import {
     buildCanvasStructureOperations,
     createCanvasOperationState,
     migrateCanvasProject,
+    rebindCanvasProjectIdentity,
     type CanvasOperationBatch,
     type CanvasOperationOutcome,
     type CanvasOperationState,
@@ -50,6 +51,7 @@ export type CanvasProject = {
 
 type CanvasStore = {
     hydrated: boolean;
+    desktopPersistenceError: string | null;
     projects: CanvasProject[];
     createProject: (title?: string, options?: { agentConfig?: CanvasAgentConfig; pendingAgentRequest?: CanvasPendingAgentRequest }) => string;
     importProject: (project: Partial<CanvasProject>) => string;
@@ -100,8 +102,15 @@ function queueProjectSave(project: CanvasProject) {
             projectSaveTimers.delete(project.id);
             if (desktop) {
                 void saveDesktopCanvasProject<CanvasProject>(project)
-                    .then((saved) => adoptAuthoritativeDesktopProject(saved))
-                    .catch(() => undefined);
+                    .then((saved) => {
+                        adoptAuthoritativeDesktopProject(saved);
+                        useCanvasStore.setState({ desktopPersistenceError: null });
+                    })
+                    .catch((error) => {
+                        useCanvasStore.setState({
+                            desktopPersistenceError: error instanceof Error ? error.message : String(error),
+                        });
+                    });
                 return;
             }
             if (
@@ -210,7 +219,12 @@ const canvasStorage: PersistStorage<CanvasStore> = {
                     localProjects
                         .filter((project) => {
                             const desktop = desktopById.get(project.id);
-                            return !desktop || Date.parse(project.updatedAt || "") > Date.parse(desktop.updatedAt || "");
+                            return !desktop
+                                || project.operationState.revision > desktop.operationState.revision
+                                || (
+                                    project.operationState.revision === desktop.operationState.revision
+                                    && Date.parse(project.updatedAt || "") > Date.parse(desktop.updatedAt || "")
+                                );
                         })
                         .map((project) => saveDesktopCanvasProject(project)),
                 );
@@ -299,6 +313,7 @@ export const useCanvasStore = create<CanvasStore>()(
     persist(
         (set, get) => ({
             hydrated: false,
+            desktopPersistenceError: null,
             projects: [],
             createProject: (title = "未命名画布", options) => {
                 const now = new Date().toISOString();
@@ -330,8 +345,9 @@ export const useCanvasStore = create<CanvasStore>()(
             },
             importProject: (source) => {
                 const now = new Date().toISOString();
-                const project = migrateCanvasProject<CanvasProject>({
-                    id: nanoid(),
+                const id = nanoid();
+                const project = rebindCanvasProjectIdentity(migrateCanvasProject<CanvasProject>({
+                    id,
                     title: source.title || "导入画布",
                     createdAt: source.createdAt || now,
                     updatedAt: now,
@@ -347,7 +363,7 @@ export const useCanvasStore = create<CanvasStore>()(
                     sidePanel: source.sidePanel || DEFAULT_CANVAS_SIDE_PANEL,
                     agentPanel: source.agentPanel || DEFAULT_CANVAS_AGENT_PANEL,
                     operationState: source.operationState || createCanvasOperationState({ nodes: source.nodes || [] }),
-                });
+                }), id);
                 set((state) => ({
                     projects: [project, ...state.projects],
                 }));
@@ -356,13 +372,25 @@ export const useCanvasStore = create<CanvasStore>()(
             },
             openProject: (id) => get().projects.find((item) => item.id === id) || null,
             renameProject: (id, title) => {
-                const project = get().projects.find((item) => item.id === id);
-                if (!project) return;
+                const sourceProject = get().projects.find((item) => item.id === id);
+                if (!sourceProject) return;
+                const project = migrateCanvasProject(sourceProject);
+                const nextTitle = title.trim() || project.title;
+                if (nextTitle === project.title && !project.autoTitlePending) return;
+                const timestamp = new Date().toISOString();
+                const outcome = applyCanvasOperationBatch(project, {
+                    protocolVersion: CANVAS_OPERATION_PROTOCOL_VERSION,
+                    actor: "human",
+                    requestId: `ui-title-${nanoid()}`,
+                    projectId: id,
+                    baseRevision: project.operationState.revision,
+                    timestamp,
+                    operations: [{ type: "project.update", title: nextTitle }],
+                }, { now: () => timestamp });
+                if (!outcome.result.ok) return;
                 const nextProject = {
-                    ...project,
-                    title: title.trim() || project.title,
+                    ...outcome.project,
                     autoTitlePending: false,
-                    updatedAt: new Date().toISOString(),
                 };
                 set((state) => ({
                     projects: state.projects.map((item) => (item.id === id ? nextProject : item)),
@@ -403,6 +431,10 @@ export const useCanvasStore = create<CanvasStore>()(
                     nextProject = outcome.project;
                 }
                 const { nodes: _nodes, connections: _connections, ...projectPatch } = patch;
+                const projectPatchChanged = Object.entries(projectPatch).some(
+                    ([key, value]) => JSON.stringify(project[key as keyof CanvasProject]) !== JSON.stringify(value),
+                );
+                if (!operations.length && !projectPatchChanged) return;
                 nextProject = {
                     ...nextProject,
                     ...projectPatch,

@@ -8,5 +8,9 @@ commands.allow = [
   "desktop_task_status",
   "desktop_task_media",
   "cancel_desktop_task",
+  "desktop_canvas_projects",
+  "save_desktop_canvas_project",
+  "delete_desktop_canvas_projects",
+  "desktop_canvas_project_revision",
   "save_canvas_export",
 ]

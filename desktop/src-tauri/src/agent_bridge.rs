@@ -6,7 +6,7 @@ use std::{
 
 use local_agent_adapter::{
     BridgeServer, CanonicalCanvasAdapter, CanvasOperationAdapter, CredentialStore,
-    HttpCanvasProtocolExecutor, BRIDGE_PORT,
+    HttpCanvasProtocolExecutor,
 };
 use serde_json::Value;
 use tauri::State;
@@ -23,9 +23,12 @@ impl DesktopAgentBridge {
         app_data_directory: &Path,
         database_path: &Path,
         runtime: Arc<DesktopRuntime>,
+        web_port: u16,
+        bridge_port: u16,
     ) -> Result<Self, String> {
+        let protocol_endpoint = format!("http://127.0.0.1:{web_port}/internal/canvas-operation");
         let protocol = Arc::new(
-            HttpCanvasProtocolExecutor::new("http://127.0.0.1:3100/internal/canvas-operation")
+            HttpCanvasProtocolExecutor::new(&protocol_endpoint)
                 .map_err(|error| format!("cannot configure the shared canvas protocol: {error}"))?,
         );
         let canvas = Arc::new(
@@ -36,7 +39,7 @@ impl DesktopAgentBridge {
             CredentialStore::load_or_create(app_data_directory.join("agent-bridge"))
                 .map_err(|error| format!("cannot prepare the local Agent credential: {error}"))?,
         );
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), BRIDGE_PORT);
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bridge_port);
         let server = BridgeServer::start(address, credentials, canvas.clone(), runtime)
             .map_err(|error| format!("cannot start the local Agent Bridge: {error}"))?;
         Ok(Self {
