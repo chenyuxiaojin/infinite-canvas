@@ -174,7 +174,15 @@ impl ProbeResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcRequest {
-    Discover { roots: Vec<PathBuf> },
-    VerifyAudio { path: PathBuf },
-    SmokeTest { provider: ProviderId },
+    Discover {
+        roots: Vec<PathBuf>,
+    },
+    VerifyAudio {
+        path: PathBuf,
+    },
+    SmokeTest {
+        provider: ProviderId,
+        /// Must come from a user-approved desktop file/directory selection.
+        installation: PathBuf,
+    },
 }

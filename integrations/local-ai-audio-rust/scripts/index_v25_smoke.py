@@ -21,6 +21,8 @@ def main() -> None:
     reference = install / "examples" / "voice_01.wav"
     if not checkpoints.is_dir() or not reference.is_file():
         raise SystemExit("IndexTTS-2.5 model directory or upstream example audio is missing")
+    if args.output.exists():
+        raise SystemExit("refusing to overwrite an existing acceptance output")
 
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
