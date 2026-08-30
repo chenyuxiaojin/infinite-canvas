@@ -1,0 +1,9 @@
+{
+  "status": "success",
+  "data": {
+    "library": {
+      "name": "fixture-secret-library-name",
+      "path": "/fixture/private/library/path"
+    }
+  }
+}
