@@ -175,6 +175,12 @@ export function migrateCanvasProject<TProject extends CanvasProtocolProject>(pro
     const nodeIds = new Set(project.nodes.map((node) => node.id));
     const locks = isRecord(source?.locks) ? (Object.fromEntries(Object.entries(source.locks).filter(([nodeId, lock]) => nodeIds.has(nodeId) && isRecord(lock) && lock.nodeId === nodeId)) as Record<string, CanvasNodeLock>) : fallback.locks;
     const tasks = isRecord(source?.tasks) ? (Object.fromEntries(Object.entries(source.tasks).filter(([, task]) => isRecord(task) && typeof task.id === "string")) as Record<string, CanvasProtocolTask>) : fallback.tasks;
+    const managedRuntimeTaskIds = new Set(
+        Object.values(tasks).flatMap((task) => typeof task.details?.runtimeTaskId === "string" ? [task.details.runtimeTaskId] : []),
+    );
+    const fallbackTasks = Object.fromEntries(
+        Object.entries(fallback.tasks).filter(([taskId]) => !managedRuntimeTaskIds.has(taskId)),
+    );
     const requests = isRecord(source?.requests) ? (source.requests as Record<string, CanvasProcessedRequest>) : fallback.requests;
     const audit = Array.isArray(source?.audit) ? (source.audit as CanvasOperationAuditEntry[]) : fallback.audit;
 
@@ -185,11 +191,17 @@ export function migrateCanvasProject<TProject extends CanvasProtocolProject>(pro
             version: CANVAS_OPERATION_PROTOCOL_VERSION,
             revision: nonNegativeInteger(source?.revision) ?? 0,
             locks,
-            tasks: { ...fallback.tasks, ...tasks },
+            tasks: { ...fallbackTasks, ...tasks },
             requests,
             audit,
         },
     };
+}
+
+export function canUndoCanvasAgentBatch(operationState: CanvasOperationState, targetRequestId: string) {
+    const target = operationState.audit.find((entry) => entry.batch.requestId === targetRequestId);
+    if (!target || !target.result.ok || target.batch.actor !== "agent" || !target.undoSnapshot || target.undoneByRequestId) return false;
+    return target.result.revision === operationState.revision || onlyDerivedSystemUpdatesFollow(operationState, target);
 }
 
 export function rebindCanvasProjectIdentity<TProject extends CanvasProtocolProject>(sourceProject: TProject, projectId: string): TProject & { operationState: CanvasOperationState } {
@@ -498,7 +510,7 @@ function applyOperation<TProject extends CanvasProtocolProject>(project: TProjec
             if (!target || !target.result.ok || !target.undoSnapshot) fail("undo_not_found", `找不到可撤销的 Agent 批次 ${operation.targetRequestId}`);
             if (target.batch.actor !== "agent") fail("undo_forbidden", "只能撤销 Agent 批次");
             if (target.undoneByRequestId) fail("already_undone", `Agent 批次 ${operation.targetRequestId} 已撤销`);
-            if (target.result.revision !== batch.baseRevision) {
+            if (!canUndoCanvasAgentBatch(project.operationState, operation.targetRequestId)) {
                 fail("undo_forbidden", "Agent 批次之后已有新的画布修改，为避免覆盖人工结果不能直接恢复快照");
             }
             project.nodes = clone(target.undoSnapshot.nodes);
@@ -585,6 +597,34 @@ function assertAgentMayTouchNode(project: CanvasProtocolProject & { operationSta
     }
 }
 
+function onlyDerivedSystemUpdatesFollow(
+    operationState: CanvasOperationState,
+    target: CanvasOperationAuditEntry,
+) {
+    const targetIndex = operationState.audit.indexOf(target);
+    if (targetIndex < 0) return false;
+    const taskIds = new Set(
+        target.batch.operations.flatMap((operation) => operation.type === "task.start" ? [operation.task.id] : []),
+    );
+    const nodeIds = new Set(
+        target.batch.operations.flatMap((operation) => {
+            if (operation.type === "node.create") return [operation.node.id];
+            if (operation.type === "task.start") return [operation.task.nodeId];
+            return [];
+        }),
+    );
+    if (!taskIds.size || !nodeIds.size) return false;
+    return operationState.audit.slice(targetIndex + 1).every((entry) => {
+        if (!entry.result.ok) return true;
+        if (entry.batch.actor !== "system") return false;
+        return entry.batch.operations.every((operation) => {
+            if (operation.type === "task.update") return taskIds.has(operation.taskId);
+            if (operation.type !== "node.update" || !nodeIds.has(operation.nodeId) || !isRecord(operation.patch)) return false;
+            return Object.keys(operation.patch).every((key) => key === "metadata");
+        });
+    });
+}
+
 function validateNode(node: CanvasNodeData) {
     if (!isRecord(node) || !validId(node.id) || !validId(node.type) || typeof node.title !== "string" || !validPosition(node.position) || !Number.isFinite(node.width) || node.width <= 0 || !Number.isFinite(node.height) || node.height <= 0) {
         fail("invalid_node", "节点必须包含有效 id、type、position、width 和 height", { nodeId: node?.id });
@@ -624,6 +664,7 @@ function stableStringify(value: unknown): string {
     if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
     if (isRecord(value)) {
         return `{${Object.keys(value)
+            .filter((key) => value[key] !== undefined)
             .sort()
             .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
             .join(",")}}`;

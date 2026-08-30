@@ -58,7 +58,7 @@ export function CanvasCollaborationHistory({ collaboration, nodes, onUndoLatest,
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const nodeTitleById = useMemo(() => new Map(nodes.map((node) => [node.id, node.title || "未命名节点"])), [nodes]);
     const latestReversible = collaboration.batches.findLast((batch) => batch.reversible && !batch.undoneAt);
-    const undoBlocked = Boolean(latestReversible && latestReversible.revision !== collaboration.revision);
+    const undoBlocked = Boolean(latestReversible && !latestReversible.canUndoNow);
     const visibleBatches = collaboration.batches.slice(-8).reverse();
     return (
         <div className="w-[min(390px,calc(100vw-32px))]" style={{ color: theme.node.text }} data-testid="agent-batch-history">
@@ -80,7 +80,7 @@ export function CanvasCollaborationHistory({ collaboration, nodes, onUndoLatest,
             </div>
             <div className="max-h-[min(420px,60vh)] space-y-2 overflow-y-auto pr-1">
                 {visibleBatches.length ? (
-                    visibleBatches.map((batch) => <BatchItem key={batch.id} batch={batch} nodeTitleById={nodeTitleById} currentRevision={collaboration.revision} />)
+                    visibleBatches.map((batch) => <BatchItem key={batch.id} batch={batch} nodeTitleById={nodeTitleById} />)
                 ) : (
                     <div className="rounded-lg px-3 py-5 text-center text-xs" style={{ background: theme.toolbar.itemHover, color: theme.node.muted }}>
                         Agent 完成修改后，操作者、时间、摘要和影响节点会显示在这里。
@@ -96,9 +96,9 @@ export function CanvasCollaborationHistory({ collaboration, nodes, onUndoLatest,
     );
 }
 
-function BatchItem({ batch, nodeTitleById, currentRevision }: { batch: CanvasAgentChangeBatch; nodeTitleById: Map<string, string>; currentRevision: number }) {
+function BatchItem({ batch, nodeTitleById }: { batch: CanvasAgentChangeBatch; nodeTitleById: Map<string, string> }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const status = batch.undoneAt ? "已撤销" : batch.status === "success" ? (batch.reversible ? (batch.revision === currentRevision ? "完成 · 可撤销" : "完成 · 已有后续修改") : "完成 · 不可逆") : batch.status === "conflict" ? "冲突" : "失败";
+    const status = batch.undoneAt ? "已撤销" : batch.status === "success" ? (batch.reversible ? (batch.canUndoNow ? "完成 · 可撤销" : "完成 · 已有后续修改") : "完成 · 不可逆") : batch.status === "conflict" ? "冲突" : "失败";
     const nodeTitles = batch.affectedNodeIds.map((id) => nodeTitleById.get(id) || batch.affectedNodeTitles?.[id] || id).slice(0, 4);
     return (
         <article className="rounded-lg border px-3 py-2.5" style={{ borderColor: theme.toolbar.border, background: theme.node.panel }}>

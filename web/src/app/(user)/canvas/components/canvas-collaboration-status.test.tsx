@@ -26,6 +26,7 @@ const batch: CanvasAgentChangeBatch = {
     revision: 4,
     status: "success",
     reversible: true,
+    canUndoNow: true,
 };
 
 describe("CanvasCollaborationStatus", () => {
@@ -64,7 +65,7 @@ describe("CanvasCollaborationStatus", () => {
     test("后续人工 revision 会显示撤销保护而不是继续宣称可撤销", () => {
         const html = renderToStaticMarkup(
             <CanvasCollaborationHistory
-                collaboration={{ revision: 5, batches: [batch], status: { state: "success", message: "完成", batchId: batch.id, affectedNodeIds: [node.id], updatedAt: batch.completedAt } }}
+                collaboration={{ revision: 5, batches: [{ ...batch, canUndoNow: false }], status: { state: "success", message: "完成", batchId: batch.id, affectedNodeIds: [node.id], updatedAt: batch.completedAt } }}
                 nodes={[]}
                 onUndoLatest={() => undefined}
             />,

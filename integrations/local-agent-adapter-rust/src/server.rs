@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     capabilities, AgentOperationRequest, AgentRuntime, BridgeError, CanvasOperationAdapter,
-    CredentialStore, TestClipRequest,
+    CredentialStore, ProjectCreateRequest, TestClipRequest, VideoIngestRequest,
 };
 
 pub const BRIDGE_PORT: u16 = 3102;
@@ -129,11 +129,13 @@ impl Drop for BridgeServer {
 fn router(state: BridgeState) -> Router {
     Router::new()
         .route("/v1/capabilities", get(get_capabilities))
-        .route("/v1/projects", get(list_projects))
+        .route("/v1/projects", get(list_projects).post(create_project))
         .route("/v1/projects/:project_id", get(get_project))
         .route("/v1/canvas/operations/dry-run", post(dry_run_operations))
         .route("/v1/canvas/operations/apply", post(apply_operations))
         .route("/v1/runtime", get(runtime_report))
+        .route("/v1/media/inbox", get(media_inbox))
+        .route("/v1/media/video-ingests", post(submit_video_ingest))
         .route("/v1/tasks/test-clips", post(submit_test_clip))
         .route("/v1/tasks/:task_id", get(task_status))
         .route("/v1/tasks/:task_id/cancel", post(cancel_task))
@@ -172,6 +174,16 @@ async fn list_projects(
     Ok(Json(Success::new(json!(state.canvas.list_projects()?))))
 }
 
+async fn create_project(
+    State(state): State<BridgeState>,
+    payload: Result<Json<ProjectCreateRequest>, JsonRejection>,
+) -> Result<Json<Success<Value>>, BridgeError> {
+    let Json(request) = structured_json(payload)?;
+    Ok(Json(Success::new(json!(state
+        .canvas
+        .create_project(request)?))))
+}
+
 async fn get_project(
     State(state): State<BridgeState>,
     Path(project_id): Path<String>,
@@ -205,6 +217,141 @@ async fn runtime_report(
     State(state): State<BridgeState>,
 ) -> Result<Json<Success<Value>>, BridgeError> {
     Ok(Json(Success::new(state.runtime.report()?)))
+}
+
+async fn media_inbox(
+    State(state): State<BridgeState>,
+) -> Result<Json<Success<Value>>, BridgeError> {
+    Ok(Json(Success::new(state.runtime.media_inbox()?)))
+}
+
+async fn submit_video_ingest(
+    State(state): State<BridgeState>,
+    payload: Result<Json<VideoIngestRequest>, JsonRejection>,
+) -> Result<Json<Success<Value>>, BridgeError> {
+    let Json(request) = structured_json(payload)?;
+    state.runtime.validate_video_ingest(&request)?;
+    let canvas_task_id = format!("agent-media-{}", request.request_id);
+    let timestamp = now_rfc3339()?;
+    let started = state.canvas.apply_protocol_batch(
+        &request.project_id,
+        json!({
+            "protocolVersion": 1,
+            "actor": "agent",
+            "requestId": request.request_id,
+            "projectId": request.project_id,
+            "baseRevision": request.base_revision,
+            "timestamp": timestamp,
+            "operations": [
+                {
+                    "type": "node.create",
+                    "node": {
+                        "id": request.node_id,
+                        "type": "video",
+                        "title": request.title,
+                        "position": request.position,
+                        "width": request.size.width,
+                        "height": request.size.height,
+                        "metadata": {
+                            "status": "loading",
+                            "progress": 5,
+                            "generationMode": "video",
+                            "prompt": request.title,
+                            "localTaskKind": "agent_video_ingest",
+                            "localCanvasTaskId": canvas_task_id,
+                            "agentMediaInboxFile": request.inbox_file_name,
+                            "expectedSha256": request.expected_sha256
+                        }
+                    }
+                },
+                {
+                    "type": "task.start",
+                    "task": {
+                        "id": canvas_task_id,
+                        "nodeId": request.node_id,
+                        "kind": "agent_video_ingest",
+                        "status": "queued",
+                        "requestId": request.request_id,
+                        "details": {
+                            "paid": false,
+                            "source": "agent_bridge",
+                            "expectedSha256": request.expected_sha256
+                        }
+                    }
+                }
+            ]
+        }),
+        false,
+    )?;
+
+    if started.duplicate {
+        if let Some(runtime_task_id) = started
+            .project
+            .pointer(&format!(
+                "/operationState/tasks/{}/details/runtimeTaskId",
+                json_pointer_token(&canvas_task_id)
+            ))
+            .and_then(Value::as_str)
+        {
+            let current_revision = started
+                .project
+                .pointer("/operationState/revision")
+                .and_then(Value::as_u64)
+                .unwrap_or(started.revision);
+            return Ok(Json(Success::new(json!({
+                "task_id": runtime_task_id,
+                "duplicate": true,
+                "mode": "allowlisted_mp4_ingest",
+                "paid": false,
+                "canvas_task_id": canvas_task_id,
+                "canvas_revision": current_revision
+            }))));
+        }
+    }
+
+    let runtime_result = match state.runtime.submit_video_ingest(&request) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = update_canvas_ingest_task(
+                &state.canvas,
+                &request.project_id,
+                &request.node_id,
+                &canvas_task_id,
+                "failed",
+                json!({ "runtimeError": { "code": error.code, "message": error.message } }),
+                json!({
+                    "status": "error",
+                    "errorDetails": error.message,
+                }),
+            );
+            return Err(error);
+        }
+    };
+    let runtime_task_id = runtime_result["task_id"]
+        .as_str()
+        .ok_or_else(|| BridgeError::internal("The desktop runtime task id is missing."))?;
+    let updated = update_canvas_ingest_task(
+        &state.canvas,
+        &request.project_id,
+        &request.node_id,
+        &canvas_task_id,
+        "running",
+        json!({
+            "runtimeTaskId": runtime_task_id,
+            "runtime": runtime_result,
+        }),
+        json!({
+            "localTaskId": runtime_task_id,
+            "localTaskKind": "agent_video_ingest",
+            "localCanvasTaskId": canvas_task_id,
+            "status": "loading",
+            "progress": 15
+        }),
+    )?;
+    let mut response = runtime_result;
+    response["canvas_task_id"] = Value::String(canvas_task_id);
+    response["canvas_revision"] = json!(updated.revision.max(started.revision));
+    Ok(Json(Success::new(response)))
 }
 
 async fn submit_test_clip(
@@ -381,6 +528,62 @@ fn update_canvas_task(
             "The canvas kept changing while the task status was committed.",
         )
     }))
+}
+
+fn update_canvas_ingest_task(
+    canvas: &Arc<dyn CanvasOperationAdapter>,
+    project_id: &str,
+    node_id: &str,
+    canvas_task_id: &str,
+    status: &str,
+    details: Value,
+    metadata: Value,
+) -> Result<crate::ProtocolOutcome, BridgeError> {
+    let mut last_error = None;
+    for attempt in 0..3 {
+        let project = canvas.get_project(project_id)?;
+        let timestamp = now_rfc3339()?;
+        let result = canvas.apply_protocol_batch(
+            project_id,
+            json!({
+                "protocolVersion": 1,
+                "actor": "system",
+                "requestId": format!("system-media-{}-{}-{}-{}", canvas_task_id, status, project.revision, attempt),
+                "projectId": project_id,
+                "baseRevision": project.revision,
+                "timestamp": timestamp,
+                "operations": [
+                    {
+                        "type": "task.update",
+                        "taskId": canvas_task_id,
+                        "status": status,
+                        "details": details
+                    },
+                    {
+                        "type": "node.update",
+                        "nodeId": node_id,
+                        "patch": { "metadata": metadata }
+                    }
+                ]
+            }),
+            false,
+        );
+        match result {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) if error.code == "STALE_REVISION" => last_error = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        BridgeError::conflict(
+            "STALE_REVISION",
+            "The canvas kept changing while the media task was committed.",
+        )
+    }))
+}
+
+fn json_pointer_token(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
 }
 
 fn now_rfc3339() -> Result<String, BridgeError> {

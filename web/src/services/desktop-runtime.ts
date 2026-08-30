@@ -45,6 +45,18 @@ export type DesktopTaskMedia = {
     mime_type: "video/mp4";
     file_name: string;
     sha256: string;
+    probe: {
+        duration_ms?: number;
+        streams: Array<{
+            index: number;
+            codec_type: string;
+            codec_name?: string;
+            width?: number;
+            height?: number;
+            sample_rate?: number;
+            channels?: number;
+        }>;
+    };
     bytes: number[];
 };
 
@@ -61,6 +73,10 @@ export type DesktopTaskSnapshot = {
                 index: number;
                 codec_type: string;
                 codec_name?: string;
+                width?: number;
+                height?: number;
+                sample_rate?: number;
+                channels?: number;
             }>;
         };
     };

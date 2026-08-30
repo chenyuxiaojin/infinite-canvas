@@ -553,23 +553,24 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             const operations: CanvasOperation[] = [];
             const currentNode = project.nodes.find((node) => node.id === nodeId);
             if (!currentNode) return null;
-            const existingTask = project.operationState.tasks[task.id];
+            const protocolTaskId = currentNode.metadata?.localCanvasTaskId || task.id;
+            const existingTask = project.operationState.tasks[protocolTaskId];
             if (!existingTask) {
                 operations.push({
                     type: "task.start",
                     task: {
-                        id: task.id,
+                        id: protocolTaskId,
                         nodeId,
-                        kind: "deterministic_test_clip",
+                        kind: currentNode.metadata?.localTaskKind || "deterministic_test_clip",
                         status: task.status === "queued" ? "queued" : "running",
-                        requestId: `desktop-task-${task.id}`,
+                        requestId: `desktop-task-${protocolTaskId}`,
                     },
                 });
             }
             if (task.status !== "queued" && existingTask?.status !== task.status) {
                 operations.push({
                     type: "task.update",
-                    taskId: task.id,
+                    taskId: protocolTaskId,
                     status: task.status,
                     details: {
                         action: task.action,
@@ -586,7 +587,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             const outcome = applyOperationBatch({
                 protocolVersion: CANVAS_OPERATION_PROTOCOL_VERSION,
                 actor: "system",
-                requestId: `system-task-${task.id}-${task.status}-${project.operationState.revision}`,
+                requestId: `system-task-${protocolTaskId}-${task.status}-${project.operationState.revision}`,
                 projectId,
                 baseRevision: project.operationState.revision,
                 timestamp: new Date().toISOString(),

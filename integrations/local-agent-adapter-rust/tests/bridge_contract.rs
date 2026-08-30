@@ -10,7 +10,8 @@ use assert_cmd::cargo::cargo_bin;
 use local_agent_adapter::{
     read_credential_token, Actor, AgentOperationRequest, AgentRuntime, BridgeClient, BridgeError,
     BridgeServer, CanonicalCanvasAdapter, CanvasOperation, CanvasOperationAdapter,
-    CanvasProtocolExecutor, CredentialDocument, CredentialStore, ProtocolOutcome, TestClipRequest,
+    CanvasProtocolExecutor, CanvasSize, CredentialDocument, CredentialStore, Point,
+    ProjectCreateRequest, ProtocolOutcome, TestClipRequest, VideoIngestRequest,
 };
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -28,13 +29,9 @@ impl CanvasProtocolExecutor for FixtureProtocol {
     ) -> Result<ProtocolOutcome, BridgeError> {
         let previous_revision = project["operationState"]["revision"].as_u64().unwrap_or(0);
         let request_id = batch["requestId"].as_str().unwrap_or_default();
-        let duplicate = project["operationState"]["processedRequests"]
-            .as_array()
-            .is_some_and(|entries| {
-                entries
-                    .iter()
-                    .any(|entry| entry["requestId"].as_str() == Some(request_id))
-            });
+        let duplicate = project["operationState"]["requests"]
+            .as_object()
+            .is_some_and(|requests| requests.contains_key(request_id));
         if duplicate {
             return Ok(ProtocolOutcome {
                 project,
@@ -64,20 +61,59 @@ impl CanvasProtocolExecutor for FixtureProtocol {
             });
         }
         for operation in batch["operations"].as_array().unwrap() {
-            if operation["type"] == "project.update" {
-                project["title"] = operation["title"].clone();
+            match operation["type"].as_str().unwrap_or_default() {
+                "project.update" => project["title"] = operation["title"].clone(),
+                "node.create" => project["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(operation["node"].clone()),
+                "node.update" => {
+                    let node_id = operation["nodeId"].as_str().unwrap();
+                    let node = project["nodes"]
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|node| node["id"].as_str() == Some(node_id))
+                        .unwrap();
+                    let patch = operation["patch"].as_object().unwrap();
+                    for (key, value) in patch {
+                        if key == "metadata" {
+                            let metadata = node["metadata"].as_object_mut().unwrap();
+                            for (metadata_key, metadata_value) in value.as_object().unwrap() {
+                                metadata.insert(metadata_key.clone(), metadata_value.clone());
+                            }
+                        } else {
+                            node[key] = value.clone();
+                        }
+                    }
+                }
+                "task.start" => {
+                    let mut task = operation["task"].clone();
+                    task["createdAt"] = Value::String(now.to_owned());
+                    task["updatedAt"] = Value::String(now.to_owned());
+                    let task_id = task["id"].as_str().unwrap().to_owned();
+                    project["operationState"]["tasks"][task_id] = task;
+                }
+                "task.update" => {
+                    let task_id = operation["taskId"].as_str().unwrap();
+                    let task = &mut project["operationState"]["tasks"][task_id];
+                    task["status"] = operation["status"].clone();
+                    task["updatedAt"] = Value::String(now.to_owned());
+                    let details = task["details"].as_object_mut().unwrap();
+                    for (key, value) in operation["details"].as_object().unwrap() {
+                        details.insert(key.clone(), value.clone());
+                    }
+                }
+                _ => {}
             }
         }
         let revision = previous_revision + 1;
         project["updatedAt"] = Value::String(now.to_owned());
         project["operationState"]["revision"] = json!(revision);
-        project["operationState"]["processedRequests"] = json!([{
-            "requestId": request_id,
+        project["operationState"]["requests"][request_id] = json!({
             "fingerprint": "fixture",
-            "revision": revision,
-            "status": "applied",
             "result": { "ok": true, "duplicate": false, "previousRevision": previous_revision, "revision": revision, "items": [] }
-        }]);
+        });
         Ok(ProtocolOutcome {
             project,
             ok: true,
@@ -94,6 +130,28 @@ impl CanvasProtocolExecutor for FixtureProtocol {
 impl AgentRuntime for MockRuntime {
     fn report(&self) -> Result<Value, BridgeError> {
         Ok(json!({ "transport": "mock", "paid": false }))
+    }
+
+    fn media_inbox(&self) -> Result<Value, BridgeError> {
+        Ok(json!({
+            "kind": "fixed_app_support_inbox",
+            "path": "/fixture/agent-media/inbox",
+            "accepted_mime_types": ["video/mp4"],
+            "arbitrary_paths": false
+        }))
+    }
+
+    fn validate_video_ingest(&self, _request: &VideoIngestRequest) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
+    fn submit_video_ingest(&self, request: &VideoIngestRequest) -> Result<Value, BridgeError> {
+        Ok(json!({
+            "task_id": format!("media-{}", request.request_id),
+            "duplicate": false,
+            "mode": "allowlisted_mp4_ingest",
+            "paid": false
+        }))
     }
 
     fn submit_test_clip(&self, request: &TestClipRequest) -> Result<Value, BridgeError> {
@@ -151,12 +209,12 @@ impl Fixture {
                 "nodes": [],
                 "connections": [],
                 "operationState": {
-                    "protocolVersion": 1,
+                    "version": 1,
                     "revision": 0,
-                    "locks": [],
-                    "processedRequests": [],
-                    "auditLog": [],
-                    "undoStack": []
+                    "locks": {},
+                    "tasks": {},
+                    "requests": {},
+                    "audit": []
                 }
             }))
             .unwrap();
@@ -315,6 +373,123 @@ fn apply_is_revision_guarded_and_idempotent() {
 }
 
 #[test]
+fn project_creation_is_protocol_backed_and_idempotent() {
+    let fixture = Fixture::new();
+    let request = ProjectCreateRequest {
+        project_id: "agent-review-wall".to_owned(),
+        request_id: "create-review-wall".to_owned(),
+        actor: Actor::Agent,
+        title: "Agent review wall".to_owned(),
+    };
+    let first = fixture.canvas.create_project(request.clone()).unwrap();
+    fixture
+        .canvas
+        .apply_operations(
+            AgentOperationRequest {
+                project_id: "agent-review-wall".to_owned(),
+                request_id: "rename-review-wall".to_owned(),
+                base_revision: 1,
+                actor: Actor::Agent,
+                operations: vec![CanvasOperation::SetProjectTitle {
+                    title: "Agent review wall updated".to_owned(),
+                }],
+            },
+            false,
+        )
+        .unwrap();
+    let duplicate = fixture.canvas.create_project(request).unwrap();
+    assert!(!first.duplicate);
+    assert!(duplicate.duplicate);
+    assert_eq!(first.revision, 1);
+    assert_eq!(duplicate.revision, 2);
+    assert_eq!(duplicate.project["title"], "Agent review wall updated");
+
+    let reused_id = fixture
+        .canvas
+        .create_project(ProjectCreateRequest {
+            project_id: "agent-review-wall".to_owned(),
+            request_id: "different-request".to_owned(),
+            actor: Actor::Agent,
+            title: "Must not replace".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(reused_id.code, "PROJECT_EXISTS");
+}
+
+#[test]
+fn allowlisted_video_ingest_creates_one_shared_video_node_and_task() {
+    let fixture = Fixture::new();
+    let request = VideoIngestRequest {
+        project_id: "project-1".to_owned(),
+        node_id: "video-1".to_owned(),
+        request_id: "ingest-1".to_owned(),
+        base_revision: 0,
+        actor: Actor::Agent,
+        inbox_file_name: "shot-001.mp4".to_owned(),
+        expected_sha256: "a".repeat(64),
+        title: "Shot 001".to_owned(),
+        position: Point { x: 10.0, y: 20.0 },
+        size: CanvasSize {
+            width: 320.0,
+            height: 180.0,
+        },
+    };
+    let first = fixture
+        .client()
+        .post("/v1/media/video-ingests", &request)
+        .unwrap();
+    assert_eq!(first["data"]["task_id"], "media-ingest-1");
+    assert_eq!(first["data"]["canvas_revision"], 2);
+
+    let duplicate = fixture
+        .client()
+        .post("/v1/media/video-ingests", &request)
+        .unwrap();
+    assert_eq!(duplicate["data"]["duplicate"], true);
+    assert_eq!(duplicate["data"]["canvas_revision"], 2);
+    let project = fixture.canvas.get_project("project-1").unwrap().project;
+    assert_eq!(project["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(project["nodes"][0]["type"], "video");
+    assert_eq!(
+        project["nodes"][0]["metadata"]["localTaskId"],
+        "media-ingest-1"
+    );
+    assert_eq!(
+        project["operationState"]["tasks"]["agent-media-ingest-1"]["details"]["runtimeTaskId"],
+        "media-ingest-1"
+    );
+}
+
+#[test]
+fn arbitrary_media_paths_are_rejected_by_the_schema() {
+    let fixture = Fixture::new();
+    let request = json!({
+        "project_id": "project-1",
+        "node_id": "video-1",
+        "request_id": "ingest-path",
+        "base_revision": 0,
+        "actor": "agent",
+        "inbox_file_name": "shot.mp4",
+        "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "title": "Shot",
+        "position": { "x": 0, "y": 0 },
+        "size": { "width": 320, "height": 180 },
+        "path": "../../escape.mp4"
+    });
+    let error = fixture
+        .client()
+        .post("/v1/media/video-ingests", &request)
+        .unwrap_err();
+    assert_eq!(error.code, "INVALID_REQUEST");
+    assert!(
+        fixture.canvas.get_project("project-1").unwrap().project["nodes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn cli_emits_json_and_stable_exit_codes_without_token_arguments() {
     let fixture = Fixture::new();
     let binary = cargo_bin("infinite-canvas");
@@ -368,4 +543,82 @@ fn cli_emits_json_and_stable_exit_codes_without_token_arguments() {
     assert_eq!(usage.status.code(), Some(2));
     let json: Value = serde_json::from_slice(&usage.stdout).unwrap();
     assert_eq!(json["error"]["code"], "INVALID_REQUEST");
+}
+
+#[test]
+fn cli_exposes_project_create_and_fixed_inbox_video_ingest() {
+    let fixture = Fixture::new();
+    let binary = cargo_bin("infinite-canvas");
+    let create_file = fixture._root.path().join("create-project.json");
+    fs::write(
+        &create_file,
+        serde_json::to_vec(&ProjectCreateRequest {
+            project_id: "cli-review-wall".to_owned(),
+            request_id: "cli-create-review-wall".to_owned(),
+            actor: Actor::Agent,
+            title: "CLI review wall".to_owned(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let endpoint = fixture.endpoint();
+    let credential_path = fixture.credentials.path();
+    let common = [
+        "--endpoint",
+        endpoint.as_str(),
+        "--credential-file",
+        credential_path.to_str().unwrap(),
+    ];
+    let created = Command::new(&binary)
+        .args(common)
+        .args(["projects", "create", "--file"])
+        .arg(&create_file)
+        .output()
+        .unwrap();
+    assert_eq!(created.status.code(), Some(0));
+    let created: Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(created["data"]["project_id"], "cli-review-wall");
+    assert_eq!(created["data"]["revision"], 1);
+
+    let inbox = Command::new(&binary)
+        .args(common)
+        .args(["media", "inbox"])
+        .output()
+        .unwrap();
+    assert_eq!(inbox.status.code(), Some(0));
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).unwrap();
+    assert_eq!(inbox["data"]["arbitrary_paths"], false);
+    assert_eq!(inbox["data"]["path"], "/fixture/agent-media/inbox");
+
+    let ingest_file = fixture._root.path().join("ingest-video.json");
+    fs::write(
+        &ingest_file,
+        serde_json::to_vec(&VideoIngestRequest {
+            project_id: "project-1".to_owned(),
+            node_id: "cli-video-1".to_owned(),
+            request_id: "cli-ingest-1".to_owned(),
+            base_revision: 0,
+            actor: Actor::Agent,
+            inbox_file_name: "shot-001.mp4".to_owned(),
+            expected_sha256: "b".repeat(64),
+            title: "CLI Shot 001".to_owned(),
+            position: Point { x: 0.0, y: 0.0 },
+            size: CanvasSize {
+                width: 320.0,
+                height: 180.0,
+            },
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let ingested = Command::new(binary)
+        .args(common)
+        .args(["media", "video", "ingest", "--file"])
+        .arg(&ingest_file)
+        .output()
+        .unwrap();
+    assert_eq!(ingested.status.code(), Some(0));
+    let ingested: Value = serde_json::from_slice(&ingested.stdout).unwrap();
+    assert_eq!(ingested["data"]["task_id"], "media-cli-ingest-1");
+    assert_eq!(ingested["data"]["canvas_revision"], 2);
 }

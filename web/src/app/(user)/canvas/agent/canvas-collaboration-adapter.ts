@@ -1,5 +1,5 @@
 import type { CanvasAgentToolResult } from "./canvas-agent-tools";
-import type { CanvasOperationAuditEntry, CanvasOperationState } from "../protocol/canvas-operation-protocol";
+import { canUndoCanvasAgentBatch, type CanvasOperationAuditEntry, type CanvasOperationState } from "../protocol/canvas-operation-protocol";
 import type { CanvasAgentChangeBatch, CanvasCollaborationState, CanvasCollaborationStatus, CanvasNodeData } from "../types";
 
 export type CanvasAgentBatchRuntime = {
@@ -126,6 +126,7 @@ function toView(operationState: CanvasOperationState, status: CanvasCollaboratio
                 revision: entry.result.revision,
                 status: entry.result.ok ? "success" : isConflict(entry) ? "conflict" : "error",
                 reversible: Boolean(entry.result.ok && entry.undoSnapshot),
+                canUndoNow: canUndoCanvasAgentBatch(operationState, entry.batch.requestId),
                 error: entry.result.error?.message,
                 undoneAt: undoneAtByRequest.get(entry.batch.requestId),
             };

@@ -80,22 +80,22 @@
 | P3.3 | 失败、取消、重启恢复、重复任务防护和输出冲突都有可验证行为 | 通过 | 执行核心自动测试覆盖验证失败清理 partial、queued/running 取消、哈希阶段取消、进程失败/超时、重启将未完成任务标记失败、并发/串行幂等和 Reject 冲突；真实 `.app` 退出重启后任务仍成功且媒体可用。回灌项目点击“本地测试片”只聚焦既有节点并提示“该画布已保留本地测试片及来源关系”，journal 仍为 2 个任务、媒体仍为 2 个文件。桌面 ZIP 发布测试证明同名目标拒绝覆盖且原字节不变 |
 | P3.4 | 全项目导出/重新导入后节点关系和本地媒体不丢失 | 通过 | 桌面原生保存框导出 `data/p3-evidence/P3-workflow-bedaac2.zip`（忽略目录），ZIP 192945 bytes、SHA-256 `8803df0e961dcdde3f054390b3a1d20083e97823b22a95d8f0ebdb716c97b9b9`，`unzip -t` 通过；含 v3 `projects.json` 与 3 份媒体。回灌后仍为 4 节点/1 连线；内嵌视频/音频/图片 SHA 分别为 `d3bf7ba437acab289ed29638f3e481004c5828af84525c4e1d1c76d47fe1dddd`、`c6b6fb62aa740f601ad8fabd41ea0889087eec458e12aabdfb7d6635164005c3`、`51ceaa223006f44c00831e742b7740e682e2c29ba96312e6b898a523d0e2717e`，均与导出前一致并由 FFmpeg 完整解码。退出重启后回灌项目和三份媒体仍可打开/播放 |
 | P3.5 | 原始资料、选中结果、失败结果和日志边界清楚，不覆盖用户文件 | 通过 | 用户测试图片/音频只作为独立 Blob 存储，不修改源文件；执行结果只发布到 `~/Library/Application Support/com.chenyuxiaojin.infinitecanvas/local-executor/acceptance/` 的哈希化固定文件名，画布只取得二次 SHA 校验后的受限副本。失败 partial 会清理，任务事件不记录路径/参数，导出只能经原生选择写 `.zip` 且 create-new 语义拒绝覆盖；ZIP 清单区分 `projects.json`、各项目 `files/` 和 storageKey |
-| P3.6 | 人工与内置 Agent、打包 CLI/Bridge、system task 使用同一工程、revision、锁和审计，可见、可测、可撤销 | 进行中 | 隔离验收 App `com.chenyuxiaojin.infinitecanvas.integrationtest` 使用固定 `127.0.0.1:3210/3211/3212` 和一次性工程完成 dry-run、Agent 创建、UI 即时显示、重复 request、人工锁、`LOCKED_NODE`、`STALE_REVISION`、重读续写、UI 撤销、重启和 ZIP 往返；协议 13 passed，共编 UI 7 passed。用户现场实际运行的仍是主检出 `e00acb7` 旧包，只监听 3100/3101、正式 SQLite `canvas_projects` 为 0 行且没有 3102 Bridge，因此旧包不能直接供 Agent 读写。正式包切换和备份后首次迁移尚未由用户确认，隔离结果不能代替。 |
-| P3.7 | CLI 随 `.app` 打包；Bridge 只监听 loopback；凭据不泄露；ZIP 往返保留结构和协议状态 | 通过 | 标准 `.app/Contents/MacOS/infinite-canvas` 为 arm64，SHA-256 `f4bcb2460c40d6bc917f5e76a60fe385150b3da92d05e65b2041ca1e25f32138`，与 release CLI 一致；最新技术包已安装到 `~/Applications/无限画布.app`，稳定 CLI 入口为 `~/.local/bin/infinite-canvas`，尚未自动启动或迁移正式项目。`lsof` 现场只见验收 App 在 `127.0.0.1:3210/3211/3212` 监听；capabilities 明确拒绝 shell、任意路径/URL、付费生成和公网监听。安装凭据为私有文件，按真实 secret 扫描 tracked files 和标准 App 可执行文件无命中。真实 UI 导出 ZIP 198566 bytes、SHA-256 `07dc9e984af0e2e4d8b22f9c3171dc287069015f7ffb1cd5cf7df13f6b302024`，`unzip -t` 无错误；修复导入身份重绑定后，副本 `tTxP4FnkV59R4J75I8AYF` 保留 revision 10、4 节点、2 连线、1 锁、1 task、12 条 audit，所有 audit/result project ID 均为副本 ID，重放原 request 返回 `duplicate:true` 且持久 revision 仍为 10。 |
+| P3.6 | 人工与内置 Agent、打包 CLI/Bridge、system task 使用同一工程、revision、锁和审计，可见、可测、可撤销 | 通过 | 隔离验收 App `com.chenyuxiaojin.infinitecanvas.integrationtest` 使用固定 `127.0.0.1:3210/3211/3212` 和一次性工程完成 dry-run、Agent 创建、UI 即时显示、重复 request、人工锁、`LOCKED_NODE`、`STALE_REVISION`、重读续写、UI 撤销、重启和 ZIP 往返。用户随后先备份正式 Application Support + WebKit，再启动 `~/Applications/无限画布.app`，现场确认 3100/3101/3102、未授权 401、4 个迁移工程、CLI dry-run/apply、revision 0→1、幂等、审计和撤销快照；正式 SQLite/Bridge 链路不再是空表。协议 15 passed，共编 UI 7 passed。 |
+| P3.7 | CLI 随 `.app` 打包；Bridge 只监听 loopback；凭据不泄露；ZIP 往返保留结构和协议状态 | 通过 | 最终标准 `.app/Contents/MacOS/infinite-canvas` 为 arm64，与 release CLI 的 SHA-256 均为 `1e9b16bb4fa20bae942f858d7b056885cd83400a93c7c11c23c3694f4aff9daf`；包内没有 credential/database 文件。`lsof` 现场只见验收 App 在 `127.0.0.1:3210/3211/3212` 监听，用户正式现场也只启用 3100/3101/3102。capabilities 明确拒绝 shell、任意路径/URL、付费生成和公网监听。安装凭据为私有文件，真实 secret 未写入 tracked files 或回复。旧 v3 ZIP 往返已保留完整协议状态；v4 导出的 `local-task:` MP4 也已真实回灌。 |
+| P3.8 | 外部 Agent 可安全创建一次性工程并把白名单目录 MP4 写成可播放视频节点，不接受任意路径 | 通过 | 新增 `POST /v1/projects`、`GET /v1/media/inbox`、`POST /v1/media/video-ingests` 及对应 CLI。隔离实测：画布库无需刷新即出现 CLI 新工程；固定 inbox 的 2 秒 MP4 生成 640x360、2005 ms 视频节点，UI 自动出现并可播放；稳定 revision 4、1 node、1 canvas task、4 audit，重复 request 计数不变。人工锁后为 `LOCKED_NODE`，人工 revision 5→6 后旧请求为 `STALE_REVISION`；重启后结构/任务/媒体仍在，重复摄入报告当前 revision 6。v4 ZIP 含 491694-byte MP4；修正 `.zip` filter 后副本 `waCbl0WxWvM8Ro1OjHYYa` 成功回灌，保留 revision 6、1 video、1 task、8 audit、重绑定历史及可播放 00:02 媒体。用户确认后从真实 UI 撤销独立媒体批次，UI 显示 0 元素/revision 5/已撤销；CLI 同步读回 0 node、0 connection、0 task、5 audit 和非空 `undoneByRequestId`。 |
 
 ### P3 事实、推断、未知
 
 - 事实：真实 `.app` 已完成文本/图片/视频/音频画布、固定本地任务回填、来源连线、播放、ZIP 导出/回灌、退出重启与重复防护。项目 JSON 和大媒体 Blob 分离保存，但 v3 ZIP 会用 storageKey manifest 将三份媒体一起打包；哈希与完整解码均已现场复核。
 - 事实：原网页 `file-saver` 在 Tauri WebView 内点击后没有文件或错误。桌面分支因此改为 raw binary IPC + macOS 原生保存框，用户明确选址后由 Rust 校验 ZIP、同步 staging 并原子 create-new 发布；浏览器构建仍沿用原下载行为。
 - 事实：公共 `CanvasProject.operationState` 已接管人、Agent 和 system 的数值 revision、锁、task、request 幂等及 audit；Bridge 不再初始化第二张 Agent journal 表。真实总装验收曾暴露并修复媒体 `blob:` 恢复产生伪 revision、桌面轮询水合竞态、导入副本历史 ID 未重绑定和高 revision 被较新墙钟误拒绝四类问题。
-- 事实：用户现场运行的是基线主检出旧包，不含 Agent Bridge；它的工程仍在
-  WKWebView IndexedDB，正式 SQLite 工程表为空。隔离 bundle 的 P3.6 通过不能
-  证明这个旧包已完成升级。
+- 事实：用户已在成对备份后完成第一阶段正式包换装；3102 Bridge、迁移后的 4 个
+  工程和 CLI 直写均由用户现场确认。当前正式包尚不含 P3.8 的受控视频摄入增量，
+  自动化没有向正式用户工程写入视频或任务。
 - 推断：当前安全边界足以承载后续本地 Provider 的同类“固定请求 -> 结构化状态 -> 验证后回填”工作流；真实生产任务仍应先扩展任务类型和输入白名单，而不是开放 shell 或任意路径。
-- 未知：同 bundle ID 的新技术包首次启动后，正式旧 IndexedDB 工程迁移到 SQLite
-  的结果尚未由用户在备份后确认；当前固定任务约 1 秒，取消行为由真实执行核心
-  自动测试而非人工抢按按钮验收；超大项目 ZIP 仍是内存构建并设置 2 GiB IPC
-  上限，性能/流式导出尚未验证。达芬奇/Eagle 写入和正式用户视频不在本阶段范围内。
+- 未知：单镜头通过不能推断 27 镜同时加载的内存/滚动性能。当前 ZIP 仍是内存构建
+  并设置 2 GiB IPC 上限，性能/流式导出尚未验证。达芬奇/Eagle 写入和正式用户
+  视频不在本阶段范围内。
 
 ## P4 macOS 分发验收
 

@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    thread,
     time::Duration,
 };
 
@@ -78,6 +79,25 @@ pub struct AgentOperationRequest {
     pub base_revision: u64,
     pub actor: Actor,
     pub operations: Vec<CanvasOperation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCreateRequest {
+    pub project_id: String,
+    pub request_id: String,
+    pub actor: Actor,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProjectCreateResult {
+    pub project_id: String,
+    pub request_id: String,
+    pub actor: Actor,
+    pub duplicate: bool,
+    pub revision: u64,
+    pub project: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -177,23 +197,34 @@ impl CanvasProtocolExecutor for HttpCanvasProtocolExecutor {
         batch: Value,
         now: &str,
     ) -> Result<ProtocolOutcome, BridgeError> {
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .send_json(json!({ "project": project, "batch": batch, "now": now }));
-        let response = match response {
-            Ok(response) => response,
-            Err(ureq::Error::Status(_, _)) => {
-                return Err(BridgeError::internal(
-                    "The shared canvas operation protocol rejected an internal request.",
-                ))
+        let payload = json!({ "project": project, "batch": batch, "now": now });
+        let mut response = None;
+        for attempt in 0..3 {
+            match self.client.post(&self.endpoint).send_json(payload.clone()) {
+                Ok(value) => {
+                    response = Some(value);
+                    break;
+                }
+                Err(ureq::Error::Status(_, _)) => {
+                    return Err(BridgeError::internal(
+                        "The shared canvas operation protocol rejected an internal request.",
+                    ))
+                }
+                Err(ureq::Error::Transport(_)) if attempt < 2 => {
+                    // Next may briefly stop accepting connections while the WebView is
+                    // navigating. Request IDs make replay safe if the response was lost.
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(ureq::Error::Transport(_)) => {
+                    return Err(BridgeError::unavailable(
+                        "The shared canvas operation protocol is not running.",
+                    ))
+                }
             }
-            Err(ureq::Error::Transport(_)) => {
-                return Err(BridgeError::unavailable(
-                    "The shared canvas operation protocol is not running.",
-                ))
-            }
-        };
+        }
+        let response = response.ok_or_else(|| {
+            BridgeError::unavailable("The shared canvas operation protocol is not running.")
+        })?;
         let value = response.into_json::<Value>().map_err(|_| {
             BridgeError::internal("The shared canvas operation protocol returned invalid JSON.")
         })?;
@@ -214,6 +245,10 @@ impl CanvasProtocolExecutor for HttpCanvasProtocolExecutor {
 pub trait CanvasOperationAdapter: Send + Sync {
     fn list_projects(&self) -> Result<Vec<ProjectSummary>, BridgeError>;
     fn get_project(&self, project_id: &str) -> Result<ProjectDocument, BridgeError>;
+    fn create_project(
+        &self,
+        request: ProjectCreateRequest,
+    ) -> Result<ProjectCreateResult, BridgeError>;
     fn apply_operations(
         &self,
         request: AgentOperationRequest,
@@ -429,6 +464,83 @@ impl CanvasOperationAdapter for CanonicalCanvasAdapter {
         Ok(ProjectDocument {
             revision: project_revision(&project)?,
             project,
+        })
+    }
+
+    fn create_project(
+        &self,
+        request: ProjectCreateRequest,
+    ) -> Result<ProjectCreateResult, BridgeError> {
+        validate_project_create_request(&request)?;
+        let now = now_rfc3339()?;
+        let batch = json!({
+            "protocolVersion": CANVAS_OPERATION_PROTOCOL_VERSION,
+            "actor": "agent",
+            "requestId": request.request_id,
+            "projectId": request.project_id,
+            "baseRevision": 0,
+            "timestamp": now,
+            "operations": [{ "type": "project.update", "title": request.title }],
+        });
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = transaction
+            .query_row(
+                "SELECT project_data, deleted_at FROM canvas_projects
+                 WHERE user_id = ?1 AND id = ?2",
+                params![DESKTOP_LOCAL_USER_ID, request.project_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let existed = current.is_some();
+        let source = if let Some((raw, deleted_at)) = current {
+            if !deleted_at.is_empty() {
+                return Err(BridgeError::conflict(
+                    "PROJECT_DELETED",
+                    "The requested canvas project id belongs to a deleted project.",
+                ));
+            }
+            let project: Value = serde_json::from_str(&raw).map_err(|_| {
+                BridgeError::internal("A desktop canvas project contains invalid JSON.")
+            })?;
+            if project
+                .pointer("/operationState/requests")
+                .and_then(Value::as_object)
+                .is_none_or(|requests| !requests.contains_key(&request.request_id))
+            {
+                return Err(BridgeError::conflict(
+                    "PROJECT_EXISTS",
+                    "The requested canvas project id already exists.",
+                ));
+            }
+            project
+        } else {
+            empty_canvas_project(&request.project_id, &now)
+        };
+        let outcome = self.protocol.apply(source, batch, &now)?;
+        if !outcome.ok {
+            return Err(protocol_error(&outcome));
+        }
+        if !existed {
+            let raw = serde_json::to_string(&outcome.project).map_err(|_| {
+                BridgeError::internal("The created canvas project could not be encoded.")
+            })?;
+            transaction.execute(
+                "INSERT INTO canvas_projects
+                 (user_id, id, project_data, created_at, updated_at, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4, '')",
+                params![DESKTOP_LOCAL_USER_ID, request.project_id, raw, now],
+            )?;
+        }
+        let current_revision = project_revision(&outcome.project)?;
+        transaction.commit()?;
+        Ok(ProjectCreateResult {
+            project_id: request.project_id,
+            request_id: request.request_id,
+            actor: request.actor,
+            duplicate: outcome.duplicate,
+            revision: current_revision,
+            project: outcome.project,
         })
     }
 
@@ -719,6 +831,40 @@ fn project_revision(project: &Value) -> Result<u64, BridgeError> {
             .ok_or_else(|| BridgeError::internal("The canvas operation revision is invalid.")),
         None => Ok(0),
     }
+}
+
+fn empty_canvas_project(project_id: &str, now: &str) -> Value {
+    json!({
+        "id": project_id,
+        "title": "未命名画布",
+        "createdAt": now,
+        "updatedAt": now,
+        "nodes": [],
+        "connections": [],
+        "chatSessions": [],
+        "activeChatId": null,
+        "agentConfig": null,
+        "autoTitlePending": false,
+        "backgroundMode": "lines",
+        "showImageInfo": false,
+        "viewport": { "x": 0, "y": 0, "k": 1 },
+        "sidePanel": { "open": true, "width": 280 },
+        "agentPanel": { "open": false, "width": 390 },
+        "operationState": {
+            "version": CANVAS_OPERATION_PROTOCOL_VERSION,
+            "revision": 0,
+            "locks": {},
+            "tasks": {},
+            "requests": {},
+            "audit": []
+        }
+    })
+}
+
+fn validate_project_create_request(request: &ProjectCreateRequest) -> Result<(), BridgeError> {
+    validate_identifier("project_id", &request.project_id, 64)?;
+    validate_identifier("request_id", &request.request_id, 128)?;
+    validate_text("title", &request.title, 256)
 }
 
 fn validate_request(request: &AgentOperationRequest) -> Result<(), BridgeError> {

@@ -141,6 +141,39 @@ describe("人与 Agent 共用画布操作协议", () => {
         expect(undo.project.operationState.revision).toBe(2);
     });
 
+    test("媒体任务的 system 回填不会阻止人工撤销对应 Agent 批次", () => {
+        const videoNode: CanvasNodeData = {
+            id: "agent-video",
+            type: CanvasNodeType.Video,
+            title: "Agent 视频",
+            position: { x: 0, y: 0 },
+            width: 320,
+            height: 180,
+            metadata: { status: "loading", localTaskKind: "agent_video_ingest" },
+        };
+        const agent = applyCanvasOperationBatch(project(), batch("agent", "agent-video-ingest", 0, [
+            { type: "node.create", node: videoNode },
+            { type: "task.start", task: { id: "canvas-media-task", nodeId: videoNode.id, kind: "agent_video_ingest" } },
+        ]), { now: () => TIME });
+        const running = applyCanvasOperationBatch(agent.project, batch("system", "system-media-running", 1, [
+            { type: "task.update", taskId: "canvas-media-task", status: "running", details: { runtimeTaskId: "runtime-task" } },
+            { type: "node.update", nodeId: videoNode.id, patch: { metadata: { localTaskId: "runtime-task", progress: 15 } } },
+        ]), { now: () => TIME });
+        const succeeded = applyCanvasOperationBatch(running.project, batch("system", "system-media-succeeded", 2, [
+            { type: "task.update", taskId: "canvas-media-task", status: "succeeded" },
+            { type: "node.update", nodeId: videoNode.id, patch: { metadata: { content: "local-task:runtime-task", status: "success", progress: 100 } } },
+        ]), { now: () => TIME });
+        const undone = applyCanvasOperationBatch(succeeded.project, batch("human", "undo-agent-video", 3, [
+            { type: "batch.undo", targetRequestId: "agent-video-ingest" },
+        ]), { now: () => TIME });
+
+        expect(undone.result.ok).toBe(true);
+        expect(undone.project.nodes).toEqual([]);
+        expect(undone.project.operationState.tasks).toEqual({});
+        expect(undone.project.operationState.audit[0].undoneByRequestId).toBe("undo-agent-video");
+        expect(undone.project.operationState.revision).toBe(4);
+    });
+
     test("冲突批次原子拒绝，不留部分布局改动", () => {
         const initial = project([node("free"), node("locked", "locked", 300)]);
         const locked = applyCanvasOperationBatch(initial, batch("human", "lock-layout", 0, [{ type: "lock.set", nodeId: "locked", locked: true }]), { now: () => TIME });
@@ -197,12 +230,40 @@ describe("人与 Agent 共用画布操作协议", () => {
         }]);
         const hydrated = [{
             ...stored.nodes[0],
-            metadata: { ...stored.nodes[0].metadata, content: "blob:http://127.0.0.1:3210/new" },
+            metadata: { ...stored.nodes[0].metadata, content: "blob:http://127.0.0.1:3210/new", errorDetails: undefined },
         }];
 
         expect(stored.nodes[0].metadata?.content).toBe("local-task:media-1");
         expect(buildCanvasStructureOperations(stored, hydrated, [])).toEqual([]);
         expect(stored.operationState.revision).toBe(0);
+    });
+
+    test("Bridge 画布任务已关联 runtime task 时不迁移出第二份任务", () => {
+        const source = project([{
+            ...node("media"),
+            type: CanvasNodeType.Video,
+            metadata: {
+                status: "success",
+                localTaskId: "runtime-task",
+                localTaskKind: "agent_video_ingest",
+                localCanvasTaskId: "canvas-task",
+            },
+        }]);
+        source.operationState.tasks = {
+            "canvas-task": {
+                id: "canvas-task",
+                nodeId: "media",
+                kind: "agent_video_ingest",
+                status: "succeeded",
+                createdAt: TIME,
+                updatedAt: TIME,
+                details: { runtimeTaskId: "runtime-task" },
+            },
+        };
+
+        const migrated = migrateCanvasProject(JSON.parse(JSON.stringify(source)));
+        expect(Object.keys(migrated.operationState.tasks)).toEqual(["canvas-task"]);
+        expect(migrated.operationState.tasks["canvas-task"].details?.runtimeTaskId).toBe("runtime-task");
     });
 
     test("导入副本重绑定工程身份并保留 request id 幂等", () => {

@@ -47,6 +47,16 @@ pub fn catalog() -> Value {
                 "source": "go_canvas_projects_same_database"
             },
             {
+                "id": "projects.create",
+                "method": "POST",
+                "path": "/v1/projects",
+                "risk": "reversible_write",
+                "dry_run": false,
+                "paid": false,
+                "source": "CanonicalCanvasAdapter",
+                "idempotency": "request_id_and_payload"
+            },
+            {
                 "id": "canvas.operations.dry_run",
                 "method": "POST",
                 "path": "/v1/canvas/operations/dry-run",
@@ -80,6 +90,29 @@ pub fn catalog() -> Value {
                 "dry_run": false,
                 "paid": false,
                 "source": "DesktopRuntime"
+            },
+            {
+                "id": "media.inbox",
+                "method": "GET",
+                "path": "/v1/media/inbox",
+                "risk": "read_only",
+                "dry_run": false,
+                "paid": false,
+                "source": "DesktopRuntime",
+                "arbitrary_paths": false
+            },
+            {
+                "id": "media.video_ingest",
+                "method": "POST",
+                "path": "/v1/media/video-ingests",
+                "risk": "reversible_write",
+                "dry_run": false,
+                "paid": false,
+                "source": "DesktopRuntime+CanonicalCanvasAdapter",
+                "accepted_mime_types": ["video/mp4"],
+                "path_scope": "fixed_app_support_inbox_basename_only",
+                "integrity": "required_lowercase_sha256",
+                "canvas_node_type": "video"
             },
             {
                 "id": "tasks.test_clip",
@@ -148,6 +181,7 @@ pub fn catalog() -> Value {
                 "external_connector_probe",
                 "local_audio_service_probe",
                 "deterministic_test_clip",
+                "allowlisted_mp4_ingest",
                 "task_status",
                 "task_cancel"
             ]

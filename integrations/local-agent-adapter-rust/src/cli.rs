@@ -7,7 +7,8 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
 use crate::{
-    read_credential_token, AgentOperationRequest, BridgeClient, BridgeError, TestClipRequest,
+    read_credential_token, AgentOperationRequest, BridgeClient, BridgeError, ProjectCreateRequest,
+    TestClipRequest, VideoIngestRequest,
 };
 
 #[derive(Debug, Parser)]
@@ -32,6 +33,7 @@ pub enum Command {
     Capabilities,
     Projects(ProjectsArgs),
     Canvas(CanvasArgs),
+    Media(MediaArgs),
     Tasks(TasksArgs),
     Runtime,
     Credentials(CredentialsArgs),
@@ -47,6 +49,30 @@ pub struct ProjectsArgs {
 pub enum ProjectsCommand {
     List,
     Get { project_id: String },
+    Create(InputFile),
+}
+
+#[derive(Debug, Args)]
+pub struct MediaArgs {
+    #[command(subcommand)]
+    pub command: MediaCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MediaCommand {
+    Inbox,
+    Video(MediaVideoArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct MediaVideoArgs {
+    #[command(subcommand)]
+    pub command: MediaVideoCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MediaVideoCommand {
+    Ingest(InputFile),
 }
 
 #[derive(Debug, Args)]
@@ -144,6 +170,10 @@ fn execute(cli: Cli) -> Result<Value, BridgeError> {
                 validate_route_identifier(&project_id)?;
                 client.get(&format!("/v1/projects/{project_id}"))
             }
+            ProjectsCommand::Create(input) => {
+                let request = read_json::<ProjectCreateRequest>(&input.file)?;
+                client.post("/v1/projects", &request)
+            }
         },
         Command::Canvas(args) => match args.command {
             CanvasCommand::Operations(args) => match args.command {
@@ -154,6 +184,15 @@ fn execute(cli: Cli) -> Result<Value, BridgeError> {
                 OperationsCommand::DryRun(input) => {
                     let request = read_json::<AgentOperationRequest>(&input.file)?;
                     client.post("/v1/canvas/operations/dry-run", &request)
+                }
+            },
+        },
+        Command::Media(args) => match args.command {
+            MediaCommand::Inbox => client.get("/v1/media/inbox"),
+            MediaCommand::Video(args) => match args.command {
+                MediaVideoCommand::Ingest(input) => {
+                    let request = read_json::<VideoIngestRequest>(&input.file)?;
+                    client.post("/v1/media/video-ingests", &request)
                 }
             },
         },
@@ -225,8 +264,16 @@ fn validate_route_identifier(value: &str) -> Result<(), BridgeError> {
 fn exit_code(error: &BridgeError) -> ExitCode {
     match error.code {
         "UNAUTHORIZED" => ExitCode::Unauthorized,
-        "STALE_REVISION" | "REVISION_CONFLICT" | "REQUEST_ID_REUSED" | "LOCKED_NODE"
-        | "NODE_EXISTS" | "CONNECTION_EXISTS" | "PROJECT_DELETED" => ExitCode::Conflict,
+        "STALE_REVISION"
+        | "REVISION_CONFLICT"
+        | "REQUEST_ID_REUSED"
+        | "LOCKED_NODE"
+        | "NODE_EXISTS"
+        | "CONNECTION_EXISTS"
+        | "PROJECT_DELETED"
+        | "PROJECT_EXISTS"
+        | "MEDIA_DIGEST_MISMATCH"
+        | "TASK_CONFLICT" => ExitCode::Conflict,
         "NOT_FOUND" | "CAPABILITY_NOT_FOUND" => ExitCode::NotFound,
         "INVALID_REQUEST" => ExitCode::Usage,
         "RUNTIME_UNAVAILABLE" => ExitCode::Unavailable,

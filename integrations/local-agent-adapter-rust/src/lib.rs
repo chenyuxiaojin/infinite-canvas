@@ -10,11 +10,12 @@ mod server;
 pub use auth::{read_credential_token, CredentialDocument, CredentialStore};
 pub use canvas::{
     Actor, AgentOperationRequest, CanonicalCanvasAdapter, CanvasOperation, CanvasOperationAdapter,
-    CanvasOperationResult, CanvasProtocolExecutor, CanvasRuntimeTaskReference,
-    HttpCanvasProtocolExecutor, ProjectDocument, ProjectSummary, ProtocolOutcome,
+    CanvasOperationResult, CanvasProtocolExecutor, CanvasRuntimeTaskReference, CanvasSize,
+    HttpCanvasProtocolExecutor, Point, ProjectCreateRequest, ProjectCreateResult, ProjectDocument,
+    ProjectSummary, ProtocolOutcome,
 };
 pub use cli::{run_cli, Cli, ExitCode};
 pub use client::BridgeClient;
 pub use error::{BridgeError, ErrorBody, ErrorEnvelope};
-pub use runtime::{AgentRuntime, TestClipRequest};
+pub use runtime::{AgentRuntime, TestClipRequest, VideoIngestRequest};
 pub use server::{BridgeServer, BRIDGE_PORT};

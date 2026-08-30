@@ -94,7 +94,8 @@ export type CanvasNodeMetadata = {
     videoTaskId?: string;
     videoTaskVideoId?: string;
     localTaskId?: string;
-    localTaskKind?: "deterministic_test_clip";
+    localTaskKind?: "deterministic_test_clip" | "agent_video_ingest";
+    localCanvasTaskId?: string;
     localTaskSha256?: string;
     localTaskDuplicate?: boolean;
     localTaskSourceNodeId?: string;
@@ -164,6 +165,7 @@ export type CanvasAgentChangeBatch = {
     revision: number;
     status: CanvasAgentBatchStatus;
     reversible: boolean;
+    canUndoNow: boolean;
     error?: string;
     undoneAt?: string;
 };

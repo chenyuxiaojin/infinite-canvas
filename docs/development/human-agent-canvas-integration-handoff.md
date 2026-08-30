@@ -33,10 +33,14 @@ web/src/app/(user)/canvas/protocol/canvas-operation-protocol.ts
 - 人工 UI：`useCanvasStore.updateProject` 把结构差异转为 `actor: human` 批次；
   标题、锁和撤销也进入公共协议。
 - 内置 Agent：动作入口调用 Store 的 `applyOperationBatch`。
-- 外部 CLI/Bridge：`CanonicalCanvasAdapter` 把六种白名单操作映射成
-  `CanvasOperationBatch`，调用固定 loopback Next 内部端点。
+- 外部 CLI/Bridge：`CanonicalCanvasAdapter` 把白名单操作映射成
+  `CanvasOperationBatch`，调用固定 loopback Next 内部端点；`project.create`
+  也用同一 reducer 从 revision 0 创建 revision 1 的 SQLite 工程。
 - 本地任务：发起为 human/agent `task.start`，执行结果为 system
   `task.update`，可在同批回填节点。
+- 受控视频摄入：Bridge 只接收应用私有 inbox 内的 MP4 文件名和小写 SHA-256，
+  在同一工程先创建 `video` 节点与 canvas task，再交给现有 Rust executor；
+  ffprobe 结果由 system 批次回填同一节点和同一 task，不建立第二套媒体画布。
 
 在包含本总装代码的桌面包内，持久化唯一来源是 SQLite
 `canvas_projects.project_data.operationState`，其中包含数值 revision、locks、
@@ -56,6 +60,9 @@ tasks、requests 和 audit。WebView 通过 Tauri IPC 读写这些行并轮询�
   会显示错误状态，不再只写浏览器控制台后静默表现成可供 Agent 使用。
 - `canvas-collaboration-adapter.ts` 只从 `operationState` 映射状态、历史和节点标记；
   不拥有 reducer、revision、锁或 undo 快照。
+- system 对 Agent 媒体批次的 runtime task ID、进度和验收结果回填不会使该 Agent
+  批次失去可撤销性；任何后续 human/agent 结构修改仍会阻止旧批次撤销。
+- 桌面画布库每秒从同一 SQLite 刷新，因此 CLI 新建工程无需重载或重新导入即可出现。
 
 ### Bridge 冲突
 
@@ -66,19 +73,26 @@ tasks、requests 和 audit。WebView 通过 Tauri IPC 读写这些行并轮询�
   `create_text_node` 等外部命名到公共 operation 的转换。
 - `save_human_project` 以 revision 为第一优先级，只有 revision 相同时才比较墙钟，
   避免较旧时间戳拒绝更高 revision。
+- Next loopback reducer在 WebView 导航瞬间出现传输失败时最多重试 2 次；request ID
+  使响应丢失后的重放仍然幂等，不会重复建节点或启动任务。
 
 ### 兼容与恢复
 
 - 旧工程缺少 `operationState` 时迁移为 revision 0，不改节点和连线。
 - 本地媒体持久化为稳定 `storageKey`，页面新建的 `blob:`/`data:` URL 不计为修改。
-- ZIP v3 不变；导入副本换 ID 时同时重绑定 audit/result/request 指纹，保留锁、
+- ZIP v3 可继续导入，当前导出为 v4；导入副本换 ID 时同时重绑定 audit/result/request 指纹，保留锁、
   task、历史、连线和重复请求幂等。
+- Agent 视频的 `local-task:` storageKey 进入 ZIP manifest；导出包含经哈希验收的
+  MP4，导入沿用媒体 Blob 兼容路径。
 
 ## 安全边界
 
 - 正式端口固定 `127.0.0.1:3100/3101/3102`；验收 feature 使用独立固定
   `127.0.0.1:3210/3211/3212`，不接受动态 host 或公网监听。
 - Bridge 不开放 shell、可执行路径、任意路径、任意 URL、raw SQL 或付费生成。
+- Agent 不能提交路径：`GET /v1/media/inbox` 只返回应用私有固定 inbox，摄入请求
+  只能给 basename、`.mp4`、小写 SHA-256、项目/节点/request ID 与画布位置尺寸；
+  目录穿越、符号链接、摘要不匹配、空文件和超过 1 GiB 均结构化拒绝。
 - 安装凭据只写应用支持目录私有文件；CLI 不接受 token 参数。
 - Tauri capability 只放行固定 WebView origin 和必要的桌面画布命令。
 
@@ -112,25 +126,37 @@ PATH=/Users/chenhuajin/.cargo/bin:$PATH \
    12 audit，历史身份与幂等已重绑定到副本 ID。
 6. 监听仅 loopback；标准 App 内 CLI 与 release CLI 哈希一致；真实凭据内容未在
    tracked files 或标准 App 可执行文件中出现。
+7. 新增媒体增量在同一隔离 bundle 完成：CLI 在已打开画布库时创建工程，卡片无需
+   重载即出现；固定 inbox MP4 经 dry/哈希边界后生成 640x360、2005 ms 视频节点，
+   UI 自动出现并可播放。项目稳定在 revision 4，只有 1 个 node、1 个 canvas task、
+   4 条 audit；重放同 request 后四项计数均不变。
+8. 人工锁定视频节点后 CLI 得到 `LOCKED_NODE`；人工解锁使 revision 5→6 后，旧
+   base revision 得到 `STALE_REVISION`。应用退出重启后 revision 6、节点、任务、
+   审计和媒体仍在；重复摄入返回 `duplicate:true` 并报告当前 revision 6。
+9. 真实导出 `/tmp/agent-media-final-export.zip` 为 514 KiB，包含 `projects.json`
+   与 491694 bytes 的 MP4。首次回灌暴露 WKWebView 原生选择框把组合 MIME/后缀过滤
+   误判为不可选；输入过滤收窄为 `.zip` 后重包复测，Open 恢复可用并成功导入副本
+   `waCbl0WxWvM8Ro1OjHYYa`。副本为 revision 6、1 视频节点、1 task、8 audit，历史
+   project ID 全部重绑定，UI 仍显示 00:02 并可播放。
+10. 独立撤销工程的 Agent 媒体批次在两次 system 回填后仍显示“完成 · 可撤销”；
+    用户确认后从真实 UI 点击“撤销批次”，UI 变为“画布元素 0 / revision 5 /
+    已撤销”。CLI 同步读回 0 node、0 connection、0 task、5 audit，原 ingest audit
+    记录非空 `undoneByRequestId`。
 
 ## 用户现场复核与交付断点
 
-现场复核时，实际运行进程来自主检出 `feat/macos-director-console` 的基线提交
-`e00acb7`，只启动 Next `127.0.0.1:3100` 和 Go `127.0.0.1:3101`，没有
-`127.0.0.1:3102` Agent Bridge；正式应用目录的 `canvas_projects` 为 0 行，画布
-仍在该旧包的 WKWebView IndexedDB。外部 Agent 因此只能读到空数据库，不能把
-操作直接写回已打开画布。
+用户已在 2026-08-30 完成正式 bundle 的安全换装：先成对备份 Application
+Support 与 WebKit 到
+`~/项目/自己的应用/infinite-canvas-backups/backup-20260830-1815.tar.gz`，再启动
+`~/Applications/无限画布.app`。现场确认 3100/3101/3102 均正常、未授权 Bridge
+访问为 401、CLI 可列出迁移后的 4 个工程，并在一次性 P3 工程完成 dry-run、apply、
+revision 0→1、幂等、审计与撤销快照。也就是“桌面 SQLite + Bridge 直写”已经由
+用户实机复核，不再是旧包/空表状态。
 
-修复不是修改协议，而是交付并启动本分支构建的桌面包。首次启动时由新 WebView
-读取同 bundle ID 下的旧 IndexedDB，经 Tauri IPC 写入 SQLite；迁移完成后必须
-同时满足：画布库显示数据库/Bridge 已连接、CLI `projects list` 可见原工程、
-SQLite 行数非零、已打开 UI 能看到 CLI 写入。为保护正式项目，自动化只在隔离
-数据上执行；正式升级应先成对备份 Application Support 与 WebKit，再由用户确认
-迁移结果。
-
-本分支最新技术包已安装到 `~/Applications/无限画布.app`，稳定 CLI 入口为
-`~/.local/bin/infinite-canvas`。现场旧包仍从主检出 worktree 运行；在用户明确允许
-关闭旧包并迁移正式画布前，不自动启动新包。
+本次 `project.create` 与受控 MP4 摄入是该已通链路的下一增量。自动化仍只写独立
+bundle `com.chenyuxiaojin.infinitecanvas.integrationtest`，没有对用户正式工程追加
+视频或任务。最终标准 App 会先构建并暂存；由于用户当前正在运行既有正式 App，
+不在进程运行时覆盖安装，待用户退出后再安全换装。
 
 ## 验证命令与结果
 
@@ -156,9 +182,11 @@ cd ..
 PATH=/Users/chenhuajin/.cargo/bin:$PATH bun run tauri build --bundles app
 ```
 
-以上硬门禁均通过：协议/Store 13 tests，共编 UI 7 tests，本机 Agent crate
-7 unit + 5 contract tests，桌面 crate 8 tests，Go 全部 package，Next 生产构建
-及标准 arm64 `.app` 构建。
+最终硬门禁计数：协议/Store 15 tests，共编 UI 7 tests，本机 Agent crate
+7 unit + 9 contract tests，桌面 crate 10 tests，本地 executor 17 tests（另有
+1 个需显式 trusted FFmpeg 的测试默认 ignored；真实 MP4 闭环已覆盖）。Go 全部
+package、Next 生产构建及标准 arm64 `.app` 构建通过。标准包内 CLI 与 release CLI
+SHA-256 均为 `1e9b16bb4fa20bae942f858d7b056885cd83400a93c7c11c23c3694f4aff9daf`。
 
 `bun x tsc --noEmit` 仍有 8 个基线错误，位于
 `canvas-resource-references.ts`、`video-settings-panel.tsx`、`gemini.ts` 和
@@ -168,9 +196,12 @@ PATH=/Users/chenhuajin/.cargo/bin:$PATH bun run tauri build --bundles app
 
 - 当前标准 `.app` 是技术构建；Developer ID、公证、staple 和干净机升级仍按
   P4 矩阵执行，不能把 ad-hoc 包当发行包。
-- 当前用户正在运行的仍是基线主检出旧包；必须切换到本分支技术包后，CLI/Bridge
-  才存在。正式发布前用标准 bundle ID 再做一次旧正式工程的只读盘点和备份后
-  迁移验收；自动化不触碰正式用户项目。
+- 用户正在运行的正式包已包含第一阶段 SQLite/Bridge，但不包含本次受控视频增量；
+  最终新包不能在运行中覆盖，需用户退出后换装并用一次性工程做一次标准 bundle
+  的只读/零付费冒烟。
+- 1 GiB 是协议硬上限而不是推荐镜头大小；当前 IPC 会把验收后的媒体复制进 WebView
+  Blob，27 镜审片墙的总内存与滚动性能仍需用一次性副本压测，不能从单个 2 秒镜头
+  推断大批量性能。
 - 发行签名后再次核对 CLI 仍在 `Contents/MacOS/infinite-canvas`、所有内嵌
   Mach-O 的签名顺序、Bridge loopback 监听和凭据文件权限。
 - 全仓 TypeScript 基线修复可另开任务；不应在本总装分支混入无关业务修正。

@@ -20,14 +20,18 @@ export async function persistDesktopTaskMedia(taskId: string): Promise<UploadedF
     const blob = existing || new Blob([bytes], { type: media.mime_type });
     const url = existing ? await resolveMediaUrl(storageKey) : await setMediaBlob(storageKey, blob);
     if (!url) throw new Error("本地任务媒体无法载入画布");
+    const videoStream = media.probe.streams.find((stream) => stream.codec_type === "video");
+    const width = videoStream?.width;
+    const height = videoStream?.height;
+    if (!width || !height || !media.probe.duration_ms) throw new Error("本地任务媒体探测信息不完整");
     return {
         url,
         storageKey,
         bytes: blob.size,
         mimeType: media.mime_type,
-        width: 320,
-        height: 180,
-        durationMs: 1_000,
+        width,
+        height,
+        durationMs: media.probe.duration_ms,
         sha256: media.sha256,
     };
 }

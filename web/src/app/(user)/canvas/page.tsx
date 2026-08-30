@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { App, Button } from "antd";
 import { Database, Download, FileUp, Plus, TriangleAlert } from "lucide-react";
@@ -26,8 +26,26 @@ export default function CanvasPage() {
     const projects = useCanvasStore((state) => state.projects);
     const createProject = useCanvasStore((state) => state.createProject);
     const importProject = useCanvasStore((state) => state.importProject);
+    const refreshFromDesktop = useCanvasStore((state) => state.refreshFromDesktop);
     const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
     const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
+
+    useEffect(() => {
+        if (!hydrated || !isDesktopRuntime()) return;
+        let active = true;
+        const refresh = () => {
+            if (!active) return;
+            void refreshFromDesktop().catch((error) => {
+                console.error("Failed to refresh the shared desktop canvas library", error);
+            });
+        };
+        refresh();
+        const timer = window.setInterval(refresh, 1_000);
+        return () => {
+            active = false;
+            window.clearInterval(timer);
+        };
+    }, [hydrated, refreshFromDesktop]);
 
     const enterProject = (id: string) => {
         router.push(`/canvas/${id}`);
@@ -124,7 +142,7 @@ export default function CanvasPage() {
                 )}
             </div>
 
-            <input ref={inputRef} type="file" accept="application/zip,.zip" className="hidden" onChange={(event) => void importCanvas(event.target.files?.[0])} />
+            <input ref={inputRef} type="file" accept=".zip" className="hidden" onChange={(event) => void importCanvas(event.target.files?.[0])} />
             <CanvasDeleteProjectsDialog />
         </main>
     );
