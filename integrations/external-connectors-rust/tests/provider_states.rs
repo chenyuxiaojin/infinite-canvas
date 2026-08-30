@@ -239,6 +239,34 @@ fn davinci_reports_incompatible_for_malformed_bridge_response() {
 }
 
 #[test]
+fn davinci_reports_timeout_with_a_clear_diagnostic() {
+    let report = DaVinciProvider::new(davinci(
+        true,
+        Ok(ProcessState::Running),
+        true,
+        true,
+        Err(RuntimeFailure::TimedOut),
+    ))
+    .probe();
+    assert_eq!(report.status, ProviderStatus::Error);
+    assert!(report.diagnostic.contains("timed out"));
+}
+
+#[test]
+fn davinci_reports_output_limit_with_a_clear_diagnostic() {
+    let report = DaVinciProvider::new(davinci(
+        true,
+        Ok(ProcessState::Running),
+        true,
+        true,
+        Err(RuntimeFailure::StdoutLimitExceeded),
+    ))
+    .probe();
+    assert_eq!(report.status, ProviderStatus::Error);
+    assert!(report.diagnostic.contains("stdout safety limit"));
+}
+
+#[test]
 fn davinci_available_report_drops_project_and_timeline_names() {
     let report = DaVinciProvider::new(davinci(
         true,

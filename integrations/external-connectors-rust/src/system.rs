@@ -1,10 +1,12 @@
 use std::{
     env,
     ffi::OsStr,
-    io::Read,
+    io::{self, Read},
     path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
+    process::{Child, Command, ExitStatus, Stdio},
+    sync::mpsc::{self, Sender, TryRecvError},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -18,6 +20,10 @@ const MAX_EAGLE_RESPONSE_BYTES: u64 = 64 * 1024;
 const PGRP_BIN: &str = "/usr/bin/pgrep";
 const PYTHON_BIN: &str = "/usr/bin/python3";
 const RESOLVE_BRIDGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/resolve_probe.py");
+const RESOLVE_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const RESOLVE_STDOUT_LIMIT_BYTES: usize = 16 * 1024;
+const RESOLVE_STDERR_LIMIT_BYTES: usize = 16 * 1024;
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemEagleRuntime;
@@ -75,13 +81,23 @@ impl DaVinciRuntime for SystemDaVinciRuntime {
 
         // This is the only DaVinci command. The executable, script, arguments and
         // environment keys are fixed; paths come only from standard candidates below.
-        let output = Command::new(PYTHON_BIN)
+        let mut child = Command::new(PYTHON_BIN)
             .arg(RESOLVE_BRIDGE)
             .env_clear()
             .env("INFINITE_CANVAS_RESOLVE_MODULE", module)
             .env("RESOLVE_SCRIPT_LIB", library)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(map_io_failure)?;
+        let output = run_bounded_child(
+            &mut child,
+            RESOLVE_PROBE_TIMEOUT,
+            RESOLVE_STDOUT_LIMIT_BYTES,
+            RESOLVE_STDERR_LIMIT_BYTES,
+        )?;
+        debug_assert!(output.stderr.len() <= RESOLVE_STDERR_LIMIT_BYTES);
 
         Ok(ResolveBridgeResponse {
             exit_code: output.status.code(),
@@ -89,6 +105,147 @@ impl DaVinciRuntime for SystemDaVinciRuntime {
                 .map_err(|_| RuntimeFailure::InvalidResponse)?,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapturedStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug)]
+struct StreamCapture {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+#[derive(Debug)]
+struct BoundedCommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_bounded_child(
+    child: &mut Child,
+    timeout: Duration,
+    stdout_limit: usize,
+    stderr_limit: usize,
+) -> Result<BoundedCommandOutput, RuntimeFailure> {
+    let stdout = child.stdout.take().ok_or(RuntimeFailure::Other)?;
+    let stderr = child.stderr.take().ok_or(RuntimeFailure::Other)?;
+    let (limit_sender, limit_receiver) = mpsc::channel();
+    let stdout_reader = spawn_bounded_reader(
+        stdout,
+        stdout_limit,
+        CapturedStream::Stdout,
+        limit_sender.clone(),
+    );
+    let stderr_reader =
+        spawn_bounded_reader(stderr, stderr_limit, CapturedStream::Stderr, limit_sender);
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or(RuntimeFailure::Other)?;
+    let mut forced_failure = None;
+
+    let status = loop {
+        match limit_receiver.try_recv() {
+            Ok(stream) => {
+                forced_failure = Some(limit_failure(stream));
+                break terminate_and_reap(child)?;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {}
+        }
+
+        if let Some(status) = child.try_wait().map_err(map_io_failure)? {
+            break status;
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            forced_failure = Some(RuntimeFailure::TimedOut);
+            break terminate_and_reap(child)?;
+        }
+        thread::sleep(CHILD_POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+    };
+
+    let stdout = join_capture(stdout_reader)?;
+    let stderr = join_capture(stderr_reader)?;
+    if stdout.exceeded {
+        return Err(RuntimeFailure::StdoutLimitExceeded);
+    }
+    if stderr.exceeded {
+        return Err(RuntimeFailure::StderrLimitExceeded);
+    }
+    if let Some(failure) = forced_failure {
+        return Err(failure);
+    }
+
+    Ok(BoundedCommandOutput {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+    })
+}
+
+fn spawn_bounded_reader<R>(
+    mut reader: R,
+    limit: usize,
+    stream: CapturedStream,
+    limit_sender: Sender<CapturedStream>,
+) -> JoinHandle<io::Result<StreamCapture>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::with_capacity(limit.min(4096));
+        let mut buffer = [0_u8; 4096];
+        let mut exceeded = false;
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            let remaining = limit.saturating_sub(bytes.len());
+            let retained = remaining.min(count);
+            bytes.extend_from_slice(&buffer[..retained]);
+            if retained < count && !exceeded {
+                exceeded = true;
+                let _ = limit_sender.send(stream);
+            }
+        }
+        Ok(StreamCapture { bytes, exceeded })
+    })
+}
+
+fn join_capture(
+    reader: JoinHandle<io::Result<StreamCapture>>,
+) -> Result<StreamCapture, RuntimeFailure> {
+    reader
+        .join()
+        .map_err(|_| RuntimeFailure::Other)?
+        .map_err(map_io_failure)
+}
+
+fn limit_failure(stream: CapturedStream) -> RuntimeFailure {
+    match stream {
+        CapturedStream::Stdout => RuntimeFailure::StdoutLimitExceeded,
+        CapturedStream::Stderr => RuntimeFailure::StderrLimitExceeded,
+    }
+}
+
+fn terminate_and_reap(child: &mut Child) -> Result<ExitStatus, RuntimeFailure> {
+    if let Some(status) = child.try_wait().map_err(map_io_failure)? {
+        return Ok(status);
+    }
+    if let Err(error) = child.kill() {
+        if let Some(status) = child.try_wait().map_err(map_io_failure)? {
+            return Ok(status);
+        }
+        return Err(map_io_failure(error));
+    }
+    child.wait().map_err(map_io_failure)
 }
 
 fn read_http_response(
@@ -263,5 +420,75 @@ fn standard_resolve_environment_value(key: &str, value: &str) -> bool {
             )
         }),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(1);
+    const TEST_LIMIT: usize = 128;
+
+    fn python_child(code: &str) -> Child {
+        Command::new(PYTHON_BIN)
+            .args(["-c", code])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("test Python child should start")
+    }
+
+    #[test]
+    fn bounded_child_collects_normal_stdout_and_stderr() {
+        let mut child =
+            python_child("import sys; print('normal'); print('diagnostic', file=sys.stderr)");
+        let output = run_bounded_child(&mut child, TEST_TIMEOUT, TEST_LIMIT, TEST_LIMIT)
+            .expect("normal child should succeed");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"normal\n");
+        assert_eq!(output.stderr, b"diagnostic\n");
+        assert!(child.try_wait().expect("child state should read").is_some());
+    }
+
+    #[test]
+    fn bounded_child_times_out_then_terminates_and_reaps() {
+        let mut child = python_child("import time; time.sleep(5)");
+        let started = Instant::now();
+        let failure = run_bounded_child(
+            &mut child,
+            Duration::from_millis(50),
+            TEST_LIMIT,
+            TEST_LIMIT,
+        )
+        .expect_err("sleeping child should time out");
+
+        assert_eq!(failure, RuntimeFailure::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(child.try_wait().expect("child state should read").is_some());
+    }
+
+    #[test]
+    fn bounded_child_rejects_excessive_stdout_and_reaps() {
+        let mut child =
+            python_child("import sys; sys.stdout.write('x' * 65536); sys.stdout.flush()");
+        let failure = run_bounded_child(&mut child, TEST_TIMEOUT, TEST_LIMIT, TEST_LIMIT)
+            .expect_err("oversized stdout should fail");
+
+        assert_eq!(failure, RuntimeFailure::StdoutLimitExceeded);
+        assert!(child.try_wait().expect("child state should read").is_some());
+    }
+
+    #[test]
+    fn bounded_child_rejects_excessive_stderr_and_reaps() {
+        let mut child =
+            python_child("import sys; sys.stderr.write('x' * 65536); sys.stderr.flush()");
+        let failure = run_bounded_child(&mut child, TEST_TIMEOUT, TEST_LIMIT, TEST_LIMIT)
+            .expect_err("oversized stderr should fail");
+
+        assert_eq!(failure, RuntimeFailure::StderrLimitExceeded);
+        assert!(child.try_wait().expect("child state should read").is_some());
     }
 }

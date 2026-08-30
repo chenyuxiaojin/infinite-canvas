@@ -29,6 +29,9 @@ pub enum RuntimeFailure {
     PermissionDenied,
     Unreachable,
     InvalidResponse,
+    TimedOut,
+    StdoutLimitExceeded,
+    StderrLimitExceeded,
     Other,
 }
 
