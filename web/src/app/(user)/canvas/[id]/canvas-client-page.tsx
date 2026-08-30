@@ -55,7 +55,7 @@ import { fitNodeSize, nodeSizeFromRatio } from "../utils/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "../utils/canvas-video-frame";
 import { PANORAMA_IMAGE_SIZE, PANORAMA_NODE_SIZE, buildPanoramaPrompt, isCanvasImageNodeType, isPanoramaNodeType } from "../utils/canvas-panorama";
 import { applyCameraPrompt } from "../utils/canvas-camera";
-import { persistDesktopTaskMedia } from "../utils/canvas-local-task";
+import { desktopTaskIdFromStorageKey, materializeDesktopTaskMetadata, persistDesktopTaskMedia } from "../utils/canvas-local-task";
 import { GROUP_PADDING, findContainingGroupId, findGroupDropTarget, getNodeBounds, snapNodesIntoGroup } from "../utils/canvas-group";
 import { App, Button, Dropdown, Modal } from "antd";
 import { isCogVideoX3Model, modelKey, supportsVideoAudioGeneration, supportsVideoFrameReferences } from "@/lib/video-model-capabilities";
@@ -5844,6 +5844,18 @@ async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
     return Promise.all(
         nodes.map(async (node) => {
             const content = node.metadata?.content;
+            const desktopTaskId = node.type === CanvasNodeType.Video ? desktopTaskIdFromStorageKey(node.metadata?.storageKey) : null;
+            if (desktopTaskId) {
+                try {
+                    const media = await persistDesktopTaskMedia(desktopTaskId);
+                    return {
+                        ...node,
+                        metadata: materializeDesktopTaskMetadata(node.metadata, media.url),
+                    };
+                } catch (error) {
+                    console.error("Failed to materialize the shared desktop task media", error);
+                }
+            }
             if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveMediaUrl(node.metadata.storageKey, content) } };
             if (!isCanvasImageNodeType(node.type) || !content) return node;
             if (node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveImageUrl(node.metadata.storageKey, content) } };

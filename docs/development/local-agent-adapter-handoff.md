@@ -16,7 +16,8 @@
 - Agent 操作带 project/request/base revision/actor，支持 dry-run、compare-and-swap、持久幂等和人工锁定优先。
 - Agent 可用同一公共协议创建工程，并可把应用私有固定 inbox 中、摘要匹配的 MP4
   摄入为同一 `CanvasProject` 内的 video 节点和 canvas task；Rust executor 的
-  ffprobe/转码结果由 system 批次回填，不创建第二张画布数据库或第二套 revision。
+  ffprobe/转码结果由同一 system 批次直接回填 task 终态和节点稳定引用、尺寸、
+  时长、摘要，不创建第二张画布数据库或第二套 revision，也不依赖 UI 已打开。
 - CLI 作为 Tauri `externalBin` 随 `.app` 打包；不接受 token 参数，仅从私有凭据文件读取。
 - React 画布 UI 未重做，只改了桌面持久化接线和首次本地项目合并。
 
@@ -105,4 +106,8 @@ TypeScript 基线，可再把 `tsc --noEmit` 设为硬门禁。
 - 受控工程创建与单个 MP4 摄入已在隔离 App 跑通，并发现/修复 WebView 瞬时伪
   revision、重复 runtime task 和幂等响应 revision 三处问题；最终 ZIP 回灌与
   真实 UI 媒体批次撤销也已通过，完整证据见总装 handoff。
+- 2026-08-31 正式冒烟追加发现并修复 headless 完工只写 task、UI 物化补写 bytes
+  制造伪 revision，以及 H.264 被重编码为 MPEG-4 Part 2 三处问题。修复后的
+  255441-byte H.264/AAC 输入走 stream copy，输出 254832 bytes；CLI-only 完工为
+  revision 4，打开并播放后仍为 revision 4。
 - 没有调用付费模型，没有修改 Eagle/达芬奇或正式用户项目，没有提交真实凭据。

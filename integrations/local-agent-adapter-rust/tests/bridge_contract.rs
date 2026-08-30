@@ -164,7 +164,26 @@ impl AgentRuntime for MockRuntime {
     }
 
     fn task_status(&self, task_id: &str) -> Result<Value, BridgeError> {
-        Ok(json!({ "task_id": task_id, "status": "succeeded" }))
+        if task_id.starts_with("media-") {
+            return Ok(json!({
+                "id": task_id,
+                "status": "succeeded",
+                "action": "transcode_to_mp4",
+                "result": {
+                    "type": "media_created",
+                    "output": { "root": "agent-media", "relative": "verified/shot-001.mp4" },
+                    "sha256": "c".repeat(64),
+                    "probe": {
+                        "duration_ms": 6583,
+                        "streams": [
+                            { "index": 0, "codec_type": "video", "codec_name": "h264", "width": 1344, "height": 768 },
+                            { "index": 1, "codec_type": "audio", "codec_name": "aac", "sample_rate": 48000, "channels": 2 }
+                        ]
+                    }
+                }
+            }));
+        }
+        Ok(json!({ "id": task_id, "status": "succeeded" }))
     }
 
     fn cancel_task(&self, task_id: &str) -> Result<Value, BridgeError> {
@@ -458,6 +477,101 @@ fn allowlisted_video_ingest_creates_one_shared_video_node_and_task() {
         project["operationState"]["tasks"]["agent-media-ingest-1"]["details"]["runtimeTaskId"],
         "media-ingest-1"
     );
+
+    let completed = fixture.client().get("/v1/tasks/media-ingest-1").unwrap();
+    assert_eq!(completed["data"]["status"], "succeeded");
+    let completed_project = fixture.canvas.get_project("project-1").unwrap();
+    assert_eq!(completed_project.revision, 3);
+    assert_eq!(
+        completed_project.project["operationState"]["tasks"]["agent-media-ingest-1"]["status"],
+        "succeeded"
+    );
+    let metadata = &completed_project.project["nodes"][0]["metadata"];
+    assert_eq!(metadata["content"], "local-task:media-ingest-1");
+    assert_eq!(metadata["storageKey"], "local-task:media-ingest-1");
+    assert_eq!(metadata["status"], "success");
+    assert_eq!(metadata["progress"], 100);
+    assert_eq!(metadata["naturalWidth"], 1344);
+    assert_eq!(metadata["naturalHeight"], 768);
+    assert_eq!(metadata["durationMs"], 6583);
+    assert_eq!(metadata["localTaskSha256"], "c".repeat(64));
+    assert_eq!(metadata["mimeType"], "video/mp4");
+
+    fixture.client().get("/v1/tasks/media-ingest-1").unwrap();
+    assert_eq!(fixture.canvas.get_project("project-1").unwrap().revision, 3);
+}
+
+#[test]
+fn completed_legacy_ingest_repairs_its_loading_node_without_rewriting_the_task() {
+    let fixture = Fixture::new();
+    let request = VideoIngestRequest {
+        project_id: "project-1".to_owned(),
+        node_id: "legacy-video".to_owned(),
+        request_id: "legacy-ingest".to_owned(),
+        base_revision: 0,
+        actor: Actor::Agent,
+        inbox_file_name: "legacy.mp4".to_owned(),
+        expected_sha256: "d".repeat(64),
+        title: "Legacy shot".to_owned(),
+        position: Point { x: 0.0, y: 0.0 },
+        size: CanvasSize {
+            width: 320.0,
+            height: 180.0,
+        },
+    };
+    fixture
+        .client()
+        .post("/v1/media/video-ingests", &request)
+        .unwrap();
+    fixture
+        .canvas
+        .apply_protocol_batch(
+            "project-1",
+            json!({
+                "protocolVersion": 1,
+                "actor": "system",
+                "requestId": "legacy-task-only-completion",
+                "projectId": "project-1",
+                "baseRevision": 2,
+                "timestamp": "2026-01-01T00:00:03Z",
+                "operations": [{
+                    "type": "task.update",
+                    "taskId": "agent-media-legacy-ingest",
+                    "status": "succeeded",
+                    "details": { "legacyTaskOnly": true }
+                }]
+            }),
+            false,
+        )
+        .unwrap();
+    let legacy = fixture.canvas.get_project("project-1").unwrap();
+    assert_eq!(legacy.revision, 3);
+    assert_eq!(legacy.project["nodes"][0]["metadata"]["status"], "loading");
+
+    fixture
+        .client()
+        .get("/v1/tasks/media-legacy-ingest")
+        .unwrap();
+    let repaired = fixture.canvas.get_project("project-1").unwrap();
+    assert_eq!(repaired.revision, 4);
+    assert_eq!(
+        repaired.project["nodes"][0]["metadata"]["status"],
+        "success"
+    );
+    assert_eq!(
+        repaired.project["nodes"][0]["metadata"]["content"],
+        "local-task:media-legacy-ingest"
+    );
+    assert_eq!(
+        repaired.project["operationState"]["tasks"]["agent-media-legacy-ingest"]["details"]
+            ["legacyTaskOnly"],
+        true
+    );
+    fixture
+        .client()
+        .get("/v1/tasks/media-legacy-ingest")
+        .unwrap();
+    assert_eq!(fixture.canvas.get_project("project-1").unwrap().revision, 4);
 }
 
 #[test]

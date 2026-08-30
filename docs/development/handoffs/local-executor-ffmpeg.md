@@ -26,7 +26,8 @@ queued -> cancelled
 当前白名单动作固定为：
 
 1. `GenerateTestClip`：FFmpeg `lavfi` 测试图和测试音生成短 MP4。
-2. `TranscodeToMp4`：本地视频转 MPEG-4/AAC MP4。
+2. `TranscodeToMp4`：H.264/AAC MP4 走视频/音频 stream copy；其他视频回退为
+   libx264/AAC 的浏览器兼容 MP4。
 3. `VerifyMedia`：ffprobe 结构探测、`ffmpeg -xerror` 全流解码和 SHA-256。哈希按 64 KiB 分块，每块前后检查取消和任务总超时。
 
 请求没有命令、程序路径或自由参数字段。未知动作、未知字段、shell 元字符、绝对路径、`..`、不存在的根 ID、符号链接越界和未注册目录都会被拒绝。所有外部进程通过 `std::process::Command` 的参数数组直接启动，不经过 shell。

@@ -1,7 +1,19 @@
 import { getMediaBlob, resolveMediaUrl, setMediaBlob, type UploadedFile } from "@/services/file-storage";
 import { fetchDesktopTaskMedia, type DesktopTaskMedia } from "@/services/desktop-runtime";
+import type { CanvasNodeMetadata } from "../types";
 
 const LOCAL_TASK_STORAGE_PREFIX = "local-task";
+
+export function desktopTaskIdFromStorageKey(storageKey?: string) {
+    const prefix = `${LOCAL_TASK_STORAGE_PREFIX}:`;
+    if (!storageKey?.startsWith(prefix)) return null;
+    const taskId = storageKey.slice(prefix.length);
+    return taskId && !taskId.includes(":") ? taskId : null;
+}
+
+export function materializeDesktopTaskMetadata(metadata: CanvasNodeMetadata, content: string): CanvasNodeMetadata {
+    return { ...metadata, content };
+}
 
 export async function persistDesktopTaskMedia(taskId: string): Promise<UploadedFile & { sha256: string }> {
     const media = await fetchDesktopTaskMedia(taskId);

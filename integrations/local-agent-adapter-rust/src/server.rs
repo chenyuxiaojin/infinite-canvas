@@ -314,15 +314,18 @@ async fn submit_video_ingest(
         Err(error) => {
             let _ = update_canvas_ingest_task(
                 &state.canvas,
-                &request.project_id,
-                &request.node_id,
-                &canvas_task_id,
-                "failed",
-                json!({ "runtimeError": { "code": error.code, "message": error.message } }),
-                json!({
-                    "status": "error",
-                    "errorDetails": error.message,
-                }),
+                CanvasIngestTaskUpdate {
+                    project_id: &request.project_id,
+                    node_id: &request.node_id,
+                    canvas_task_id: &canvas_task_id,
+                    status: "failed",
+                    details: json!({ "runtimeError": { "code": error.code, "message": error.message } }),
+                    metadata: json!({
+                        "status": "error",
+                        "errorDetails": error.message,
+                    }),
+                    include_task_update: true,
+                },
             );
             return Err(error);
         }
@@ -332,21 +335,24 @@ async fn submit_video_ingest(
         .ok_or_else(|| BridgeError::internal("The desktop runtime task id is missing."))?;
     let updated = update_canvas_ingest_task(
         &state.canvas,
-        &request.project_id,
-        &request.node_id,
-        &canvas_task_id,
-        "running",
-        json!({
-            "runtimeTaskId": runtime_task_id,
-            "runtime": runtime_result,
-        }),
-        json!({
-            "localTaskId": runtime_task_id,
-            "localTaskKind": "agent_video_ingest",
-            "localCanvasTaskId": canvas_task_id,
-            "status": "loading",
-            "progress": 15
-        }),
+        CanvasIngestTaskUpdate {
+            project_id: &request.project_id,
+            node_id: &request.node_id,
+            canvas_task_id: &canvas_task_id,
+            status: "running",
+            details: json!({
+                "runtimeTaskId": runtime_task_id,
+                "runtime": runtime_result,
+            }),
+            metadata: json!({
+                "localTaskId": runtime_task_id,
+                "localTaskKind": "agent_video_ingest",
+                "localCanvasTaskId": canvas_task_id,
+                "status": "loading",
+                "progress": 15
+            }),
+            include_task_update: true,
+        },
     )?;
     let mut response = runtime_result;
     response["canvas_task_id"] = Value::String(canvas_task_id);
@@ -469,13 +475,40 @@ fn sync_runtime_task_snapshot(
     let Some(status) = snapshot["status"].as_str() else {
         return Err(BridgeError::internal("The desktop task status is invalid."));
     };
-    if status == "queued" || status == task.status {
+    if status == "queued" {
         return Ok(());
     }
     if !matches!(status, "running" | "cancelled" | "succeeded" | "failed") {
         return Err(BridgeError::internal(
             "The desktop task status is unsupported.",
         ));
+    }
+    let status_changed = status != task.status;
+    if task.kind == "agent_video_ingest" {
+        let should_repair_legacy_node = !status_changed
+            && matches!(status, "cancelled" | "succeeded" | "failed")
+            && ingest_node_is_still_loading(canvas, &task, runtime_task_id)?;
+        if !status_changed && !should_repair_legacy_node {
+            return Ok(());
+        }
+        let metadata =
+            ingest_node_metadata(runtime_task_id, &task.canvas_task_id, status, snapshot)?;
+        update_canvas_ingest_task(
+            canvas,
+            CanvasIngestTaskUpdate {
+                project_id: &task.project_id,
+                node_id: &task.node_id,
+                canvas_task_id: &task.canvas_task_id,
+                status,
+                details: json!({ "runtimeTaskId": runtime_task_id, "runtimeSnapshot": snapshot }),
+                metadata,
+                include_task_update: status_changed,
+            },
+        )?;
+        return Ok(());
+    }
+    if !status_changed {
+        return Ok(());
     }
     update_canvas_task(
         canvas,
@@ -485,6 +518,126 @@ fn sync_runtime_task_snapshot(
         json!({ "runtimeTaskId": runtime_task_id, "runtimeSnapshot": snapshot }),
     )?;
     Ok(())
+}
+
+fn ingest_node_is_still_loading(
+    canvas: &Arc<dyn CanvasOperationAdapter>,
+    task: &crate::CanvasRuntimeTaskReference,
+    runtime_task_id: &str,
+) -> Result<bool, BridgeError> {
+    let project = canvas.get_project(&task.project_id)?.project;
+    let node = project["nodes"]
+        .as_array()
+        .and_then(|nodes| {
+            nodes
+                .iter()
+                .find(|node| node["id"].as_str() == Some(task.node_id.as_str()))
+        })
+        .ok_or_else(|| BridgeError::internal("The canvas media task node is missing."))?;
+    Ok(
+        node["metadata"]["localTaskId"].as_str() == Some(runtime_task_id)
+            && node["metadata"]["status"].as_str() == Some("loading"),
+    )
+}
+
+fn ingest_node_metadata(
+    runtime_task_id: &str,
+    canvas_task_id: &str,
+    status: &str,
+    snapshot: &Value,
+) -> Result<Value, BridgeError> {
+    let common = json!({
+        "localTaskId": runtime_task_id,
+        "localTaskKind": "agent_video_ingest",
+        "localCanvasTaskId": canvas_task_id,
+    });
+    let mut metadata = common
+        .as_object()
+        .cloned()
+        .ok_or_else(|| BridgeError::internal("The canvas media metadata is invalid."))?;
+    match status {
+        "succeeded" => {
+            let result = snapshot
+                .get("result")
+                .filter(|result| result["type"].as_str() == Some("media_created"))
+                .ok_or_else(|| {
+                    BridgeError::internal("The completed desktop media result is missing.")
+                })?;
+            let sha256 = result["sha256"]
+                .as_str()
+                .filter(|value| value.len() == 64)
+                .ok_or_else(|| {
+                    BridgeError::internal("The completed desktop media digest is invalid.")
+                })?;
+            let probe = result
+                .get("probe")
+                .ok_or_else(|| BridgeError::internal("The desktop media probe is missing."))?;
+            let video = probe["streams"]
+                .as_array()
+                .and_then(|streams| {
+                    streams
+                        .iter()
+                        .find(|stream| stream["codec_type"].as_str() == Some("video"))
+                })
+                .ok_or_else(|| {
+                    BridgeError::internal("The desktop media video stream is missing.")
+                })?;
+            let width = video["width"]
+                .as_u64()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| BridgeError::internal("The desktop media width is invalid."))?;
+            let height = video["height"]
+                .as_u64()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| BridgeError::internal("The desktop media height is invalid."))?;
+            let duration_ms = probe["duration_ms"]
+                .as_u64()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| BridgeError::internal("The desktop media duration is invalid."))?;
+            let storage_key = format!("local-task:{runtime_task_id}");
+            metadata.extend([
+                ("content".to_owned(), Value::String(storage_key.clone())),
+                ("storageKey".to_owned(), Value::String(storage_key)),
+                ("status".to_owned(), Value::String("success".to_owned())),
+                ("progress".to_owned(), json!(100)),
+                ("naturalWidth".to_owned(), json!(width)),
+                ("naturalHeight".to_owned(), json!(height)),
+                ("durationMs".to_owned(), json!(duration_ms)),
+                (
+                    "localTaskSha256".to_owned(),
+                    Value::String(sha256.to_owned()),
+                ),
+                ("mimeType".to_owned(), Value::String("video/mp4".to_owned())),
+                ("errorDetails".to_owned(), Value::Null),
+            ]);
+        }
+        "failed" | "cancelled" => {
+            let message = snapshot
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or(if status == "cancelled" {
+                    "The local media task was cancelled."
+                } else {
+                    "The local media task failed."
+                });
+            metadata.extend([
+                ("status".to_owned(), Value::String("error".to_owned())),
+                ("errorDetails".to_owned(), Value::String(message.to_owned())),
+            ]);
+        }
+        "running" => {
+            metadata.extend([
+                ("status".to_owned(), Value::String("loading".to_owned())),
+                ("progress".to_owned(), json!(60)),
+            ]);
+        }
+        _ => {
+            return Err(BridgeError::internal(
+                "The media task status is unsupported.",
+            ))
+        }
+    }
+    Ok(Value::Object(metadata))
 }
 
 fn update_canvas_task(
@@ -497,6 +650,25 @@ fn update_canvas_task(
     let mut last_error = None;
     for attempt in 0..3 {
         let project = canvas.get_project(project_id)?;
+        let current_status = project
+            .project
+            .pointer(&format!(
+                "/operationState/tasks/{}/status",
+                json_pointer_token(canvas_task_id)
+            ))
+            .and_then(Value::as_str);
+        if current_status == Some(status) {
+            return Ok(crate::ProtocolOutcome {
+                project: project.project,
+                ok: true,
+                duplicate: true,
+                previous_revision: project.revision,
+                revision: project.revision,
+                error_code: None,
+                error_message: None,
+                error: None,
+            });
+        }
         let timestamp = now_rfc3339()?;
         let result = canvas.apply_protocol_batch(
             project_id,
@@ -530,19 +702,85 @@ fn update_canvas_task(
     }))
 }
 
-fn update_canvas_ingest_task(
-    canvas: &Arc<dyn CanvasOperationAdapter>,
-    project_id: &str,
-    node_id: &str,
-    canvas_task_id: &str,
-    status: &str,
+struct CanvasIngestTaskUpdate<'a> {
+    project_id: &'a str,
+    node_id: &'a str,
+    canvas_task_id: &'a str,
+    status: &'a str,
     details: Value,
     metadata: Value,
+    include_task_update: bool,
+}
+
+fn update_canvas_ingest_task(
+    canvas: &Arc<dyn CanvasOperationAdapter>,
+    update: CanvasIngestTaskUpdate<'_>,
 ) -> Result<crate::ProtocolOutcome, BridgeError> {
+    let CanvasIngestTaskUpdate {
+        project_id,
+        node_id,
+        canvas_task_id,
+        status,
+        details,
+        metadata,
+        include_task_update,
+    } = update;
     let mut last_error = None;
     for attempt in 0..3 {
         let project = canvas.get_project(project_id)?;
         let timestamp = now_rfc3339()?;
+        let current_task_status = project
+            .project
+            .pointer(&format!(
+                "/operationState/tasks/{}/status",
+                json_pointer_token(canvas_task_id)
+            ))
+            .and_then(Value::as_str);
+        let node_metadata = project.project["nodes"]
+            .as_array()
+            .and_then(|nodes| {
+                nodes
+                    .iter()
+                    .find(|node| node["id"].as_str() == Some(node_id))
+            })
+            .and_then(|node| node["metadata"].as_object())
+            .ok_or_else(|| BridgeError::internal("The canvas media task node is missing."))?;
+        let metadata_is_current = metadata.as_object().is_some_and(|patch| {
+            patch
+                .iter()
+                .all(|(key, value)| node_metadata.get(key).unwrap_or(&Value::Null) == value)
+        });
+        let mut operations = Vec::new();
+        if include_task_update && current_task_status != Some(status) {
+            operations.insert(
+                0,
+                json!({
+                    "type": "task.update",
+                    "taskId": canvas_task_id,
+                    "status": status,
+                    "details": details
+                }),
+            );
+        }
+        if !metadata_is_current {
+            operations.push(json!({
+                "type": "node.update",
+                "nodeId": node_id,
+                "patch": { "metadata": metadata }
+            }));
+        }
+        if operations.is_empty() {
+            return Ok(crate::ProtocolOutcome {
+                project: project.project,
+                ok: true,
+                duplicate: true,
+                previous_revision: project.revision,
+                revision: project.revision,
+                error_code: None,
+                error_message: None,
+                error: None,
+            });
+        }
         let result = canvas.apply_protocol_batch(
             project_id,
             json!({
@@ -552,19 +790,7 @@ fn update_canvas_ingest_task(
                 "projectId": project_id,
                 "baseRevision": project.revision,
                 "timestamp": timestamp,
-                "operations": [
-                    {
-                        "type": "task.update",
-                        "taskId": canvas_task_id,
-                        "status": status,
-                        "details": details
-                    },
-                    {
-                        "type": "node.update",
-                        "nodeId": node_id,
-                        "patch": { "metadata": metadata }
-                    }
-                ]
+                "operations": operations
             }),
             false,
         );

@@ -121,6 +121,9 @@ fn deterministic_sample_is_probed_fully_decoded_and_restart_stable() {
         std::path::PathBuf::from("sample-1.mp4")
     );
     assert!(transcoded_probe.has_video());
+    assert!(transcoded_probe.streams.iter().any(|stream| {
+        stream.codec_type == "video" && stream.codec_name.as_deref() == Some("h264")
+    }));
     let transcoded_path = directory.path().join("sample-1.mp4");
     let transcoded_decode_status = Command::new("/opt/homebrew/bin/ffmpeg")
         .args(["-hide_banner", "-nostdin", "-v", "error", "-xerror", "-i"])

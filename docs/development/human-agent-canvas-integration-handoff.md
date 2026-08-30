@@ -40,7 +40,8 @@ web/src/app/(user)/canvas/protocol/canvas-operation-protocol.ts
   `task.update`，可在同批回填节点。
 - 受控视频摄入：Bridge 只接收应用私有 inbox 内的 MP4 文件名和小写 SHA-256，
   在同一工程先创建 `video` 节点与 canvas task，再交给现有 Rust executor；
-  ffprobe 结果由 system 批次回填同一节点和同一 task，不建立第二套媒体画布。
+  ffprobe 结果由同一个 system 批次直接回填 task 终态以及节点的稳定
+  `local-task:` 引用、尺寸、时长和摘要，不建立第二套媒体画布，也不要求 UI 已打开。
 
 在包含本总装代码的桌面包内，持久化唯一来源是 SQLite
 `canvas_projects.project_data.operationState`，其中包含数值 revision、locks、
@@ -62,6 +63,8 @@ tasks、requests 和 audit。WebView 通过 Tauri IPC 读写这些行并轮询�
   不拥有 reducer、revision、锁或 undo 快照。
 - system 对 Agent 媒体批次的 runtime task ID、进度和验收结果回填不会使该 Agent
   批次失去可撤销性；任何后续 human/agent 结构修改仍会阻止旧批次撤销。
+- UI 打开 headless 已完成的视频节点时只把稳定 `local-task:` 引用物化为内存中的
+  Blob URL；不会补写 `bytes` 或其他项目字段，因此不会制造 human revision。
 - 桌面画布库每秒从同一 SQLite 刷新，因此 CLI 新建工程无需重载或重新导入即可出现。
 
 ### Bridge 冲突
@@ -142,6 +145,15 @@ PATH=/Users/chenhuajin/.cargo/bin:$PATH \
     用户确认后从真实 UI 点击“撤销批次”，UI 变为“画布元素 0 / revision 5 /
     已撤销”。CLI 同步读回 0 node、0 connection、0 task、5 audit，原 ingest audit
     记录非空 `undoneByRequestId`。
+11. 正式 App 的一次性工程 `冒烟-一次性工程（可删）` 暴露旧完工批次只有
+    `task.update` 的 headless 缺口；打开 UI 后节点由 loading 恢复为 00:06 可播放，
+    实际点击进入“暂停”状态，证明旧 UI 兜底有效，但也证明 CLI-only 不能算完整。
+12. 修复后在全新隔离工程 `headless-h264-norev-20260831` 复测：工程从未在 UI
+    打开，CLI 轮询任务后 SQLite 已为 revision 4、节点 `success`，最后一个 system
+    批次同时包含 `task.update + node.update`，并具有稳定 content/storageKey、
+    1344x768、6583 ms 和摘要；重复轮询不增加 revision。随后 UI 直接显示 00:06，
+    点击进入“暂停”，CLI 再读仍为 revision 4、4 audit。H.264/AAC 输入 255441 bytes，
+    stream-copy 输出 254832 bytes，ffprobe 与完整 `-xerror` 解码通过。
 
 ## 用户现场复核与交付断点
 
@@ -153,10 +165,10 @@ Support 与 WebKit 到
 revision 0→1、幂等、审计与撤销快照。也就是“桌面 SQLite + Bridge 直写”已经由
 用户实机复核，不再是旧包/空表状态。
 
-本次 `project.create` 与受控 MP4 摄入是该已通链路的下一增量。自动化仍只写独立
-bundle `com.chenyuxiaojin.infinitecanvas.integrationtest`，没有对用户正式工程追加
-视频或任务。最终标准 App 会先构建并暂存；由于用户当前正在运行既有正式 App，
-不在进程运行时覆盖安装，待用户退出后再安全换装。
+正式 App 已完成受控 MP4 冒烟并由用户要求保留一次性工程和 inbox 副本等待确认删除；
+没有向其他正式工程追加视频或任务。headless/H.264 修复的自动化和新闭环只写独立
+bundle `com.chenyuxiaojin.infinitecanvas.integrationtest`。最终标准 App 会构建并暂存，
+不在正式进程运行时覆盖安装。
 
 ## 验证命令与结果
 
@@ -182,11 +194,12 @@ cd ..
 PATH=/Users/chenhuajin/.cargo/bin:$PATH bun run tauri build --bundles app
 ```
 
-最终硬门禁计数：协议/Store 15 tests，共编 UI 7 tests，本机 Agent crate
-7 unit + 9 contract tests，桌面 crate 10 tests，本地 executor 17 tests（另有
-1 个需显式 trusted FFmpeg 的测试默认 ignored；真实 MP4 闭环已覆盖）。Go 全部
+最终硬门禁计数：Web 协议/Store/共编/本地媒体共 24 tests，本机 Agent crate
+7 unit + 10 contract tests，桌面 crate 10 tests，本地 executor 19 tests（另有
+1 个需显式 trusted FFmpeg 的测试默认 ignored，已显式运行通过）。Go 全部
 package、Next 生产构建及标准 arm64 `.app` 构建通过。标准包内 CLI 与 release CLI
-SHA-256 均为 `1e9b16bb4fa20bae942f858d7b056885cd83400a93c7c11c23c3694f4aff9daf`。
+SHA-256 均为 `b4c5d126240451259252587829ab7cb77e517751b8323a39ea83d93d7afee197`；
+真实 H.264 headless MP4 闭环已覆盖。
 
 `bun x tsc --noEmit` 仍有 8 个基线错误，位于
 `canvas-resource-references.ts`、`video-settings-panel.tsx`、`gemini.ts` 和
@@ -196,9 +209,8 @@ SHA-256 均为 `1e9b16bb4fa20bae942f858d7b056885cd83400a93c7c11c23c3694f4aff9daf
 
 - 当前标准 `.app` 是技术构建；Developer ID、公证、staple 和干净机升级仍按
   P4 矩阵执行，不能把 ad-hoc 包当发行包。
-- 用户正在运行的正式包已包含第一阶段 SQLite/Bridge，但不包含本次受控视频增量；
-  最终新包不能在运行中覆盖，需用户退出后换装并用一次性工程做一次标准 bundle
-  的只读/零付费冒烟。
+- 用户当前正式包已包含受控视频增量，但仍是“UI 打开后补回填 + MPEG-4 Part 2
+  重编码”的旧实现；headless/H.264 修正版不能在运行中覆盖，需用户退出后换装。
 - 1 GiB 是协议硬上限而不是推荐镜头大小；当前 IPC 会把验收后的媒体复制进 WebView
   Blob，27 镜审片墙的总内存与滚动性能仍需用一次性副本压测，不能从单个 2 秒镜头
   推断大批量性能。

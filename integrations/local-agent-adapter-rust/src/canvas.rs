@@ -133,6 +133,7 @@ pub struct CanvasRuntimeTaskReference {
     pub project_id: String,
     pub canvas_task_id: String,
     pub node_id: String,
+    pub kind: String,
     pub revision: u64,
     pub status: String,
 }
@@ -657,6 +658,7 @@ impl CanvasOperationAdapter for CanonicalCanvasAdapter {
                     project_id: project["id"].as_str().unwrap_or_default().to_owned(),
                     canvas_task_id: canvas_task_id.clone(),
                     node_id: task["nodeId"].as_str().unwrap_or_default().to_owned(),
+                    kind: task["kind"].as_str().unwrap_or_default().to_owned(),
                     revision: project_revision(&project)?,
                     status: task["status"].as_str().unwrap_or_default().to_owned(),
                 }));
