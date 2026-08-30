@@ -3,7 +3,9 @@ use local_ai_audio::{
     ServiceState, ServiceStatus, probe_all_with,
 };
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 struct FixtureDir(PathBuf);
@@ -103,11 +105,43 @@ fn probe_disabled_yields_discovered_and_ipc_has_no_shell_or_url() {
 
     let encoded = serde_json::to_string(&IpcRequest::SmokeTest {
         provider: ProviderId::VoxCpm2,
+        installation: PathBuf::from("/user/approved/provider"),
     })
     .unwrap();
     assert!(!encoded.contains("shell"));
     assert!(!encoded.contains("url"));
     assert!(!encoded.contains("command"));
+    assert!(encoded.contains("installation"));
+}
+
+#[test]
+fn discovery_never_executes_a_marker_matched_directory() {
+    let fixture = FixtureDir::new();
+    let install = create_vox_fixture(&fixture.0, "3.11.13");
+    let sentinel = fixture.0.join("unexpected-execution");
+    let executable = install.join(".venv/bin/voxcpm");
+    fs::write(
+        &executable,
+        format!("#!/bin/sh\ntouch '{}'\n", sentinel.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let report = probe_all_with(
+        &DiscoveryConfig::with_roots(vec![fixture.0.clone()]),
+        &FakeServiceProbe(ServiceStatus::NotRunning),
+    );
+    assert!(report.providers[1].installation.is_some());
+    assert!(!sentinel.exists());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_local-ai-audio"))
+        .args(["smoke", "vox_cpm_2"])
+        .env("LOCAL_AI_AUDIO_DISCOVERY_ROOTS", &fixture.0)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!sentinel.exists());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--install"));
 }
 
 #[test]

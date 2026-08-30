@@ -1,6 +1,7 @@
 mod audio;
 mod discovery;
 mod model;
+mod process;
 mod smoke;
 
 pub use audio::{AudioVerification, verify_audio};
@@ -11,4 +12,4 @@ pub use model::{
     Capability, EndToEndStatus, Evidence, EvidenceKind, IpcRequest, ProbeResponse, ProviderId,
     ProviderReport, ProviderStatus, RuntimeState, ServiceState, ServiceStatus,
 };
-pub use smoke::{SMOKE_TEXT, SmokeReport, run_smoke};
+pub use smoke::{ApprovedInstallation, SMOKE_TEXT, SmokeReport, run_smoke};

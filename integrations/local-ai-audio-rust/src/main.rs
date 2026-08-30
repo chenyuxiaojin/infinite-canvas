@@ -1,4 +1,6 @@
-use local_ai_audio::{DiscoveryConfig, ProviderId, probe_all, run_smoke, verify_audio};
+use local_ai_audio::{
+    ApprovedInstallation, DiscoveryConfig, ProviderId, probe_all, run_smoke, verify_audio,
+};
 use serde::Serialize;
 use std::env;
 use std::path::PathBuf;
@@ -38,26 +40,24 @@ fn run() -> Result<(), String> {
                 .and_then(|value| value.into_string().ok())
                 .and_then(|value| parse_provider(&value))
                 .ok_or_else(usage)?;
-            if arguments.next().is_some() {
-                return Err(usage());
-            }
-            let response = probe_all(&DiscoveryConfig::from_env()?);
-            let report = response
-                .providers
-                .iter()
-                .find(|report| report.provider == provider)
-                .ok_or("provider report unavailable")?;
-            let installation = report
-                .installation
-                .as_deref()
-                .ok_or("provider installation not found")?;
-            if !report.missing_model_files.is_empty() || !report.runtime.compatible {
-                return Err("provider model/runtime prerequisites are not satisfied".to_owned());
-            }
-            print_json(&run_smoke(provider, installation)?)
+            let installation = parse_explicit_installation(arguments.collect())?;
+            let approved = ApprovedInstallation::new(provider, &installation)?;
+            print_json(&run_smoke(&approved)?)
         }
         _ => Err(usage()),
     }
+}
+
+fn parse_explicit_installation(arguments: Vec<std::ffi::OsString>) -> Result<PathBuf, String> {
+    let mut arguments = arguments.into_iter();
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--install")) {
+        return Err(usage());
+    }
+    let path = arguments.next().map(PathBuf::from).ok_or_else(usage)?;
+    if arguments.next().is_some() {
+        return Err(usage());
+    }
+    Ok(path)
 }
 
 fn parse_roots(arguments: Vec<std::ffi::OsString>) -> Result<Vec<PathBuf>, String> {
@@ -92,5 +92,5 @@ fn print_json(value: &impl Serialize) -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "usage: local-ai-audio probe [--root PATH]... | verify-audio PATH | smoke <index_tts_25|vox_cpm_2>\nconfiguration: LOCAL_AI_AUDIO_DISCOVERY_ROOTS, LOCAL_AI_AUDIO_INDEXTTS_HOME, LOCAL_AI_AUDIO_VOXCPM_HOME".to_owned()
+    "usage: local-ai-audio probe [--root PATH]... | verify-audio PATH | smoke <index_tts_25|vox_cpm_2> --install USER_APPROVED_PATH\nconfiguration: LOCAL_AI_AUDIO_DISCOVERY_ROOTS, LOCAL_AI_AUDIO_INDEXTTS_HOME, LOCAL_AI_AUDIO_VOXCPM_HOME".to_owned()
 }

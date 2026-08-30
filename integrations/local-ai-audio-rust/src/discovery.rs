@@ -283,6 +283,43 @@ fn identify_installation(path: &Path) -> Option<ProviderId> {
     None
 }
 
+pub(crate) fn validate_smoke_installation(
+    provider: ProviderId,
+    path: &Path,
+) -> Result<PathBuf, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| "approved installation path is unavailable".to_owned())?;
+    if identify_installation(&canonical) != Some(provider) {
+        return Err("approved path does not match the requested provider markers".to_owned());
+    }
+
+    let (model_directory, required_files) = model_spec(provider, &canonical);
+    let missing = required_files
+        .iter()
+        .filter(|relative| !model_directory.join(relative).is_file())
+        .map(|relative| relative.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "approved installation is missing model files: {}",
+            missing.join(", ")
+        ));
+    }
+    if !inspect_runtime(&canonical).compatible {
+        return Err("approved installation runtime is incompatible".to_owned());
+    }
+
+    let required_entry = match provider {
+        ProviderId::IndexTts25 => canonical.join("examples/voice_01.wav"),
+        ProviderId::VoxCpm2 => canonical.join(".venv/bin/voxcpm"),
+    };
+    if !required_entry.is_file() {
+        return Err("approved installation smoke entry is unavailable".to_owned());
+    }
+    Ok(canonical)
+}
+
 fn build_report(
     provider: ProviderId,
     candidates: Vec<PathBuf>,
