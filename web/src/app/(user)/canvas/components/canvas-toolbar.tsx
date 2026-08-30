@@ -1,7 +1,7 @@
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
 import { useRef, useState } from "react";
 import { Button, Segmented, Switch } from "antd";
-import { CircleDot, Eraser, FolderOpen, Globe2, Grid2x2, Hand, Image as ImageIcon, Info, Layers3, Library, Moon, MousePointer2, Music2, Palette, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, Video } from "lucide-react";
+import { CircleDot, Cpu, Eraser, FolderOpen, Globe2, Grid2x2, Hand, Image as ImageIcon, Info, Layers3, Library, Moon, MousePointer2, Music2, Palette, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasBackgroundMode, type CanvasColorTheme, type CanvasTheme } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -21,6 +21,9 @@ export function CanvasToolbar({
     onAddPanorama,
     onAddDirector,
     onAddConfig,
+    onRunLocalTask,
+    onCancelLocalTask,
+    localTaskRunning,
     onUndo,
     onRedo,
     onUpload,
@@ -45,6 +48,9 @@ export function CanvasToolbar({
     onAddPanorama: () => void;
     onAddDirector: () => void;
     onAddConfig: () => void;
+    onRunLocalTask?: () => void;
+    onCancelLocalTask?: () => void;
+    localTaskRunning?: boolean;
     onUndo: () => void;
     onRedo: () => void;
     onUpload: () => void;
@@ -104,6 +110,11 @@ export function CanvasToolbar({
                 <ToolbarButton id="tool-config" label="生成配置" hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddConfig}>
                     <Settings2 className="size-4.5" />
                 </ToolbarButton>
+                {onRunLocalTask ? (
+                    <ToolbarButton id="tool-local-task" label={localTaskRunning ? "取消本地测试任务" : "本地测试片"} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={localTaskRunning ? onCancelLocalTask : onRunLocalTask} danger={localTaskRunning}>
+                        {localTaskRunning ? <Square className="size-4" /> : <Cpu className="size-4.5" />}
+                    </ToolbarButton>
+                ) : null}
                 <ToolbarButton id="tool-upload" label="上传素材" hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onUpload}>
                     <Upload className="size-4.5" />
                 </ToolbarButton>
@@ -298,6 +309,7 @@ function toolLabel(id: string) {
     if (id === "tool-image") return "图片";
     if (id === "tool-video") return "视频";
     if (id === "tool-audio") return "音频";
+    if (id === "tool-local-task") return "本地测试片";
     if (id === "tool-panorama") return "全景图";
     if (id === "tool-director") return "导演台";
     if (id === "tool-config") return "生成配置";

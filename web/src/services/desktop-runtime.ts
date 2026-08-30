@@ -17,7 +17,7 @@ export type DesktopRuntimeReport = {
         facts: Record<string, unknown>;
     }>;
     audio: {
-        status: "ok" | "error";
+        status: "ok" | "service_only" | "error";
         diagnostic: string;
         providers: Array<{
             provider: "index_tts_25" | "vox_cpm_2";
@@ -38,6 +38,14 @@ export type DesktopRuntimeReport = {
             end_to_end: "not_run" | "passed" | "failed";
         }>;
     };
+};
+
+export type DesktopTaskMedia = {
+    task_id: string;
+    mime_type: "video/mp4";
+    file_name: string;
+    sha256: string;
+    bytes: number[];
 };
 
 export type DesktopTaskSnapshot = {
@@ -76,10 +84,22 @@ export function generateDesktopTestClip() {
     return invoke<{ task_id: string; duplicate: boolean }>("generate_desktop_test_clip");
 }
 
+export function generateCanvasTestClip(projectId: string) {
+    return invoke<{ task_id: string; duplicate: boolean }>("generate_canvas_test_clip", { projectId });
+}
+
 export function fetchDesktopTaskStatus(taskId: string) {
     return invoke<DesktopTaskSnapshot>("desktop_task_status", { taskId });
 }
 
+export function fetchDesktopTaskMedia(taskId: string) {
+    return invoke<DesktopTaskMedia>("desktop_task_media", { taskId });
+}
+
 export function cancelDesktopTask(taskId: string) {
     return invoke<boolean>("cancel_desktop_task", { taskId });
+}
+
+export function saveCanvasExport(bytes: ArrayBuffer) {
+    return invoke<{ saved: boolean; file_name?: string; bytes: number }>("save_canvas_export", bytes);
 }

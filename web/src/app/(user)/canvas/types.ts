@@ -93,6 +93,11 @@ export type CanvasNodeMetadata = {
     audioTaskResultId?: string;
     videoTaskId?: string;
     videoTaskVideoId?: string;
+    localTaskId?: string;
+    localTaskKind?: "deterministic_test_clip";
+    localTaskSha256?: string;
+    localTaskDuplicate?: boolean;
+    localTaskSourceNodeId?: string;
     firstFrameNodeId?: string;
     lastFrameNodeId?: string;
     multiShot?: string;

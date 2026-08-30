@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [新增] 画布可触发本地固定 FFmpeg 测试片，验证后回填视频节点并保留来源关系、幂等与重启恢复信息
++ [新增] Tauri 桌面画布导出使用 macOS 原生保存框，ZIP 以拒绝覆盖方式安全发布并保留浏览器下载能力
 + [新增] 桌面配置页新增受限本地运行时面板，支持 FFmpeg 固定测试片、Eagle/达芬奇只读状态及本地声音服务状态
 + [新增] 新增 Rust 本地媒体执行核心、Eagle/达芬奇只读连接器和 IndexTTS/VoxCPM 本地声音 Provider 框架
 + [新增] 新增 Tauri 2 macOS 桌面壳，使用本地 Next.js 与 Go sidecar 运行现有无限画布

@@ -1,4 +1,8 @@
-use std::{path::Path, sync::Mutex, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::Duration,
+};
 
 use local_ai_audio::{
     Capability, EndToEndStatus, LoopbackServiceProbe, ProviderId as AudioProviderId,
@@ -6,14 +10,16 @@ use local_ai_audio::{
 };
 use local_executor::{
     AllowedRoot, Executor, ExecutorConfig, GenerateTestClip, OutputConflictPolicy, RootId,
-    ScopedPath, SubmitOutcome, TaskAction, TaskId, TaskRequest, TaskSnapshot, ToolDiscoveryConfig,
-    Toolchain,
+    ScopedPath, SubmitOutcome, TaskAction, TaskId, TaskRequest, TaskResult, TaskSnapshot,
+    TaskStatus, ToolDiscoveryConfig, Toolchain,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tauri::State;
 
 const ACCEPTANCE_ROOT_ID: &str = "desktop-acceptance";
 const TEST_CLIP_IDEMPOTENCY_KEY: &str = "desktop-p2-deterministic-clip-v1";
+const MAX_DESKTOP_TASK_MEDIA_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ToolSummary {
@@ -64,9 +70,19 @@ pub(crate) struct SubmittedTask {
     duplicate: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DesktopTaskMedia {
+    task_id: String,
+    mime_type: &'static str,
+    file_name: String,
+    sha256: String,
+    bytes: Vec<u8>,
+}
+
 pub(crate) struct DesktopRuntime {
     executor: Mutex<Option<Executor>>,
     ffmpeg: FfmpegSummary,
+    acceptance_directory: Option<PathBuf>,
 }
 
 impl DesktopRuntime {
@@ -96,6 +112,7 @@ impl DesktopRuntime {
         {
             return Self {
                 executor: Mutex::new(None),
+                acceptance_directory: None,
                 ffmpeg: FfmpegSummary {
                     status: "error",
                     diagnostic: "The desktop executor data directories could not be prepared."
@@ -110,6 +127,7 @@ impl DesktopRuntime {
             Err(_) => {
                 return Self {
                     executor: Mutex::new(None),
+                    acceptance_directory: None,
                     ffmpeg: FfmpegSummary {
                         status: "error",
                         diagnostic: "The built-in desktop root identifier is invalid.".to_owned(),
@@ -123,6 +141,7 @@ impl DesktopRuntime {
             Err(_) => {
                 return Self {
                     executor: Mutex::new(None),
+                    acceptance_directory: None,
                     ffmpeg: FfmpegSummary {
                         status: "error",
                         diagnostic: "The desktop acceptance root could not be registered."
@@ -141,6 +160,7 @@ impl DesktopRuntime {
             Err(_) => {
                 return Self {
                     executor: Mutex::new(None),
+                    acceptance_directory: None,
                     ffmpeg: FfmpegSummary {
                         status: "error",
                         diagnostic: "The desktop media task journal could not be opened."
@@ -153,6 +173,7 @@ impl DesktopRuntime {
 
         Self {
             executor: Mutex::new(Some(executor)),
+            acceptance_directory: Some(acceptance_directory),
             ffmpeg: FfmpegSummary {
                 status: "available",
                 diagnostic: "The allowlisted local media executor is ready.".to_owned(),
@@ -164,6 +185,7 @@ impl DesktopRuntime {
     fn unavailable(diagnostic: &str) -> Self {
         Self {
             executor: Mutex::new(None),
+            acceptance_directory: None,
             ffmpeg: FfmpegSummary {
                 status: "unavailable",
                 diagnostic: diagnostic.to_owned(),
@@ -236,11 +258,58 @@ pub(crate) fn generate_desktop_test_clip(
 }
 
 #[tauri::command]
+pub(crate) fn generate_canvas_test_clip(
+    runtime: State<'_, DesktopRuntime>,
+    project_id: String,
+) -> Result<SubmittedTask, String> {
+    let request = canvas_test_clip_request(&project_id)?;
+    submit_task(&runtime, request)
+}
+
+#[tauri::command]
 pub(crate) fn desktop_task_status(
     runtime: State<'_, DesktopRuntime>,
     task_id: TaskId,
 ) -> Result<TaskSnapshot, String> {
     runtime.with_executor(|executor| executor.task(&task_id).map_err(|error| error.to_string()))
+}
+
+#[tauri::command]
+pub(crate) fn desktop_task_media(
+    runtime: State<'_, DesktopRuntime>,
+    task_id: TaskId,
+) -> Result<DesktopTaskMedia, String> {
+    let snapshot = runtime
+        .with_executor(|executor| executor.task(&task_id).map_err(|error| error.to_string()))?;
+    let (relative, expected_sha256) = completed_media_result(&snapshot)?;
+    let acceptance_directory = runtime
+        .acceptance_directory
+        .as_ref()
+        .ok_or_else(|| "The desktop acceptance directory is unavailable.".to_owned())?;
+    let path = acceptance_directory.join(&relative);
+    let metadata = std::fs::metadata(&path)
+        .map_err(|_| "The verified desktop task media is unavailable.".to_owned())?;
+    if !metadata.is_file() || metadata.len() > MAX_DESKTOP_TASK_MEDIA_BYTES {
+        return Err("The desktop task media crossed the fixed size boundary.".to_owned());
+    }
+    let bytes = std::fs::read(&path)
+        .map_err(|_| "The verified desktop task media could not be read.".to_owned())?;
+    let actual_sha256 = hex_sha256(&bytes);
+    if actual_sha256 != expected_sha256 {
+        return Err("The desktop task media no longer matches its verified digest.".to_owned());
+    }
+    let file_name = relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "The desktop task media name is invalid.".to_owned())?
+        .to_owned();
+    Ok(DesktopTaskMedia {
+        task_id: task_id.as_str().to_owned(),
+        mime_type: "video/mp4",
+        file_name,
+        sha256: actual_sha256,
+        bytes,
+    })
 }
 
 #[tauri::command]
@@ -267,6 +336,87 @@ fn deterministic_test_clip_request() -> Result<TaskRequest, String> {
             conflict_policy: OutputConflictPolicy::UniqueSuffix,
         }),
     })
+}
+
+fn canvas_test_clip_request(project_id: &str) -> Result<TaskRequest, String> {
+    validate_project_id(project_id)?;
+    let digest = hex_sha256(project_id.as_bytes());
+    let output_name = format!("canvas-test-clip-{}.mp4", &digest[..16]);
+    fixed_test_clip_request(
+        format!("desktop-p3-canvas-test-clip-v1:{project_id}"),
+        &output_name,
+    )
+}
+
+fn fixed_test_clip_request(
+    idempotency_key: String,
+    output_name: &str,
+) -> Result<TaskRequest, String> {
+    let root = RootId::new(ACCEPTANCE_ROOT_ID).map_err(|error| error.to_string())?;
+    let output = ScopedPath::new(root, output_name).map_err(|error| error.to_string())?;
+    Ok(TaskRequest {
+        idempotency_key,
+        timeout_ms: Duration::from_secs(30).as_millis() as u64,
+        action: TaskAction::GenerateTestClip(GenerateTestClip {
+            output,
+            duration_ms: 1_000,
+            width: 320,
+            height: 180,
+            frame_rate: 24,
+            conflict_policy: OutputConflictPolicy::Reject,
+        }),
+    })
+}
+
+fn submit_task(runtime: &DesktopRuntime, request: TaskRequest) -> Result<SubmittedTask, String> {
+    runtime.with_executor(|executor| {
+        let outcome = executor
+            .submit(request)
+            .map_err(|error| error.to_string())?;
+        let (task_id, duplicate) = match outcome {
+            SubmitOutcome::Accepted(task_id) => (task_id, false),
+            SubmitOutcome::Duplicate(task_id) => (task_id, true),
+        };
+        Ok(SubmittedTask {
+            task_id: task_id.as_str().to_owned(),
+            duplicate,
+        })
+    })
+}
+
+fn validate_project_id(project_id: &str) -> Result<(), String> {
+    if project_id.is_empty()
+        || project_id.len() > 64
+        || !project_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("The canvas project identifier is invalid.".to_owned());
+    }
+    Ok(())
+}
+
+fn completed_media_result(snapshot: &TaskSnapshot) -> Result<(PathBuf, String), String> {
+    if snapshot.status != TaskStatus::Succeeded {
+        return Err("The desktop task has not completed successfully.".to_owned());
+    }
+    let Some(TaskResult::MediaCreated { output, sha256, .. }) = &snapshot.result else {
+        return Err("The desktop task did not create media.".to_owned());
+    };
+    if output.root.as_str() != ACCEPTANCE_ROOT_ID || output.relative.components().count() != 1 {
+        return Err("The desktop task output is outside the acceptance root.".to_owned());
+    }
+    let file_name = output.relative.to_string_lossy();
+    if file_name != "desktop-test-clip.mp4"
+        && !(file_name.starts_with("canvas-test-clip-") && file_name.ends_with(".mp4"))
+    {
+        return Err("The desktop task output is not an approved test clip.".to_owned());
+    }
+    Ok((output.relative.clone(), sha256.clone()))
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn probe_desktop_audio_services() -> AudioProbeSummary {
@@ -323,6 +473,38 @@ mod tests {
         for denied in ["shell", "command", "executable", "url", "args"] {
             assert!(!encoded.contains(denied));
         }
+    }
+
+    #[test]
+    fn canvas_request_hashes_the_project_id_into_a_fixed_output() {
+        let request = canvas_test_clip_request("project_123-test").unwrap();
+        assert_eq!(
+            request.idempotency_key,
+            "desktop-p3-canvas-test-clip-v1:project_123-test"
+        );
+        let TaskAction::GenerateTestClip(parameters) = request.action else {
+            panic!("expected the fixed test-clip action");
+        };
+        assert_eq!(parameters.output.root.as_str(), ACCEPTANCE_ROOT_ID);
+        assert_eq!(
+            parameters.output.relative,
+            PathBuf::from("canvas-test-clip-a9049bba5ac5d275.mp4")
+        );
+        assert_eq!(parameters.conflict_policy, OutputConflictPolicy::Reject);
+    }
+
+    #[test]
+    fn canvas_request_rejects_untrusted_project_identifiers() {
+        for project_id in [
+            "",
+            "../escape",
+            "contains/slash",
+            "contains space",
+            "$(shell)",
+        ] {
+            assert!(canvas_test_clip_request(project_id).is_err());
+        }
+        assert!(canvas_test_clip_request(&"a".repeat(65)).is_err());
     }
 
     #[test]

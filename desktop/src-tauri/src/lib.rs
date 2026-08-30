@@ -1,12 +1,15 @@
 use std::{
+    fs::OpenOptions,
+    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Mutex,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use tauri::{App, AppHandle, Manager, RunEvent, Runtime, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 mod runtime;
@@ -16,9 +19,114 @@ use runtime::DesktopRuntime;
 const WEB_PORT: u16 = 3100;
 const API_PORT: u16 = 3101;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CANVAS_EXPORT_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 #[derive(Default)]
 struct Sidecars(Mutex<Vec<CommandChild>>);
+
+#[derive(serde::Serialize)]
+struct SaveCanvasExportResult {
+    saved: bool,
+    file_name: Option<String>,
+    bytes: usize,
+}
+
+fn unique_export_staging_path(target: &Path) -> Result<PathBuf, String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| "the selected export path has no parent directory".to_string())?;
+    let file_name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "the selected export file name is not valid UTF-8".to_string())?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("cannot create export nonce: {error}"))?
+        .as_nanos();
+    Ok(parent.join(format!(".{file_name}.part-{}-{nonce}", std::process::id())))
+}
+
+fn write_new_canvas_export(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() < 4 || !bytes.starts_with(b"PK\x03\x04") {
+        return Err("canvas export payload is not a ZIP archive".to_string());
+    }
+    if target
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("zip"))
+        != Some(true)
+    {
+        return Err("canvas exports must use the .zip extension".to_string());
+    }
+    if target.exists() {
+        return Err("the selected export path already exists; choose a new file name".to_string());
+    }
+
+    let staging = unique_export_staging_path(target)?;
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+            .map_err(|error| format!("cannot create export staging file: {error}"))?;
+        file.write_all(bytes)
+            .map_err(|error| format!("cannot write canvas export: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("cannot sync canvas export: {error}"))?;
+        std::fs::hard_link(&staging, target).map_err(|error| {
+            format!("cannot publish canvas export without overwriting an existing file: {error}")
+        })?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&staging);
+    result
+}
+
+#[tauri::command]
+async fn save_canvas_export(
+    app: AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<SaveCanvasExportResult, String> {
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes,
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err("canvas export requires a raw binary IPC payload".to_string())
+        }
+    };
+    if bytes.is_empty() || bytes.len() > MAX_CANVAS_EXPORT_BYTES {
+        return Err(format!(
+            "canvas export size must be between 1 byte and {MAX_CANVAS_EXPORT_BYTES} bytes"
+        ));
+    }
+
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("导出无限画布项目")
+        .set_file_name("infinite-canvas-export.zip")
+        .add_filter("ZIP archive", &["zip"])
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(SaveCanvasExportResult {
+            saved: false,
+            file_name: None,
+            bytes: 0,
+        });
+    };
+    let target = match selected {
+        FilePath::Path(path) => path,
+        FilePath::Url(_) => return Err("URL export paths are not supported on macOS".to_string()),
+    };
+    write_new_canvas_export(&target, bytes)?;
+    Ok(SaveCanvasExportResult {
+        saved: true,
+        file_name: target
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(ToOwned::to_owned),
+        bytes: bytes.len(),
+    })
+}
 
 fn loopback_address(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
@@ -170,13 +278,17 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(Sidecars::default())
         .invoke_handler(tauri::generate_handler![
             runtime::probe_desktop_runtime,
             runtime::generate_desktop_test_clip,
+            runtime::generate_canvas_test_clip,
             runtime::desktop_task_status,
+            runtime::desktop_task_media,
             runtime::cancel_desktop_task,
+            save_canvas_export,
         ])
         .setup(|app| {
             if let Err(error) = start_desktop(app) {
@@ -213,5 +325,47 @@ mod tests {
             &"http://127.0.0.1:3101/api/health".parse().unwrap()
         ));
         assert!(!is_canvas_url(&"https://example.com".parse().unwrap()));
+    }
+
+    #[test]
+    fn canvas_export_is_published_once_without_overwrite() {
+        let root = std::env::temp_dir().join(format!(
+            "infinite-canvas-export-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("project.zip");
+        let payload = b"PK\x03\x04deterministic-test";
+
+        write_new_canvas_export(&target, payload).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), payload);
+        let error = write_new_canvas_export(&target, b"PK\x03\x04replacement").unwrap_err();
+        assert!(error.contains("already exists"));
+        assert_eq!(std::fs::read(&target).unwrap(), payload);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn canvas_export_rejects_non_zip_payloads_and_extensions() {
+        let root = std::env::temp_dir().join(format!(
+            "infinite-canvas-export-validation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert!(write_new_canvas_export(&root.join("project.zip"), b"not-a-zip").is_err());
+        assert!(write_new_canvas_export(&root.join("project.txt"), b"PK\x03\x04zip").is_err());
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

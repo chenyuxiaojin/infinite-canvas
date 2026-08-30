@@ -4,6 +4,9 @@ description = "Allow the fixed loopback canvas to use the closed desktop probe a
 commands.allow = [
   "probe_desktop_runtime",
   "generate_desktop_test_clip",
+  "generate_canvas_test_clip",
   "desktop_task_status",
+  "desktop_task_media",
   "cancel_desktop_task",
+  "save_canvas_export",
 ]

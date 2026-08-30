@@ -3,6 +3,7 @@ import { saveAs } from "file-saver";
 import { createZip } from "@/lib/zip";
 import { getMediaBlob } from "@/services/file-storage";
 import { getImageBlob } from "@/services/image-storage";
+import { isDesktopRuntime, saveCanvasExport } from "@/services/desktop-runtime";
 import type { CanvasExportAsset, CanvasExportFile } from "../export-types";
 import type { CanvasProject } from "../stores/use-canvas-store";
 
@@ -26,6 +27,10 @@ export async function exportCanvasProjects(projects: CanvasProject[], fileName =
 
     const data: CanvasExportFile = { app: "infinite-canvas", version: 3, exportedAt: new Date().toISOString(), projects: exportedProjects };
     const zip = await createZip([{ name: "projects.json", data: JSON.stringify(data, null, 2) }, ...zipFiles]);
+    if (isDesktopRuntime()) {
+        await saveCanvasExport(await zip.arrayBuffer());
+        return;
+    }
     saveAs(zip, `${safeFileName(fileName)}.zip`);
 }
 

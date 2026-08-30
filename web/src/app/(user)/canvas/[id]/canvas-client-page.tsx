@@ -14,6 +14,7 @@ import { createVideoGenerationTask, pollVideoGenerationTaskStatus, VIDEO_POLL_IN
 import { channelProtocolForConfig, defaultConfig, type AiConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { collectImageStorageKeys, deleteStoredImages, resolveImageUrl, uploadImage, uploadRemoteImageToServer, type UploadedImage } from "@/services/image-storage";
 import { resolveMediaUrl, uploadMediaFile, uploadRemoteMediaToServer, type UploadedFile } from "@/services/file-storage";
+import { cancelDesktopTask, fetchDesktopTaskStatus, generateCanvasTestClip, isDesktopRuntime } from "@/services/desktop-runtime";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
@@ -26,6 +27,7 @@ import { fitNodeSize, nodeSizeFromRatio } from "../utils/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "../utils/canvas-video-frame";
 import { PANORAMA_IMAGE_SIZE, PANORAMA_NODE_SIZE, buildPanoramaPrompt, isCanvasImageNodeType, isPanoramaNodeType } from "../utils/canvas-panorama";
 import { applyCameraPrompt } from "../utils/canvas-camera";
+import { persistDesktopTaskMedia } from "../utils/canvas-local-task";
 import { GROUP_PADDING, findContainingGroupId, findGroupDropTarget, getNodeBounds, snapNodesIntoGroup } from "../utils/canvas-group";
 import { App, Button, Dropdown, Modal } from "antd";
 import { isCogVideoX3Model, modelKey, supportsVideoAudioGeneration, supportsVideoFrameReferences } from "@/lib/video-model-capabilities";
@@ -436,6 +438,8 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const pollingVideoNodeIdsRef = useRef(new Set<string>());
     const pollingImageNodeIdsRef = useRef(new Set<string>());
     const pollingAudioNodeIdsRef = useRef(new Set<string>());
+    const pollingLocalNodeIdsRef = useRef(new Set<string>());
+    const desktopRuntime = isDesktopRuntime();
     const hasLoadingTimedNodes = nodes.some((node) => node.metadata?.status === NODE_STATUS_LOADING && !node.metadata.content && (node.type === CanvasNodeType.Video || isCanvasImageNodeType(node.type) || node.type === CanvasNodeType.Audio));
 
     const createHistoryEntry = useCallback(
@@ -607,11 +611,55 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                         pollingAudioNodeIdsRef.current.delete(node.id);
                     });
             });
+            if (!desktopRuntime) return;
+            const localTargets = nodesRef.current.filter((node) => node.type === CanvasNodeType.Video && node.metadata?.status === NODE_STATUS_LOADING && !node.metadata.content && node.metadata.localTaskId);
+            localTargets.forEach((node) => {
+                const taskId = node.metadata?.localTaskId;
+                if (!taskId || pollingLocalNodeIdsRef.current.has(node.id)) return;
+                pollingLocalNodeIdsRef.current.add(node.id);
+                void fetchDesktopTaskStatus(taskId)
+                    .then(async (task) => {
+                        if (task.status === "succeeded") {
+                            const media = await persistDesktopTaskMedia(taskId);
+                            setNodes((prev) =>
+                                prev.map((item) =>
+                                    item.id === node.id
+                                        ? {
+                                            ...item,
+                                            title: "本地固定测试片",
+                                            metadata: { ...item.metadata, content: media.url, storageKey: media.storageKey, status: NODE_STATUS_SUCCESS, progress: 100, naturalWidth: media.width, naturalHeight: media.height, bytes: media.bytes, mimeType: media.mimeType, durationMs: media.durationMs, localTaskSha256: media.sha256, errorDetails: undefined },
+                                        }
+                                        : item,
+                                ),
+                            );
+                            return;
+                        }
+                        if (task.status === "failed" || task.status === "cancelled") {
+                            setNodes((prev) =>
+                                prev.map((item) =>
+                                    item.id === node.id
+                                        ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: task.error?.message || (task.status === "cancelled" ? "本地任务已取消，未覆盖任何输出。" : "本地任务失败，未写入画布媒体。") } }
+                                        : item,
+                                ),
+                            );
+                            return;
+                        }
+                        setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, progress: task.status === "running" ? 60 : 15 } } : item)));
+                    })
+                    .catch((error) => {
+                        setNodes((prev) =>
+                            prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: error instanceof Error ? error.message : "本地任务状态读取失败" } } : item)),
+                        );
+                    })
+                    .finally(() => {
+                        pollingLocalNodeIdsRef.current.delete(node.id);
+                    });
+            });
         };
         pollCanvasTasks();
         const timer = window.setInterval(pollCanvasTasks, VIDEO_POLL_INTERVAL_MS);
         return () => window.clearInterval(timer);
-    }, [effectiveConfig, isAiConfigReady, projectLoaded]);
+    }, [desktopRuntime, effectiveConfig, isAiConfigReady, projectLoaded]);
 
     useEffect(() => {
         if (!hasLoadingTimedNodes) return;
@@ -952,6 +1000,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         });
         return map;
     }, [connections, nodeById, nodes]);
+    const runningLocalTaskNode = nodes.find((node) => node.metadata?.localTaskId && node.metadata.status === NODE_STATUS_LOADING);
     const createNode = useCallback(
         (type: CanvasNodeType, position?: Position, textContent?: string, nodeId?: string) => {
             const targetPosition = position || getCanvasCenter();
@@ -979,6 +1028,54 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         },
         [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
     );
+
+    const runLocalTestClip = useCallback(async () => {
+        const existing = nodesRef.current.find((node) => node.metadata?.localTaskKind === "deterministic_test_clip");
+        if (existing) {
+            setSelectedNodeIds(new Set([existing.id]));
+            setSelectedConnectionId(null);
+            message.info(existing.metadata?.status === NODE_STATUS_SUCCESS ? "该画布已保留本地测试片及来源关系" : "该画布已有本地测试任务记录");
+            return;
+        }
+
+        const center = getCanvasCenter();
+        const selectedSource = nodesRef.current.find((node) => selectedNodeIdsRef.current.has(node.id) && node.type !== CanvasNodeType.Group);
+        const source = selectedSource || createCanvasNode(CanvasNodeType.Text, { x: center.x - 260, y: center.y }, { content: "生成一条 1 秒本地安全测试片（固定测试图与测试音）", status: NODE_STATUS_SUCCESS }, `local-source-${projectId}`);
+        if (!selectedSource) source.title = "本地测试任务来源";
+        const videoSpec = getNodeSpec(CanvasNodeType.Video);
+        const resultNode = createCanvasNode(
+            CanvasNodeType.Video,
+            { x: source.position.x + source.width + 80 + videoSpec.width / 2, y: source.position.y + source.height / 2 },
+            { status: NODE_STATUS_LOADING, progress: 5, startedAt: Date.now(), generationMode: "video", prompt: "1 秒本地安全测试片（固定测试图与测试音）", localTaskKind: "deterministic_test_clip", localTaskSourceNodeId: source.id },
+            `local-video-${projectId}`,
+        );
+        resultNode.title = "本地固定测试片";
+        setNodes((prev) => [...prev, ...(selectedSource ? [] : [source]), resultNode]);
+        setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: source.id, toNodeId: resultNode.id }]);
+        setSelectedNodeIds(new Set([resultNode.id]));
+        setSelectedConnectionId(null);
+        setDialogNodeId(null);
+
+        try {
+            const submitted = await generateCanvasTestClip(projectId);
+            setNodes((prev) => prev.map((node) => (node.id === resultNode.id ? { ...node, metadata: { ...node.metadata, localTaskId: submitted.task_id, localTaskDuplicate: submitted.duplicate } } : node)));
+            message.info(submitted.duplicate ? "已恢复该画布的同一幂等任务，没有重复生成" : "已提交零付费本地测试任务");
+        } catch (error) {
+            setNodes((prev) => prev.map((node) => (node.id === resultNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails: error instanceof Error ? error.message : "本地任务提交失败" } } : node)));
+            message.error(error instanceof Error ? error.message : "本地任务提交失败");
+        }
+    }, [getCanvasCenter, message, projectId]);
+
+    const cancelLocalTestClip = useCallback(async () => {
+        const task = nodesRef.current.find((node) => node.metadata?.localTaskId && node.metadata.status === NODE_STATUS_LOADING);
+        if (!task?.metadata?.localTaskId) return;
+        try {
+            const accepted = await cancelDesktopTask(task.metadata.localTaskId);
+            message.info(accepted ? "已请求取消本地任务" : "本地任务已经进入终态");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "取消本地任务失败");
+        }
+    }, [message]);
 
     const deleteCanvasTaskRecords = useCallback(
         (nodeIds?: string[]) => {
@@ -4068,6 +4165,9 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     onAddPanorama={() => createNode(CanvasNodeType.Panorama)}
                     onAddDirector={() => createNode(CanvasNodeType.Director)}
                     onAddConfig={() => createNode(CanvasNodeType.Config)}
+                    onRunLocalTask={desktopRuntime ? () => void runLocalTestClip() : undefined}
+                    onCancelLocalTask={desktopRuntime ? () => void cancelLocalTestClip() : undefined}
+                    localTaskRunning={Boolean(runningLocalTaskNode)}
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
                     onUpload={() => handleUploadRequest()}
@@ -5211,6 +5311,7 @@ function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
 }
 
 function canvasRecoverableTaskId(node: CanvasNodeData) {
+    if (node.metadata?.localTaskId) return node.metadata.localTaskId;
     if (node.type === CanvasNodeType.Video) return canvasVideoTaskId(node.metadata);
     if (isCanvasImageNodeType(node.type)) return node.metadata?.imageTaskId || "";
     if (node.type === CanvasNodeType.Audio) return node.metadata?.audioTaskId || "";
