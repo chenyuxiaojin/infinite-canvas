@@ -45,6 +45,18 @@ struct Inner {
     paths: PathPolicy,
     tools: Toolchain,
     journal_path: PathBuf,
+    #[cfg(test)]
+    test_hooks: TestHooks,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestHooks {
+    hash_chunk_delay_ms: std::sync::atomic::AtomicU64,
+    hash_chunks_seen: std::sync::atomic::AtomicUsize,
+    before_publish_delay_ms: std::sync::atomic::AtomicU64,
+    before_publish_reached: AtomicBool,
+    fail_persistence: AtomicBool,
 }
 
 #[derive(Default)]
@@ -105,6 +117,8 @@ impl Executor {
             paths,
             tools: config.toolchain,
             journal_path,
+            #[cfg(test)]
+            test_hooks: TestHooks::default(),
         });
         {
             let state = inner.state.lock().map_err(|_| ExecutorError::StateIo)?;
@@ -183,7 +197,7 @@ impl Executor {
             }
             state
                 .idempotency
-                .insert(key_hash, (fingerprint, task_id.clone()));
+                .insert(key_hash.clone(), (fingerprint, task_id.clone()));
             state.tasks.insert(task_id.clone(), record);
             push_event(
                 &mut state,
@@ -193,7 +207,12 @@ impl Executor {
                 "task_queued",
                 None,
             );
-            persist_locked(&self.inner, &state)?;
+            if persist_locked(&self.inner, &state).is_err() {
+                state.tasks.remove(&task_id);
+                state.idempotency.remove(&key_hash);
+                state.events.retain(|event| event.task_id != task_id);
+                return Err(ExecutorError::StateIo);
+            }
         }
 
         let sender = self
@@ -201,7 +220,7 @@ impl Executor {
             .as_ref()
             .ok_or(ExecutorError::WorkerUnavailable)?;
         if sender.send(WorkerMessage::Run(task_id.clone())).is_err() {
-            mark_worker_unavailable(&self.inner, &task_id);
+            mark_worker_unavailable(&self.inner, &task_id)?;
             return Err(ExecutorError::WorkerUnavailable);
         }
         Ok(SubmitOutcome::Accepted(task_id))
@@ -333,6 +352,23 @@ fn run_task(inner: &Arc<Inner>, task_id: &TaskId) {
         let action_kind = record.persisted.action;
         let timeout = Duration::from_millis(record.timeout_ms);
         let cancelled = Arc::clone(&record.cancelled);
+        if persist_locked(inner, &state).is_err() {
+            if let Some(record) = state.tasks.get_mut(task_id) {
+                record.persisted.status = TaskStatus::Failed;
+                record.persisted.result = None;
+                record.persisted.error = Some(state_persistence_error(false));
+                record.persisted.updated_at_ms = now_ms();
+            }
+            push_event(
+                &mut state,
+                task_id,
+                action_kind,
+                TaskStatus::Failed,
+                "task_start_persist_failed",
+                Some(TaskErrorCode::StateIo),
+            );
+            return;
+        }
         push_event(
             &mut state,
             task_id,
@@ -341,11 +377,11 @@ fn run_task(inner: &Arc<Inner>, task_id: &TaskId) {
             "task_started",
             None,
         );
-        let _ = persist_locked(inner, &state);
         (action, timeout, cancelled)
     };
 
     let result = execute_action(inner, &action, timeout, &cancelled);
+    let output_may_exist = matches!(&result, Ok(TaskResult::MediaCreated { .. }));
     let Ok(mut state) = inner.state.lock() else {
         return;
     };
@@ -371,15 +407,33 @@ fn run_task(inner: &Arc<Inner>, task_id: &TaskId) {
     let action_kind = record.persisted.action;
     let status = record.persisted.status;
     let error_code = record.persisted.error.as_ref().map(|error| error.code);
-    push_event(
-        &mut state,
-        task_id,
-        action_kind,
-        status,
-        "task_finished",
-        error_code,
-    );
-    let _ = persist_locked(inner, &state);
+    if persist_locked(inner, &state).is_err() {
+        if let Some(record) = state.tasks.get_mut(task_id) {
+            record.persisted.status = TaskStatus::Failed;
+            if !output_may_exist {
+                record.persisted.result = None;
+            }
+            record.persisted.error = Some(state_persistence_error(output_may_exist));
+            record.persisted.updated_at_ms = now_ms();
+        }
+        push_event(
+            &mut state,
+            task_id,
+            action_kind,
+            TaskStatus::Failed,
+            "task_final_persist_failed",
+            Some(TaskErrorCode::StateIo),
+        );
+    } else {
+        push_event(
+            &mut state,
+            task_id,
+            action_kind,
+            status,
+            "task_finished",
+            error_code,
+        );
+    }
 }
 
 fn execute_action(
@@ -468,7 +522,8 @@ fn execute_generate(
             "generated sample is missing an expected stream",
         ));
     }
-    let sha256 = sha256_file(temporary.path())?;
+    let sha256 = sha256_file(inner, temporary.path(), started, timeout, cancelled)?;
+    check_before_publish(inner, started, timeout, cancelled)?;
     publish_without_overwrite(temporary.path(), &target)?;
     Ok(TaskResult::MediaCreated {
         output,
@@ -533,7 +588,8 @@ fn execute_transcode(
     if !probe.has_video() {
         return Err(verification_error("transcode output has no video stream"));
     }
-    let sha256 = sha256_file(temporary.path())?;
+    let sha256 = sha256_file(inner, temporary.path(), started, timeout, cancelled)?;
+    check_before_publish(inner, started, timeout, cancelled)?;
     publish_without_overwrite(temporary.path(), &target)?;
     Ok(TaskResult::MediaCreated {
         output,
@@ -554,7 +610,7 @@ fn execute_verify(
         .resolve_existing_file(&parameters.input)
         .map_err(task_error_from_executor)?;
     let probe = probe_and_decode(inner, &input, started, timeout, cancelled)?;
-    let sha256 = sha256_file(&input)?;
+    let sha256 = sha256_file(inner, &input, started, timeout, cancelled)?;
     Ok(TaskResult::MediaVerified {
         input: parameters.input.clone(),
         sha256,
@@ -633,6 +689,29 @@ impl Drop for TemporaryOutput {
     fn drop(&mut self) {
         remove_if_present(&self.path);
     }
+}
+
+fn check_before_publish(
+    _inner: &Inner,
+    started: Instant,
+    timeout: Duration,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<(), TaskError> {
+    #[cfg(test)]
+    {
+        _inner
+            .test_hooks
+            .before_publish_reached
+            .store(true, Ordering::SeqCst);
+        let delay_ms = _inner
+            .test_hooks
+            .before_publish_delay_ms
+            .load(Ordering::SeqCst);
+        if delay_ms > 0 {
+            thread::sleep(Duration::from_millis(delay_ms));
+        }
+    }
+    check_execution_budget(started, timeout, cancelled)
 }
 
 fn publish_without_overwrite(temporary: &Path, target: &Path) -> Result<(), TaskError> {
@@ -783,6 +862,7 @@ fn run_with_deadline(
     timeout: Duration,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<crate::process::ProcessOutput, TaskError> {
+    check_execution_budget(started, timeout, cancelled)?;
     let remaining = timeout
         .checked_sub(started.elapsed())
         .ok_or_else(timeout_error)?;
@@ -921,6 +1001,10 @@ fn recover_interrupted_tasks(state: &mut ExecutorState) {
 }
 
 fn persist_locked(inner: &Inner, state: &ExecutorState) -> Result<(), ExecutorError> {
+    #[cfg(test)]
+    if inner.test_hooks.fail_persistence.load(Ordering::SeqCst) {
+        return Err(ExecutorError::StateIo);
+    }
     let mut tasks = state
         .tasks
         .values()
@@ -965,13 +1049,12 @@ fn snapshot(task: &PersistedTask) -> TaskSnapshot {
     }
 }
 
-fn mark_worker_unavailable(inner: &Inner, task_id: &TaskId) {
-    let Ok(mut state) = inner.state.lock() else {
-        return;
-    };
-    let Some(record) = state.tasks.get_mut(task_id) else {
-        return;
-    };
+fn mark_worker_unavailable(inner: &Inner, task_id: &TaskId) -> Result<(), ExecutorError> {
+    let mut state = inner.state.lock().map_err(|_| ExecutorError::StateIo)?;
+    let record = state
+        .tasks
+        .get_mut(task_id)
+        .ok_or(ExecutorError::TaskNotFound)?;
     record.persisted.status = TaskStatus::Failed;
     record.persisted.error = Some(TaskError::new(
         TaskErrorCode::Internal,
@@ -980,7 +1063,7 @@ fn mark_worker_unavailable(inner: &Inner, task_id: &TaskId) {
         true,
     ));
     record.persisted.updated_at_ms = now_ms();
-    let _ = persist_locked(inner, &state);
+    persist_locked(inner, &state)
 }
 
 fn push_event(
@@ -1004,12 +1087,20 @@ fn push_event(
     }
 }
 
-fn sha256_file(path: &Path) -> Result<String, TaskError> {
+fn sha256_file(
+    _inner: &Inner,
+    path: &Path,
+    started: Instant,
+    timeout: Duration,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<String, TaskError> {
+    check_execution_budget(started, timeout, cancelled)?;
     let mut file =
         fs::File::open(path).map_err(|_| verification_error("media hash could not be read"))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
+        check_execution_budget(started, timeout, cancelled)?;
         let read = file
             .read(&mut buffer)
             .map_err(|_| verification_error("media hash could not be read"))?;
@@ -1017,8 +1108,35 @@ fn sha256_file(path: &Path) -> Result<String, TaskError> {
             break;
         }
         hasher.update(&buffer[..read]);
+        #[cfg(test)]
+        {
+            _inner
+                .test_hooks
+                .hash_chunks_seen
+                .fetch_add(1, Ordering::SeqCst);
+            let delay_ms = _inner.test_hooks.hash_chunk_delay_ms.load(Ordering::SeqCst);
+            if delay_ms > 0 {
+                thread::sleep(Duration::from_millis(delay_ms));
+            }
+        }
+        check_execution_budget(started, timeout, cancelled)?;
     }
+    check_execution_budget(started, timeout, cancelled)?;
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn check_execution_budget(
+    started: Instant,
+    timeout: Duration,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<(), TaskError> {
+    if cancelled.load(Ordering::SeqCst) {
+        return Err(cancelled_error());
+    }
+    if started.elapsed() >= timeout {
+        return Err(timeout_error());
+    }
+    Ok(())
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -1049,6 +1167,20 @@ fn timeout_error() -> TaskError {
         None,
         true,
     )
+}
+
+fn state_persistence_error(side_effects_may_exist: bool) -> TaskError {
+    let error = TaskError::new(
+        TaskErrorCode::StateIo,
+        "task state could not be durably persisted",
+        None,
+        true,
+    );
+    if side_effects_may_exist {
+        error.with_possible_side_effects()
+    } else {
+        error
+    }
 }
 
 fn cancelled_error() -> TaskError {
@@ -1118,7 +1250,7 @@ echo '{"streams":[{"index":0,"codec_type":"video","codec_name":"mpeg4","width":1
         write_executable(&tools.join("ffprobe"), ffprobe_body);
         let toolchain = Toolchain::discover(ToolDiscoveryConfig {
             trusted_directories: vec![tools],
-            version_timeout: Duration::from_secs(5),
+            version_timeout: Duration::from_secs(30),
         })
         .unwrap();
         let root_id = RootId::new("test").unwrap();
@@ -1144,6 +1276,26 @@ echo '{"streams":[{"index":0,"codec_type":"video","codec_name":"mpeg4","width":1
                 conflict_policy: OutputConflictPolicy::Reject,
             }),
         }
+    }
+
+    fn verify_request(root: RootId, name: &str, key: &str, timeout_ms: u64) -> TaskRequest {
+        TaskRequest {
+            idempotency_key: key.to_owned(),
+            timeout_ms,
+            action: TaskAction::VerifyMedia(VerifyMedia {
+                input: ScopedPath::new(root, name).unwrap(),
+            }),
+        }
+    }
+
+    fn wait_until(mut condition: impl FnMut() -> bool) {
+        for _ in 0..300 {
+            if condition() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("condition was not reached before the test deadline");
     }
 
     #[cfg(unix)]
@@ -1235,6 +1387,156 @@ exec /bin/sleep 5
         let snapshot = executor.wait(&id, Duration::from_secs(2)).unwrap();
         assert_eq!(snapshot.status, TaskStatus::Cancelled);
         assert_eq!(snapshot.error.unwrap().code, TaskErrorCode::Cancelled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_interrupts_hashing_after_decode() {
+        let script = r#"#!/bin/sh
+if [ "$1" = "-version" ]; then echo "ffmpeg version mock-1"; exit 0; fi
+exit 0
+"#;
+        let (executor, directory, root) = mock_executor(script);
+        let input = directory.path().join("root/large.mp4");
+        fs::File::create(&input)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
+        executor
+            .inner
+            .test_hooks
+            .hash_chunk_delay_ms
+            .store(2, Ordering::SeqCst);
+        let id = executor
+            .submit(verify_request(root, "large.mp4", "hash-cancel-key", 5_000))
+            .unwrap()
+            .task_id()
+            .clone();
+        wait_until(|| {
+            executor
+                .inner
+                .test_hooks
+                .hash_chunks_seen
+                .load(Ordering::SeqCst)
+                >= 10
+        });
+        assert!(executor.cancel(&id).unwrap());
+        let snapshot = executor.wait(&id, Duration::from_secs(2)).unwrap();
+        assert_eq!(snapshot.status, TaskStatus::Cancelled);
+        assert_eq!(snapshot.error.unwrap().code, TaskErrorCode::Cancelled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn total_timeout_interrupts_hashing_after_decode() {
+        let script = r#"#!/bin/sh
+if [ "$1" = "-version" ]; then echo "ffmpeg version mock-1"; exit 0; fi
+exit 0
+"#;
+        let (executor, directory, root) = mock_executor(script);
+        let input = directory.path().join("root/large.mp4");
+        fs::File::create(&input)
+            .unwrap()
+            .set_len(8 * 1024 * 1024)
+            .unwrap();
+        executor
+            .inner
+            .test_hooks
+            .hash_chunk_delay_ms
+            .store(2, Ordering::SeqCst);
+        let id = executor
+            .submit(verify_request(root, "large.mp4", "hash-timeout-key", 100))
+            .unwrap()
+            .task_id()
+            .clone();
+        let snapshot = executor.wait(&id, Duration::from_secs(2)).unwrap();
+        assert_eq!(snapshot.status, TaskStatus::Failed);
+        assert_eq!(snapshot.error.unwrap().code, TaskErrorCode::Timeout);
+        assert!(
+            executor
+                .inner
+                .test_hooks
+                .hash_chunks_seen
+                .load(Ordering::SeqCst)
+                > 0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_before_publish_does_not_create_target() {
+        let script = r#"#!/bin/sh
+if [ "$1" = "-version" ]; then echo "ffmpeg version mock-1"; exit 0; fi
+last=""
+for arg in "$@"; do last="$arg"; done
+if [ "$last" != "-" ]; then : > "$last"; fi
+"#;
+        let (executor, directory, root) = mock_executor(script);
+        executor
+            .inner
+            .test_hooks
+            .before_publish_delay_ms
+            .store(200, Ordering::SeqCst);
+        let id = executor
+            .submit(generate_request(
+                root,
+                "publish-cancel.mp4",
+                "publish-cancel-key",
+                5_000,
+            ))
+            .unwrap()
+            .task_id()
+            .clone();
+        wait_until(|| {
+            executor
+                .inner
+                .test_hooks
+                .before_publish_reached
+                .load(Ordering::SeqCst)
+        });
+        assert!(executor.cancel(&id).unwrap());
+        let snapshot = executor.wait(&id, Duration::from_secs(2)).unwrap();
+        assert_eq!(snapshot.status, TaskStatus::Cancelled);
+        assert!(!directory.path().join("root/publish-cancel.mp4").exists());
+        assert_eq!(
+            fs::read_dir(directory.path().join("root")).unwrap().count(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn total_timeout_before_publish_does_not_create_target() {
+        let script = r#"#!/bin/sh
+if [ "$1" = "-version" ]; then echo "ffmpeg version mock-1"; exit 0; fi
+last=""
+for arg in "$@"; do last="$arg"; done
+if [ "$last" != "-" ]; then : > "$last"; fi
+"#;
+        let (executor, directory, root) = mock_executor(script);
+        executor
+            .inner
+            .test_hooks
+            .before_publish_delay_ms
+            .store(200, Ordering::SeqCst);
+        let id = executor
+            .submit(generate_request(
+                root,
+                "publish-timeout.mp4",
+                "publish-timeout-key",
+                100,
+            ))
+            .unwrap()
+            .task_id()
+            .clone();
+        let snapshot = executor.wait(&id, Duration::from_secs(2)).unwrap();
+        assert_eq!(snapshot.status, TaskStatus::Failed);
+        assert_eq!(snapshot.error.unwrap().code, TaskErrorCode::Timeout);
+        assert!(!directory.path().join("root/publish-timeout.mp4").exists());
+        assert_eq!(
+            fs::read_dir(directory.path().join("root")).unwrap().count(),
+            0
+        );
     }
 
     #[cfg(unix)]
@@ -1343,6 +1645,135 @@ exit 7
             fs::read_dir(directory.path().join("root")).unwrap().count(),
             0
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistence_failures_block_start_and_downgrade_unstable_success() {
+        let script = r#"#!/bin/sh
+if [ "$1" = "-version" ]; then echo "ffmpeg version mock-1"; exit 0; fi
+last=""
+for arg in "$@"; do last="$arg"; done
+if [ "$last" != "-" ]; then
+  : > "$0.started"
+  while [ ! -f "$0.gate" ]; do sleep 0.01; done
+  : > "$last"
+fi
+"#;
+        let (executor, directory, root) = mock_executor(script);
+        let first = executor
+            .submit(generate_request(
+                root.clone(),
+                "first.mp4",
+                "persist-first-key",
+                5_000,
+            ))
+            .unwrap()
+            .task_id()
+            .clone();
+        let started_marker = directory.path().join("tools/ffmpeg.started");
+        wait_until(|| started_marker.exists());
+        let second = executor
+            .submit(generate_request(
+                root.clone(),
+                "second.mp4",
+                "persist-second-key",
+                5_000,
+            ))
+            .unwrap()
+            .task_id()
+            .clone();
+        assert_eq!(executor.task(&second).unwrap().status, TaskStatus::Queued);
+
+        executor
+            .inner
+            .test_hooks
+            .fail_persistence
+            .store(true, Ordering::SeqCst);
+        fs::write(directory.path().join("tools/ffmpeg.gate"), b"continue").unwrap();
+
+        let first_snapshot = executor.wait(&first, Duration::from_secs(2)).unwrap();
+        let second_snapshot = executor.wait(&second, Duration::from_secs(2)).unwrap();
+        assert_eq!(first_snapshot.status, TaskStatus::Failed);
+        assert_eq!(
+            first_snapshot.error.as_ref().unwrap().code,
+            TaskErrorCode::StateIo
+        );
+        assert!(
+            first_snapshot
+                .error
+                .as_ref()
+                .unwrap()
+                .side_effects_may_exist
+        );
+        assert!(first_snapshot.result.is_some());
+        assert!(directory.path().join("root/first.mp4").is_file());
+
+        assert_eq!(second_snapshot.status, TaskStatus::Failed);
+        assert_eq!(
+            second_snapshot.error.as_ref().unwrap().code,
+            TaskErrorCode::StateIo
+        );
+        assert!(!second_snapshot.error.unwrap().side_effects_may_exist);
+        assert!(second_snapshot.result.is_none());
+        assert!(!directory.path().join("root/second.mp4").exists());
+        let events = executor.events().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event == "task_final_persist_failed")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event == "task_start_persist_failed")
+        );
+
+        drop(executor);
+        let toolchain = Toolchain::discover(ToolDiscoveryConfig {
+            trusted_directories: vec![directory.path().join("tools")],
+            version_timeout: Duration::from_secs(30),
+        })
+        .unwrap();
+        let reopened = Executor::new(ExecutorConfig {
+            state_directory: directory.path().join("state"),
+            allowed_roots: vec![AllowedRoot::new(root, directory.path().join("root")).unwrap()],
+            toolchain,
+        })
+        .unwrap();
+        for task_id in [&first, &second] {
+            let recovered = reopened.task(task_id).unwrap();
+            assert_eq!(recovered.status, TaskStatus::Failed);
+            assert_eq!(
+                recovered.error.unwrap().code,
+                TaskErrorCode::InterruptedByRestart
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_submission_persistence_rolls_back_in_memory_registration() {
+        let script = r#"#!/bin/sh
+if [ "$1" = "-version" ]; then echo "ffmpeg version mock-1"; exit 0; fi
+exit 0
+"#;
+        let (executor, _directory, root) = mock_executor(script);
+        executor
+            .inner
+            .test_hooks
+            .fail_persistence
+            .store(true, Ordering::SeqCst);
+        let result = executor.submit(generate_request(
+            root,
+            "never-queued.mp4",
+            "submit-state-io-key",
+            1_000,
+        ));
+        assert!(matches!(result, Err(ExecutorError::StateIo)));
+        let state = executor.inner.state.lock().unwrap();
+        assert!(state.tasks.is_empty());
+        assert!(state.idempotency.is_empty());
     }
 
     #[cfg(unix)]
