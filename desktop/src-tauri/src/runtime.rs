@@ -4,16 +4,18 @@ use std::{
     time::Duration,
 };
 
+use local_agent_adapter::{AgentRuntime, BridgeError, TestClipRequest};
 use local_ai_audio::{
     Capability, EndToEndStatus, LoopbackServiceProbe, ProviderId as AudioProviderId,
     ProviderStatus as AudioProviderStatus, ServiceProbe, ServiceState, ServiceStatus,
 };
 use local_executor::{
-    AllowedRoot, Executor, ExecutorConfig, GenerateTestClip, OutputConflictPolicy, RootId,
-    ScopedPath, SubmitOutcome, TaskAction, TaskId, TaskRequest, TaskResult, TaskSnapshot,
+    AllowedRoot, Executor, ExecutorConfig, ExecutorError, GenerateTestClip, OutputConflictPolicy,
+    RootId, ScopedPath, SubmitOutcome, TaskAction, TaskId, TaskRequest, TaskResult, TaskSnapshot,
     TaskStatus, ToolDiscoveryConfig, Toolchain,
 };
 use serde::Serialize;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::State;
 
@@ -216,11 +218,34 @@ impl DesktopRuntime {
             .ok_or_else(|| self.ffmpeg.diagnostic.clone())?;
         operation(executor)
     }
+
+    fn with_agent_executor<T>(
+        &self,
+        operation: impl FnOnce(&Executor) -> Result<T, ExecutorError>,
+    ) -> Result<T, BridgeError> {
+        let executor = self
+            .executor
+            .lock()
+            .map_err(|_| BridgeError::internal("The desktop executor state is unavailable."))?;
+        let executor = executor
+            .as_ref()
+            .ok_or_else(|| BridgeError::unavailable(self.ffmpeg.diagnostic.clone()))?;
+        operation(executor).map_err(map_executor_error)
+    }
+
+    fn report(&self) -> DesktopRuntimeReport {
+        DesktopRuntimeReport {
+            transport: "agent_bridge",
+            ffmpeg: self.ffmpeg.clone(),
+            connectors: external_connectors::probe_all(),
+            audio: probe_desktop_audio_services(),
+        }
+    }
 }
 
 #[tauri::command]
 pub(crate) async fn probe_desktop_runtime(
-    runtime: State<'_, DesktopRuntime>,
+    runtime: State<'_, std::sync::Arc<DesktopRuntime>>,
 ) -> Result<DesktopRuntimeReport, String> {
     let ffmpeg = runtime.ffmpeg.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -237,9 +262,44 @@ pub(crate) async fn probe_desktop_runtime(
     .map_err(|_| "The desktop runtime probe could not complete.".to_owned())
 }
 
+impl AgentRuntime for DesktopRuntime {
+    fn report(&self) -> Result<Value, BridgeError> {
+        serde_json::to_value(self.report())
+            .map_err(|_| BridgeError::internal("The desktop runtime report could not be encoded."))
+    }
+
+    fn submit_test_clip(&self, request: &TestClipRequest) -> Result<Value, BridgeError> {
+        let task = agent_test_clip_request(&request.project_id, &request.request_id)?;
+        let outcome = self.with_agent_executor(|executor| executor.submit(task))?;
+        let (task_id, duplicate) = match outcome {
+            SubmitOutcome::Accepted(task_id) => (task_id, false),
+            SubmitOutcome::Duplicate(task_id) => (task_id, true),
+        };
+        Ok(json!({
+            "task_id": task_id.as_str(),
+            "duplicate": duplicate,
+            "mode": "deterministic_local_fixture",
+            "paid": false
+        }))
+    }
+
+    fn task_status(&self, task_id: &str) -> Result<Value, BridgeError> {
+        let task_id = parse_task_id(task_id)?;
+        let snapshot = self.with_agent_executor(|executor| executor.task(&task_id))?;
+        serde_json::to_value(snapshot)
+            .map_err(|_| BridgeError::internal("The desktop task status could not be encoded."))
+    }
+
+    fn cancel_task(&self, task_id: &str) -> Result<Value, BridgeError> {
+        let task_id = parse_task_id(task_id)?;
+        let cancelled = self.with_agent_executor(|executor| executor.cancel(&task_id))?;
+        Ok(json!({ "task_id": task_id.as_str(), "cancelled": cancelled }))
+    }
+}
+
 #[tauri::command]
 pub(crate) fn generate_desktop_test_clip(
-    runtime: State<'_, DesktopRuntime>,
+    runtime: State<'_, std::sync::Arc<DesktopRuntime>>,
 ) -> Result<SubmittedTask, String> {
     let request = deterministic_test_clip_request()?;
     runtime.with_executor(|executor| {
@@ -259,7 +319,7 @@ pub(crate) fn generate_desktop_test_clip(
 
 #[tauri::command]
 pub(crate) fn generate_canvas_test_clip(
-    runtime: State<'_, DesktopRuntime>,
+    runtime: State<'_, std::sync::Arc<DesktopRuntime>>,
     project_id: String,
 ) -> Result<SubmittedTask, String> {
     let request = canvas_test_clip_request(&project_id)?;
@@ -268,7 +328,7 @@ pub(crate) fn generate_canvas_test_clip(
 
 #[tauri::command]
 pub(crate) fn desktop_task_status(
-    runtime: State<'_, DesktopRuntime>,
+    runtime: State<'_, std::sync::Arc<DesktopRuntime>>,
     task_id: TaskId,
 ) -> Result<TaskSnapshot, String> {
     runtime.with_executor(|executor| executor.task(&task_id).map_err(|error| error.to_string()))
@@ -276,7 +336,7 @@ pub(crate) fn desktop_task_status(
 
 #[tauri::command]
 pub(crate) fn desktop_task_media(
-    runtime: State<'_, DesktopRuntime>,
+    runtime: State<'_, std::sync::Arc<DesktopRuntime>>,
     task_id: TaskId,
 ) -> Result<DesktopTaskMedia, String> {
     let snapshot = runtime
@@ -314,7 +374,7 @@ pub(crate) fn desktop_task_media(
 
 #[tauri::command]
 pub(crate) fn cancel_desktop_task(
-    runtime: State<'_, DesktopRuntime>,
+    runtime: State<'_, std::sync::Arc<DesktopRuntime>>,
     task_id: TaskId,
 ) -> Result<bool, String> {
     runtime.with_executor(|executor| executor.cancel(&task_id).map_err(|error| error.to_string()))
@@ -346,6 +406,25 @@ fn canvas_test_clip_request(project_id: &str) -> Result<TaskRequest, String> {
         format!("desktop-p3-canvas-test-clip-v1:{project_id}"),
         &output_name,
     )
+}
+
+fn agent_test_clip_request(project_id: &str, request_id: &str) -> Result<TaskRequest, BridgeError> {
+    validate_project_id(project_id).map_err(BridgeError::invalid)?;
+    if request_id.is_empty()
+        || request_id.len() > 128
+        || !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(BridgeError::invalid("The Agent request_id is invalid."));
+    }
+    let digest = hex_sha256(format!("{project_id}:{request_id}").as_bytes());
+    let output_name = format!("agent-test-clip-{}.mp4", &digest[..16]);
+    fixed_test_clip_request(
+        format!("desktop-agent-test-clip-v1:{project_id}:{request_id}"),
+        &output_name,
+    )
+    .map_err(BridgeError::invalid)
 }
 
 fn fixed_test_clip_request(
@@ -417,6 +496,40 @@ fn completed_media_result(snapshot: &TaskSnapshot) -> Result<(PathBuf, String), 
 
 fn hex_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn parse_task_id(task_id: &str) -> Result<TaskId, BridgeError> {
+    if task_id.is_empty()
+        || task_id.len() > 128
+        || !task_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(BridgeError::invalid(
+            "The desktop task identifier is invalid.",
+        ));
+    }
+    serde_json::from_value(Value::String(task_id.to_owned()))
+        .map_err(|_| BridgeError::invalid("The desktop task identifier is invalid."))
+}
+
+fn map_executor_error(error: ExecutorError) -> BridgeError {
+    match error {
+        ExecutorError::TaskNotFound => BridgeError::not_found("The desktop task was not found."),
+        ExecutorError::PathDenied | ExecutorError::UnknownRoot => {
+            BridgeError::forbidden("The desktop task path crossed the allowlisted root boundary.")
+        }
+        ExecutorError::IdempotencyConflict | ExecutorError::OutputConflict => {
+            BridgeError::conflict("TASK_CONFLICT", error.to_string())
+        }
+        ExecutorError::ToolUnavailable | ExecutorError::WorkerUnavailable => {
+            BridgeError::unavailable(error.to_string())
+        }
+        ExecutorError::InvalidConfiguration(_) | ExecutorError::InvalidRequest(_) => {
+            BridgeError::invalid(error.to_string())
+        }
+        ExecutorError::StateIo => BridgeError::internal(error.to_string()),
+    }
 }
 
 fn probe_desktop_audio_services() -> AudioProbeSummary {

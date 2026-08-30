@@ -17,6 +17,7 @@
     "active": true,
     "targets": ["app", "dmg"],
     "externalBin": [
+      "binaries/infinite-canvas",
       "binaries/infinite-canvas-api",
       "binaries/node"
     ],

@@ -18,6 +18,7 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 external-connectors = { package = "infinite-canvas-external-connectors", path = "../../integrations/external-connectors-rust" }
 local-ai-audio = { path = "../../integrations/local-ai-audio-rust" }
+local-agent-adapter = { package = "infinite-canvas-local-agent-adapter", path = "../../integrations/local-agent-adapter-rust" }
 local-executor = { package = "infinite-canvas-local-executor", path = "../../integrations/local-executor-rust" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

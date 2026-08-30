@@ -100,6 +100,22 @@ export function cancelDesktopTask(taskId: string) {
     return invoke<boolean>("cancel_desktop_task", { taskId });
 }
 
+export function listDesktopCanvasProjects<T>() {
+    return invoke<T[]>("desktop_canvas_projects");
+}
+
+export function saveDesktopCanvasProject<T>(project: T) {
+    return invoke<T>("save_desktop_canvas_project", { project });
+}
+
+export function deleteDesktopCanvasProjects(projectIds: string[]) {
+    return invoke<number>("delete_desktop_canvas_projects", { projectIds });
+}
+
+export function getDesktopCanvasProjectRevision(projectId: string) {
+    return invoke<string>("desktop_canvas_project_revision", { projectId });
+}
+
 export function saveCanvasExport(bytes: ArrayBuffer) {
     return invoke<{ saved: boolean; file_name?: string; bytes: number }>("save_canvas_export", bytes);
 }

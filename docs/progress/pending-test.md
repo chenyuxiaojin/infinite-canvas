@@ -5,6 +5,19 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
+## 本机 Agent 适配层
+
+- 新增只监听 `127.0.0.1:3102` 的 Agent Bridge，以及桌面安装专属、
+  `0600` 保存、可立即撤销替换的本机凭据。
+- 新增 `infinite-canvas` CLI：能力目录、项目列表/读取、画布操作
+  dry-run/apply、运行时探测、任务状态/取消和零付费确定性测试片。
+- Agent 写入带 project/request/base revision/actor，使用 request journal 幂等；revision 冲突和人工锁定节点均拒绝覆盖。
+- 桌面 WebView 改由 Tauri IPC 与 Agent 共用现有 SQLite
+  `canvas_projects` 表，首次加载会合并原 IndexedDB 项目。
+- 自动化已覆盖 loopback、鉴权、撤销、白名单、路径 schema、幂等、JSON 和
+  CLI 退出码；仍需在总装后的签名 `.app` 中人工确认 CLI 打包位置、
+  首次项目合并和长时间并发编辑体验。
+
 ## macOS Tauri 2 桌面壳
 
 - 新增 Apple Silicon macOS 桌面构建，复用现有 Next.js standalone 和 Go API，不改写 React 画布。

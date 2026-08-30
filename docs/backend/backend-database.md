@@ -30,6 +30,7 @@ description: 当前后端主要数据表与字段说明
 - `canvas_image_tasks`
 - `canvas_audio_tasks`
 - `canvas_projects`
+- `agent_operation_requests`（仅桌面 Rust Agent 适配层初始化）
 - `user_configs`
 - `storage_objects`
 
@@ -274,6 +275,24 @@ S3/R2 与 WebDAV 共用的媒体文件索引表，不保存画布、素材列表
 
 索引：`idx_canvas_projects_user_deleted_updated (user_id, deleted_at, updated_at)`、`idx_canvas_projects_deleted_at (deleted_at)`
 
+桌面本机身份使用固定 `user_id = desktop-local`。Tauri WebView 与本机
+Agent Bridge 都读写这些行；Agent 不建立第二份画布项目表。
+
+### agent_operation_requests
+
+桌面 Rust Agent 适配层在同一个 SQLite 数据库中初始化的幂等请求日志。
+它只记录画布操作协议结果，不保存第二份画布状态；统一操作层接管幂等后，
+应由总装迁移并替换。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `request_id` | string | Agent 请求 ID，主键 |
+| `project_id` | string | 目标画布项目 ID |
+| `payload_hash` | string | 结构化请求的 SHA-256，用于拒绝同 ID 不同 payload |
+| `response_json` | text | 首次成功应用的结构化结果，用于重复请求返回一致结果 |
+| `created_at` | string | 首次应用时间 |
+
+索引：`idx_agent_operation_project (project_id, created_at)`
 
 ### settings
 

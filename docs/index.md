@@ -19,6 +19,8 @@
 - [系统配置数据结构](backend/system-settings.md)
 - [后端数据库说明](backend/backend-database.md)
 - [画布数据结构](backend/canvas-data-structure.md)
+- [本机 Agent 适配层与 CLI](development/local-agent-adapter.md)
+- [本机 Agent 适配层总装交接](development/local-agent-adapter-handoff.md)
 
 ## 商务合作
 
@@ -38,4 +40,5 @@
 ## 说明
 
 - 未登录时画布项目和“我的素材”保存在浏览器本地；登录且账号同步可用时，会同步保存到账号/云端。
+- macOS 桌面版使用独立本机身份把画布保存到应用数据库，供 WebView 和受控本机 Agent Bridge 共同操作。
 - 本地直连模式下，AI API Key 保存在浏览器本地，并由前端直接请求 OpenAI 兼容接口。
