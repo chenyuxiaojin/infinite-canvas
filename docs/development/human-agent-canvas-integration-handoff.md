@@ -154,6 +154,15 @@ PATH=/Users/chenhuajin/.cargo/bin:$PATH \
     1344x768、6583 ms 和摘要；重复轮询不增加 revision。随后 UI 直接显示 00:06，
     点击进入“暂停”，CLI 再读仍为 revision 4、4 audit。H.264/AAC 输入 255441 bytes，
     stream-copy 输出 254832 bytes，ffprobe 与完整 `-xerror` 解码通过。
+13. 27 镜性能样本使用原始 17 MiB 审片 ZIP，只导入隔离 bundle；工程
+    `L2DupmT6GUhE_2K4SUCNK` 为 40 节点（27 个真实 MP4）/27 连线。UI 全部显示
+    00:06 元数据，真实 S18 节点进入“暂停”状态；6 轮侧栏往返滚动和 6 轮
+    27%/68%/约 120% 缩放没有白屏、崩溃或结构丢失，CLI 前后均读回 revision 1、
+    40 节点、27 视频和 27 连线。四个相关进程的 RSS 从画布库 1,063,232 KiB 增至
+    打开稳定后的 1,197,040 KiB，滚动/播放后约 1,209,920 KiB，缩放压力后稳定在
+    1,303,968 KiB；其中 WebContent 从 785,024 KiB 增至 1,012,336 KiB。退回画布库
+    10 秒后总 RSS 仍为 1,307,648 KiB，没有回收这约 239 MiB 增量；系统内存空闲
+    73%，未崩溃。退出隔离 App 后四个进程退出，3210/3211/3212 全部关闭。
 
 ## 用户现场复核与交付断点
 
@@ -165,10 +174,11 @@ Support 与 WebKit 到
 revision 0→1、幂等、审计与撤销快照。也就是“桌面 SQLite + Bridge 直写”已经由
 用户实机复核，不再是旧包/空表状态。
 
-正式 App 已完成受控 MP4 冒烟并由用户要求保留一次性工程和 inbox 副本等待确认删除；
-没有向其他正式工程追加视频或任务。headless/H.264 修复的自动化和新闭环只写独立
-bundle `com.chenyuxiaojin.infinitecanvas.integrationtest`。最终标准 App 会构建并暂存，
-不在正式进程运行时覆盖安装。
+正式 App 已完成受控 MP4 冒烟；用户确认后，`冒烟-一次性工程（可删）` 已从真实
+画布库删除，255441-byte inbox 副本已移入废纸篓，可恢复。没有向其他正式工程追加
+视频或任务。headless/H.264 修复和 27 镜性能测试只写独立 bundle
+`com.chenyuxiaojin.infinitecanvas.integrationtest`。最终标准 App 会构建并暂存，不在
+正式进程运行时覆盖安装。
 
 ## 验证命令与结果
 
@@ -211,9 +221,12 @@ SHA-256 均为 `b4c5d126240451259252587829ab7cb77e517751b8323a39ea83d93d7afee197
   P4 矩阵执行，不能把 ad-hoc 包当发行包。
 - 用户当前正式包已包含受控视频增量，但仍是“UI 打开后补回填 + MPEG-4 Part 2
   重编码”的旧实现；headless/H.264 修正版不能在运行中覆盖，需用户退出后换装。
-- 1 GiB 是协议硬上限而不是推荐镜头大小；当前 IPC 会把验收后的媒体复制进 WebView
-  Blob，27 镜审片墙的总内存与滚动性能仍需用一次性副本压测，不能从单个 2 秒镜头
-  推断大批量性能。
+- 27 个真实 MP4 的显示、滚动、缩放、单片播放和 revision 稳定性已通过，但当前 IPC
+  会把验收后的整段媒体复制进 WebView Blob：本次约 18 MiB 媒体使相关进程驻留内存
+  增加约 239 MiB，且退回画布库 10 秒不回收。发行前应改为 Tauri 自定义协议或受控
+  loopback 的 Range 流式读取；本机已有文件默认保存白名单根标识、相对路径和摘要，
+  “复制进项目”只作为可移植/导出选项，不能把整段文件长期塞入 WebView 内存。当前
+  2 GiB IPC 上限只是安全硬门槛，不是可接受的批量媒体架构。
 - 发行签名后再次核对 CLI 仍在 `Contents/MacOS/infinite-canvas`、所有内嵌
   Mach-O 的签名顺序、Bridge loopback 监听和凭据文件权限。
 - 全仓 TypeScript 基线修复可另开任务；不应在本总装分支混入无关业务修正。
