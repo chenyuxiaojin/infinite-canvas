@@ -1203,8 +1203,19 @@ fn extension_for_mime(value: &str) -> &'static str {
     }
 }
 
-fn probe_media(path: &Path) -> Result<MediaProbeSummary, String> {
-    let output = Command::new("ffprobe")
+fn ffprobe_path() -> PathBuf {
+    // GUI 启动的 App 没有 shell PATH；沿用 executor ToolDiscoveryConfig 的可信目录。
+    for directory in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+        let candidate = Path::new(directory).join("ffprobe");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from("ffprobe")
+}
+
+pub(crate) fn probe_media(path: &Path) -> Result<MediaProbeSummary, String> {
+    let output = Command::new(ffprobe_path())
         .args([
             "-v",
             "error",

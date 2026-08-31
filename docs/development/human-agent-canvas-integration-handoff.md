@@ -128,7 +128,7 @@ tasks、requests 和 audit。WebView 通过 Tauri IPC 读写这些行并轮询�
   -> Rust 校验 root + 相对路径 + symlink + 大小 + SHA-256
   -> CanvasProject.metadata.localMedia (稳定、无绝对路径)
   -> App 进程内注册 asset ID
-  -> http://127.0.0.1:3103/v1/media/<asset-id>?cap=<随机能力凭据>
+  -> http://127.0.0.1:3103/v1/media/<asset-id>?token=<随机能力凭据>
   -> WKWebView <video preload="metadata"> 发起 Range
   -> Rust 流式读取请求区间并返回 206
 ```
