@@ -313,6 +313,8 @@ impl LocalMediaManager {
         let mut next = reference;
         next.root_id = root_id;
         next.relative_path = relative_path;
+        next.asset_id = reference_asset_id(&next.root_id, &next.relative_path, &sha256);
+        next.storage_key = format!("local-ref:{}", next.asset_id);
         next.file_name = selected
             .file_name()
             .and_then(|name| name.to_str())
@@ -1092,6 +1094,15 @@ fn validate_reference_shape(reference: &LocalMediaReference) -> Result<(), Strin
     validate_root_id(&reference.root_id)?;
     validate_relative_path(Path::new(&reference.relative_path))?;
     validate_sha256(&reference.sha256)?;
+    let content_id = content_asset_id(&reference.sha256);
+    let path_id = reference_asset_id(
+        &reference.root_id,
+        &reference.relative_path,
+        &reference.sha256,
+    );
+    if reference.asset_id != content_id && reference.asset_id != path_id {
+        return Err("local media asset identifier does not match its controlled source".to_owned());
+    }
     if reference.bytes == 0 || reference.bytes > MAX_LOCAL_MEDIA_BYTES {
         return Err("local media size is outside the allowed range".to_owned());
     }
@@ -1902,6 +1913,11 @@ mod tests {
             manager.resolve_reference(mismatch).reason,
             Some("digest_mismatch")
         );
+
+        let mut forged = valid.clone();
+        forged.asset_id = "asset-missing0123456789abcdef012345".to_owned();
+        forged.storage_key = format!("local-ref:{}", forged.asset_id);
+        assert_eq!(manager.resolve_reference(forged).reason, Some("denied"));
 
         #[cfg(unix)]
         {

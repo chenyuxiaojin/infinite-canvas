@@ -36,8 +36,10 @@ type Props = {
     selectedNodeIds: Set<string>;
     open: boolean;
     width: number;
+    spotlightGroupId?: string | null;
     onWidthChange: (width: number) => void;
     onFocusNode: (nodeId: string) => void;
+    onFocusGroup?: (groupId: string | null) => void;
     onAssetDragStart: (payload: InsertAssetPayload) => void;
     onAssetDragEnd: () => void;
     onInsertAsset: (payload: InsertAssetPayload) => void;
@@ -91,7 +93,7 @@ const STATUS_COLOR: Record<string, string> = {
     error: "#ef4444",
 };
 
-export function CanvasSidePanel({ nodes, selectedNodeIds, open, width, onWidthChange, onFocusNode, onAssetDragStart, onAssetDragEnd, onInsertAsset }: Props) {
+export function CanvasSidePanel({ nodes, selectedNodeIds, open, width, spotlightGroupId, onWidthChange, onFocusNode, onFocusGroup, onAssetDragStart, onAssetDragEnd, onInsertAsset }: Props) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
     const [mounted, setMounted] = useState(open);
@@ -152,7 +154,7 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, open, width, onWidthCh
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
-                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} theme={theme} />
+                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} spotlightGroupId={spotlightGroupId} onFocusNode={onFocusNode} onFocusGroup={onFocusGroup} theme={theme} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab theme={theme} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />
                     ) : (
@@ -174,7 +176,7 @@ function PanelTabButton({ label, active, theme, onClick }: { label: string; acti
     );
 }
 
-function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; theme: CanvasTheme }) {
+function CanvasNodesTab({ nodes, selectedNodeIds, spotlightGroupId, onFocusNode, onFocusGroup, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; spotlightGroupId?: string | null; onFocusNode: (nodeId: string) => void; onFocusGroup?: (groupId: string | null) => void; theme: CanvasTheme }) {
     const [keyword, setKeyword] = useState("");
     const [typeFilter, setTypeFilter] = useState<string>("all");
     const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
@@ -230,6 +232,8 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, theme }: { nodes:
                             const Icon = NODE_TYPE_ICON[node.type] || FileText;
                             const hasImage = isCanvasImageNodeType(node.type) && node.metadata?.content;
                             const active = selectedNodeIds.has(node.id);
+                            const isSpotlit = node.type === CanvasNodeType.Group && spotlightGroupId === node.id;
+
                             return (
                                 <div
                                     key={node.id}
@@ -264,6 +268,23 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, theme }: { nodes:
                                         </span>
                                         {node.metadata?.status && node.metadata.status !== "idle" ? <span className="size-1.5 shrink-0 rounded-full" style={{ background: STATUS_COLOR[node.metadata.status] || "transparent" }} /> : null}
                                     </button>
+
+                                    {node.type === CanvasNodeType.Group ? (
+                                        <button
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                onFocusGroup?.(isSpotlit ? null : node.id);
+                                            }}
+                                            className={cn(
+                                                "mr-2 rounded px-1.5 py-0.5 text-[10px] font-medium transition",
+                                                isSpotlit ? "bg-emerald-950 text-emerald-300 border border-emerald-500" : "opacity-40 hover:opacity-100 bg-black/10 dark:bg-white/10",
+                                            )}
+                                            title={isSpotlit ? "取消聚光灯" : "开启场次聚光灯"}
+                                        >
+                                            {isSpotlit ? "🌟 聚光中" : "聚光"}
+                                        </button>
+                                    ) : null}
                                 </div>
                             );
                         })}

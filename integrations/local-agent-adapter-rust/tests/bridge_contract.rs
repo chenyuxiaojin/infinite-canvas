@@ -12,8 +12,7 @@ use local_agent_adapter::{
     BridgeServer, CanonicalCanvasAdapter, CanvasOperation, CanvasOperationAdapter,
     CanvasProtocolExecutor, CanvasSize, CredentialDocument, CredentialStore, ImageIngestRequest,
     MediaReferencePayload, Point, ProjectCreateRequest, ProtocolOutcome, TestClipRequest,
-    VideoGenerationRequest,
-    VideoIngestRequest,
+    VideoGenerationRequest, VideoIngestRequest,
 };
 use rusqlite::Connection;
 use serde_json::{json, Value};

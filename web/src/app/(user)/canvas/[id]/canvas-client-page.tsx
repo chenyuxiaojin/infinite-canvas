@@ -101,6 +101,7 @@ import { CanvasToolbar } from "../components/canvas-toolbar";
 import { AssetPickerModal, type AssetPickerTab } from "../components/asset-picker-modal";
 import { CanvasZoomControls } from "../components/canvas-zoom-controls";
 import { CANVAS_ASSET_DRAG_TYPE, CanvasSidePanel } from "../components/canvas-side-panel";
+import { CanvasSequentialPlayer } from "../components/canvas-sequential-player";
 import { DEFAULT_CANVAS_AGENT_PANEL, DEFAULT_CANVAS_SIDE_PANEL, useCanvasStore, type CanvasProject } from "../stores/use-canvas-store";
 import {
     CANVAS_OPERATION_PROTOCOL_VERSION,
@@ -503,6 +504,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const [canvasNow, setCanvasNow] = useState(Date.now());
     const [localMediaEvidenceOpen, setLocalMediaEvidenceOpen] = useState(false);
     const [localMediaEvidence, setLocalMediaEvidence] = useState<LocalMediaRequestEvidence[]>([]);
+    const [spotlightGroupId, setSpotlightGroupId] = useState<string | null>(null);
     const resolvedAgentConfig = useMemo<CanvasAgentConfig>(
         () =>
             agentConfig
@@ -2303,6 +2305,14 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const handleNodeContentChange = useCallback((nodeId: string, content: string) => {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, content } } : node)));
     }, []);
+
+    const handleNodeMetadataChange = useCallback(
+        (nodeId: string, patch: Partial<CanvasNodeMetadata>) => {
+            setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node)));
+            markHumanNodeCommit([nodeId]);
+        },
+        [markHumanNodeCommit],
+    );
 
     const handleNodeContentCommit = useCallback(
         (nodeId: string) => {
@@ -4885,8 +4895,10 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 selectedNodeIds={selectedNodeIds}
                 open={sidePanel.open}
                 width={sidePanel.width}
+                spotlightGroupId={spotlightGroupId}
                 onWidthChange={(width) => setSidePanel((current) => ({ ...current, width }))}
                 onFocusNode={focusNode}
+                onFocusGroup={setSpotlightGroupId}
                 onAssetDragStart={(payload) => {
                     draggedAssetPayloadRef.current = payload;
                 }}
@@ -4925,6 +4937,19 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 />
 
                 <CanvasCollaborationStatus collaboration={collaboration} nodes={nodes} onUndoLatest={undoLatestCanvasAgentBatch} onRunDemo={collaborationDemoEnabled ? () => void runLocalCollaborationDemo() : undefined} />
+
+                {spotlightGroupId ? (
+                    <div className="absolute top-16 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 rounded-full border px-4 py-1.5 text-xs shadow-xl backdrop-blur bg-black/80 border-emerald-500/60 text-emerald-300 pointer-events-auto">
+                        <span>🌟 场次聚光灯模式: <b className="text-white">{nodes.find((n) => n.id === spotlightGroupId)?.title || "当前场次"}</b></span>
+                        <button
+                            type="button"
+                            onClick={() => setSpotlightGroupId(null)}
+                            className="ml-2 rounded-full px-2 py-0.5 text-[10px] bg-white/15 hover:bg-white/25 text-stone-200 transition"
+                        >
+                            退出聚光 (看全片)
+                        </button>
+                    </div>
+                ) : null}
 
                 <InfiniteCanvas
                     containerRef={containerRef}
@@ -5007,6 +5032,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                             batchMotion={batchMotionById.get(node.id)}
                             showImageInfo={showImageInfo}
                             isLocked={Boolean(currentProject?.operationState.locks[node.id])}
+                            isDimmed={Boolean(spotlightGroupId && node.metadata?.groupId !== spotlightGroupId && node.id !== spotlightGroupId)}
                             lastAgentChangedAt={currentProject ? canvasCollaborationAdapter.lastAgentChangedAt(currentProject.operationState, node.id) : undefined}
                             mentionReferences={mentionReferencesByNodeId.get(node.id) || []}
                             now={
@@ -5074,6 +5100,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                             onResize={handleNodeResize}
                             onResizeCommit={handleNodeResizeCommit}
                             onContentChange={handleNodeContentChange}
+                            onMetadataChange={handleNodeMetadataChange}
                             onContentCommit={handleNodeContentCommit}
                             onTitleChange={handleNodeTitleChange}
                             onToggleLock={toggleNodeLock}
@@ -5225,6 +5252,15 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 {isMiniMapOpen ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={setViewport} /> : null}
 
                 <CanvasZoomControls scale={viewport.k} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} />
+
+                <CanvasSequentialPlayer
+                    nodes={nodes}
+                    spotlightGroupId={spotlightGroupId}
+                    selectedNodeIds={selectedNodeIds}
+                    onSelectNode={selectOnly}
+                    onFocusNode={focusNode}
+                    theme={theme}
+                />
 
                 {contextMenu ? (
                     <CanvasNodeContextMenu

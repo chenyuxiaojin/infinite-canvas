@@ -137,6 +137,9 @@ export type CanvasNodeMetadata = {
     panoramaFinalPrompt?: string;
     panoramaProjection?: "equirectangular";
     directorProject?: unknown;
+    trimInMs?: number;
+    trimOutMs?: number;
+    reviewStatus?: "approved" | "pending" | "rejected" | "post_composite";
 };
 
 export type CanvasDirectorPanorama = {
