@@ -1,16 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, test } from "bun:test";
 
 import { desktopTaskIdFromStorageKey, materializeDesktopTaskMetadata } from "./canvas-local-task";
 
 describe("desktop canvas task media keys", () => {
-    it("accepts only one opaque local task id segment", () => {
+    test("accepts only one opaque local task id segment", () => {
         expect(desktopTaskIdFromStorageKey("local-task:task-123")).toBe("task-123");
-        expect(desktopTaskIdFromStorageKey("server:task-123")).toBeNull();
-        expect(desktopTaskIdFromStorageKey("local-task:")).toBeNull();
-        expect(desktopTaskIdFromStorageKey("local-task:task-123:extra")).toBeNull();
+        expect(desktopTaskIdFromStorageKey("server:task-123")).toBe(null);
+        expect(desktopTaskIdFromStorageKey("local-task:")).toBe(null);
+        expect(desktopTaskIdFromStorageKey("local-task:task-123:extra")).toBe(null);
     });
 
-    it("materializes only the ephemeral playback URL", () => {
+    test("materializes only the ephemeral playback URL", () => {
         const metadata = {
             content: "local-task:task-123",
             storageKey: "local-task:task-123",

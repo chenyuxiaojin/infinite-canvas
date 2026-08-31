@@ -42,7 +42,19 @@ import { createVideoGenerationTask, pollVideoGenerationTaskStatus, VIDEO_POLL_IN
 import { channelProtocolForConfig, defaultConfig, type AiConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { collectImageStorageKeys, deleteStoredImages, resolveImageUrl, uploadImage, uploadRemoteImageToServer, type UploadedImage } from "@/services/image-storage";
 import { resolveMediaUrl, uploadMediaFile, uploadRemoteMediaToServer, type UploadedFile } from "@/services/file-storage";
-import { cancelDesktopTask, fetchDesktopTaskStatus, generateCanvasTestClip, isDesktopRuntime, type DesktopTaskSnapshot } from "@/services/desktop-runtime";
+import {
+    cancelDesktopTask,
+    fetchDesktopTaskStatus,
+    generateCanvasTestClip,
+    getLocalMediaRequestEvidence,
+    isDesktopRuntime,
+    relinkLocalMediaReference,
+    resolveLocalMediaReference,
+    selectLocalMedia,
+    type DesktopTaskSnapshot,
+    type LocalMediaRequestEvidence,
+    type LocalMediaResolution,
+} from "@/services/desktop-runtime";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
@@ -55,7 +67,7 @@ import { fitNodeSize, nodeSizeFromRatio } from "../utils/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "../utils/canvas-video-frame";
 import { PANORAMA_IMAGE_SIZE, PANORAMA_NODE_SIZE, buildPanoramaPrompt, isCanvasImageNodeType, isPanoramaNodeType } from "../utils/canvas-panorama";
 import { applyCameraPrompt } from "../utils/canvas-camera";
-import { desktopTaskIdFromStorageKey, materializeDesktopTaskMetadata, persistDesktopTaskMedia } from "../utils/canvas-local-task";
+import { desktopTaskIdFromStorageKey, materializeDesktopTaskMetadata, resolveDesktopTaskMedia } from "../utils/canvas-local-task";
 import { GROUP_PADDING, findContainingGroupId, findGroupDropTarget, getNodeBounds, snapNodesIntoGroup } from "../utils/canvas-group";
 import { App, Button, Dropdown, Modal } from "antd";
 import { isCogVideoX3Model, modelKey, supportsVideoAudioGeneration, supportsVideoFrameReferences } from "@/lib/video-model-capabilities";
@@ -116,6 +128,7 @@ import {
     type CanvasImageGenerationType,
     type CanvasNodeData,
     type CanvasNodeMetadata,
+    type LocalMediaReference,
     type CanvasPendingAgentRequest,
     type ConnectionHandle,
     type ContextMenuState,
@@ -362,7 +375,7 @@ function NodeCreateMenu({ position, onCreate, onUpload, onOpenAssetLibrary, onCl
                         添加资源
                     </span>
                 </div>
-                <ConnectionCreateOption theme={theme} icon={<Upload className="size-5" />} title="上传" description="图片、视频或音频" onClick={onUpload} />
+                <ConnectionCreateOption theme={theme} icon={<Upload className="size-5" />} title="添加本机素材" description="默认只引用，不上传云端" onClick={onUpload} />
                 <ConnectionCreateOption theme={theme} icon={<Images className="size-5" />} title="从素材库选择" description="文本、图片或视频" onClick={onOpenAssetLibrary} />
             </div>
         </div>
@@ -458,6 +471,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
     const [assetPickerTab, setAssetPickerTab] = useState<AssetPickerTab>("my-assets");
+    const [localMediaImportOpen, setLocalMediaImportOpen] = useState(false);
     const [pendingPanoramaImport, setPendingPanoramaImport] = useState<PendingPanoramaImport | null>(null);
     const [projectLoaded, setProjectLoaded] = useState(false);
     const [toolbarNodeId, setToolbarNodeId] = useState<string | null>(null);
@@ -487,6 +501,8 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
     const [referencePickerNodeId, setReferencePickerNodeId] = useState<string | null>(null);
     const [canvasNow, setCanvasNow] = useState(Date.now());
+    const [localMediaEvidenceOpen, setLocalMediaEvidenceOpen] = useState(false);
+    const [localMediaEvidence, setLocalMediaEvidence] = useState<LocalMediaRequestEvidence[]>([]);
     const resolvedAgentConfig = useMemo<CanvasAgentConfig>(
         () =>
             agentConfig || {
@@ -832,11 +848,13 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 void fetchDesktopTaskStatus(taskId)
                     .then(async (task) => {
                         if (task.status === "succeeded") {
-                            const media = await persistDesktopTaskMedia(taskId);
+                            const media = await resolveDesktopTaskMedia(taskId);
                             commitLocalTaskSnapshot(node.id, task, {
                                 ...node.metadata,
                                 content: media.url,
                                 storageKey: media.storageKey,
+                                localMedia: media.localMedia,
+                                localMediaRuntime: { status: "available" as const, playbackUrl: media.url },
                                 status: NODE_STATUS_SUCCESS,
                                 progress: 100,
                                 naturalWidth: media.width,
@@ -881,6 +899,36 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         const timer = window.setInterval(() => setCanvasNow(Date.now()), 1000);
         return () => window.clearInterval(timer);
     }, [hasLoadingTimedNodes, hasRecentAgentNodes]);
+
+    useEffect(() => {
+        if (!desktopRuntime) return;
+        const toggleEvidence = (event: KeyboardEvent) => {
+            if (event.altKey && event.shiftKey && event.key.toLowerCase() === "r") {
+                event.preventDefault();
+                setLocalMediaEvidenceOpen((open) => !open);
+            }
+        };
+        window.addEventListener("keydown", toggleEvidence);
+        return () => window.removeEventListener("keydown", toggleEvidence);
+    }, [desktopRuntime]);
+
+    useEffect(() => {
+        if (!desktopRuntime || !localMediaEvidenceOpen) return;
+        let active = true;
+        const refreshEvidence = () => {
+            getLocalMediaRequestEvidence()
+                .then((entries) => {
+                    if (active) setLocalMediaEvidence(entries);
+                })
+                .catch((error) => console.error("Failed to read local media request evidence", error));
+        };
+        refreshEvidence();
+        const timer = window.setInterval(refreshEvidence, 1000);
+        return () => {
+            active = false;
+            window.clearInterval(timer);
+        };
+    }, [desktopRuntime, localMediaEvidenceOpen]);
 
     useEffect(() => {
         if (!dialogNodeId) setNodeImageSettingsOpen(false);
@@ -2004,7 +2052,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
 
     const createImageFileNode = useCallback(
         async (file: File, position: Position, choosePanoramaImport = false) => {
-            const hideLoading = message.loading("正在上传图片...", 0);
+            const hideLoading = message.loading("正在添加本机图片…", 0);
             try {
                 const image = await uploadImage(file);
                 if (choosePanoramaImport && image.width === image.height * 2) {
@@ -2014,7 +2062,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 appendImportedImageNode(image, file.name, position, CanvasNodeType.Image);
             } catch (error) {
                 console.error("Upload image node failed:", error);
-                message.error("图片上传失败");
+                message.error("图片添加失败");
             } finally {
                 hideLoading();
             }
@@ -2032,7 +2080,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     );
     const createVideoFileNode = useCallback(
         async (file: File, position: Position) => {
-            const hideLoading = message.loading("正在上传视频...", 0);
+            const hideLoading = message.loading("正在添加本机视频…", 0);
             try {
                 const video = await uploadMediaFile(file, "video");
                 const node = buildImportedVideoNode(video, file.name, position);
@@ -2042,7 +2090,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 setDialogNodeId(node.id);
             } catch (error) {
                 console.error("Upload video node failed:", error);
-                message.error("视频上传失败");
+                message.error("视频添加失败");
             } finally {
                 hideLoading();
             }
@@ -2052,7 +2100,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
 
     const createAudioFileNode = useCallback(
         async (file: File, position: Position) => {
-            const hideLoading = message.loading("正在上传音频...", 0);
+            const hideLoading = message.loading("正在添加本机音频…", 0);
             try {
                 const audio = await uploadMediaFile(file, "audio");
                 const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
@@ -2073,7 +2121,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 setSelectedConnectionId(null);
             } catch (error) {
                 console.error("Upload audio node failed:", error);
-                message.error("音频上传失败");
+                message.error("音频添加失败");
             } finally {
                 hideLoading();
             }
@@ -3011,8 +3059,96 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
 
     const handleUploadRequest = useCallback((nodeId?: string, position?: Position) => {
         uploadTargetRef.current = { nodeId, position };
-        imageInputRef.current?.click();
-    }, []);
+        if (desktopRuntime) setLocalMediaImportOpen(true);
+        else imageInputRef.current?.click();
+    }, [desktopRuntime]);
+
+    const handleLocalMediaSelection = useCallback(
+        async (mode: LocalMediaReference["mode"]) => {
+            setLocalMediaImportOpen(false);
+            const target = uploadTargetRef.current;
+            const hideLoading = message.loading(mode === "reference" ? "正在建立本机引用…" : "正在复制进项目…", 0);
+            try {
+                const selected = await selectLocalMedia(mode);
+                if (!selected.length) return;
+                const targetNode = target?.nodeId ? nodesRef.current.find((node) => node.id === target.nodeId) : undefined;
+                if (targetNode && selected.length > 1) message.info("替换节点时仅使用所选的第一个文件");
+                const resolutions = targetNode ? selected.slice(0, 1) : selected;
+                if (targetNode && isPanoramaNodeType(targetNode.type) && !resolutions[0]?.reference.mimeType.startsWith("image/")) {
+                    message.warning("全景图节点仅支持图片参考");
+                    return;
+                }
+
+                if (targetNode) {
+                    const resolution = resolutions[0];
+                    const reference = resolution.reference;
+                    const mediaType = localMediaNodeType(reference.mimeType);
+                    const metadata = localMediaMetadata(resolution);
+                    const targetSize = localMediaNodeSize(reference, mediaType, targetNode);
+                    commitHumanNodeMutation([targetNode.id], (current) =>
+                        current.map((node) =>
+                            node.id === targetNode.id
+                                ? {
+                                      ...node,
+                                      type: isPanoramaNodeType(node.type) ? CanvasNodeType.Panorama : mediaType,
+                                      title: isPanoramaNodeType(node.type) ? node.title : reference.fileName,
+                                      position: { x: node.position.x + node.width / 2 - targetSize.width / 2, y: node.position.y + node.height / 2 - targetSize.height / 2 },
+                                      width: targetSize.width,
+                                      height: targetSize.height,
+                                      metadata: { ...node.metadata, ...metadata, errorDetails: undefined },
+                                  }
+                                : node,
+                        ),
+                    );
+                    setSelectedNodeIds(new Set([targetNode.id]));
+                    setSelectedConnectionId(null);
+                } else {
+                    const center = target?.position || screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+                    const imported = resolutions.map((resolution, index) => buildLocalMediaNode(resolution, { x: center.x + index * 36, y: center.y + index * 36 }));
+                    commitHumanNodeMutation(imported.map((node) => node.id), (current) => [...current, ...imported]);
+                    setSelectedNodeIds(new Set(imported.map((node) => node.id)));
+                    setSelectedConnectionId(null);
+                }
+
+                const hydrated = await hydrateCanvasImages(nodesRef.current);
+                nodesRef.current = hydrated;
+                setNodes(hydrated);
+                message.success(mode === "reference" ? `已引用 ${resolutions.length} 个本机素材，未上传云端` : `已复制 ${resolutions.length} 个素材进项目，未上传云端`);
+            } catch (error) {
+                console.error("Add local media failed:", error);
+                message.error(error instanceof Error ? error.message : "本机素材添加失败");
+            } finally {
+                hideLoading();
+                uploadTargetRef.current = null;
+            }
+        },
+        [commitHumanNodeMutation, message, screenToCanvas, size.height, size.width],
+    );
+
+    const handleRelinkLocalMedia = useCallback(
+        async (node: CanvasNodeData) => {
+            const reference = node.metadata?.localMedia;
+            if (!reference) return;
+            try {
+                const resolution = await relinkLocalMediaReference(reference);
+                if (!resolution) return;
+                commitHumanNodeMutation([node.id], (current) =>
+                    current.map((item) =>
+                        item.id === node.id
+                            ? { ...item, title: resolution.reference.fileName, metadata: { ...item.metadata, ...localMediaMetadata(resolution), errorDetails: undefined } }
+                            : item,
+                    ),
+                );
+                const hydrated = await hydrateCanvasImages(nodesRef.current);
+                nodesRef.current = hydrated;
+                setNodes(hydrated);
+                message.success("素材已重新定位，内容摘要校验通过");
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : "重新定位失败");
+            }
+        },
+        [commitHumanNodeMutation, message],
+    );
 
     const handleImageInputChange = useCallback(
         async (event: ReactChangeEvent<HTMLInputElement>) => {
@@ -3021,14 +3157,14 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             if (!file || (!file.type.startsWith("image/") && !file.type.startsWith("video/") && !isAudioFile(file))) return;
             const targetNode = target?.nodeId ? nodesRef.current.find((node) => node.id === target.nodeId) : null;
             if (isPanoramaNodeType(targetNode?.type) && !file.type.startsWith("image/")) {
-                message.warning("全景图节点仅支持上传图片作为参考");
+                message.warning("全景图节点仅支持选择本机图片作为参考");
                 uploadTargetRef.current = null;
                 event.target.value = "";
                 return;
             }
 
             if (target?.nodeId) {
-                const hideLoading = message.loading(isAudioFile(file) ? "正在上传音频..." : file.type.startsWith("video/") ? "正在上传视频..." : "正在上传图片...", 0);
+                const hideLoading = message.loading(isAudioFile(file) ? "正在添加本机音频…" : file.type.startsWith("video/") ? "正在添加本机视频…" : "正在添加本机图片…", 0);
                 try {
                     if (isAudioFile(file)) {
                         const audio = await uploadMediaFile(file, "audio");
@@ -3118,7 +3254,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     }
                 } catch (error) {
                     console.error("Upload node file failed:", error);
-                    message.error("上传失败");
+                    message.error("本机素材添加失败");
                 } finally {
                     hideLoading();
                 }
@@ -3191,10 +3327,14 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             }
             const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/") || item.type.startsWith("video/") || isAudioFile(item));
             if (!file) return;
+            if (desktopRuntime) {
+                message.info("桌面版请使用“添加本机素材”，以便建立受控引用，避免把整个文件复制进画布内存。");
+                return;
+            }
             const pos = screenToCanvas(event.clientX, event.clientY);
             void (isAudioFile(file) ? createAudioFileNode(file, pos) : file.type.startsWith("video/") ? createVideoFileNode(file, pos) : createImageFileNode(file, pos, true));
         },
-        [createAudioFileNode, createImageFileNode, createVideoFileNode, insertAssetAt, screenToCanvas],
+        [createAudioFileNode, createImageFileNode, createVideoFileNode, desktopRuntime, insertAssetAt, message, screenToCanvas],
     );
 
     const pasteAssistantImage = useCallback(
@@ -4694,6 +4834,34 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 if (selection?.toString() && panel?.contains(selection.anchorNode) && !panel.contains(event.target as Node)) selection.removeAllRanges();
             }}
         >
+            {desktopRuntime && !localMediaEvidenceOpen ? (
+                <button
+                    type="button"
+                    className="fixed bottom-3 right-3 z-[200] rounded-lg border border-emerald-400/40 bg-slate-950/90 px-3 py-2 font-mono text-xs text-emerald-200 shadow-xl"
+                    onClick={() => setLocalMediaEvidenceOpen(true)}
+                >
+                    Range 证据
+                </button>
+            ) : null}
+            {localMediaEvidenceOpen ? (
+                <aside
+                    data-local-media-evidence
+                    className="fixed right-3 top-3 z-[200] grid max-w-[440px] gap-1 rounded-xl border border-emerald-400/50 bg-slate-950/95 px-4 py-3 font-mono text-xs text-emerald-100 shadow-2xl"
+                >
+                    <strong className="text-sm text-emerald-300">本机媒体 Range 证据</strong>
+                    <span>
+                        请求 {localMediaEvidence.length} · 206 {localMediaEvidence.filter((entry) => entry.status === 206).length} · Range {localMediaEvidence.filter((entry) => Boolean(entry.requestedRange)).length}
+                    </span>
+                    {localMediaEvidence.slice(-5).reverse().map((entry) => (
+                        <span key={`${entry.recordedAtMs}-${entry.assetId}-${entry.requestedRange || "full"}`}>
+                            {entry.method} {entry.status} {entry.responseBytes}B {entry.requestedRange || "full"} · {entry.assetId}
+                        </span>
+                    ))}
+                    <button type="button" className="justify-self-start text-emerald-300/70 underline" onClick={() => setLocalMediaEvidenceOpen(false)}>
+                        关闭（Shift+Option+R）
+                    </button>
+                </aside>
+            ) : null}
             <CanvasSidePanel
                 nodes={nodes}
                 selectedNodeIds={selectedNodeIds}
@@ -4978,6 +5146,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     onToggleDialog={(node) => setDialogNodeId((current) => (current === node.id ? null : node.id))}
                     onGenerateImage={generateImageFromTextNode}
                     onUpload={(node) => handleUploadRequest(node.id)}
+                    onRelinkLocalMedia={(node) => void handleRelinkLocalMedia(node)}
                     onDownload={downloadNodeImage}
                     onSaveAsset={(node) => void saveNodeAsset(node)}
                     onUploadMediaToCloud={(node) => void uploadNodeMediaToCloud(node)}
@@ -5103,6 +5272,43 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     </div>
                 ) : null}
                 <input ref={imageInputRef} type="file" accept="image/*,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" className="hidden" onChange={handleImageInputChange} />
+
+                <Modal
+                    title="添加本机素材"
+                    open={localMediaImportOpen}
+                    onCancel={() => {
+                        setLocalMediaImportOpen(false);
+                        uploadTargetRef.current = null;
+                    }}
+                    footer={
+                        <div className="flex justify-end gap-2">
+                            <Button
+                                onClick={() => {
+                                    setLocalMediaImportOpen(false);
+                                    uploadTargetRef.current = null;
+                                }}
+                            >
+                                取消
+                            </Button>
+                            <Button onClick={() => void handleLocalMediaSelection("project_copy")}>复制进项目</Button>
+                            <Button type="primary" onClick={() => void handleLocalMediaSelection("reference")}>
+                                引用本机素材（默认）
+                            </Button>
+                        </div>
+                    }
+                >
+                    <div className="space-y-4 py-2 text-sm leading-6">
+                        <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-blue-950 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-100">
+                            <div className="font-medium">引用本机素材</div>
+                            <div className="opacity-75">只保存受控引用与内容摘要，播放时按需读取文件片段；不复制进浏览器，也不上传云端。</div>
+                        </div>
+                        <div className="rounded-xl border p-3">
+                            <div className="font-medium">复制进项目</div>
+                            <div className="opacity-65">在应用管理的项目素材目录保留一份内容寻址副本，适合可移植工程或备份。</div>
+                        </div>
+                        <p className="m-0 text-xs opacity-55">上传至云存储是节点上的独立操作，这里两种选择都不会触发云端上传。</p>
+                    </div>
+                </Modal>
 
                 <CanvasNodeInfoModal node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} />
 
@@ -5719,8 +5925,19 @@ function imageMetadata(image: UploadedImage): CanvasNodeMetadata {
     return { content: image.url, storageKey: image.storageKey, status: "success", naturalWidth: image.width, naturalHeight: image.height, bytes: image.bytes, mimeType: image.mimeType };
 }
 
-function videoMetadata(video: UploadedFile): CanvasNodeMetadata {
-    return { content: video.url, storageKey: video.storageKey, status: "success", naturalWidth: video.width, naturalHeight: video.height, bytes: video.bytes, mimeType: video.mimeType || "video/mp4", durationMs: video.durationMs };
+function videoMetadata(video: UploadedFile & { localMedia?: LocalMediaReference }): CanvasNodeMetadata {
+    return {
+        content: video.url,
+        storageKey: video.storageKey,
+        status: "success",
+        naturalWidth: video.width,
+        naturalHeight: video.height,
+        bytes: video.bytes,
+        mimeType: video.mimeType || "video/mp4",
+        durationMs: video.durationMs,
+        localMedia: video.localMedia,
+        localMediaRuntime: video.localMedia ? { status: "available", playbackUrl: video.url } : undefined,
+    };
 }
 
 function buildImportedVideoNode(video: UploadedFile, title: string, center: Position): CanvasNodeData {
@@ -5746,6 +5963,51 @@ function getNextDirectorOutputY(director: CanvasNodeData, nodes: CanvasNodeData[
 
 function audioMetadata(audio: UploadedFile): CanvasNodeMetadata {
     return { content: audio.url, storageKey: audio.storageKey, status: "success", bytes: audio.bytes, mimeType: audio.mimeType || "audio/mpeg", durationMs: audio.durationMs };
+}
+
+function localMediaNodeType(mimeType: string) {
+    if (mimeType.startsWith("video/")) return CanvasNodeType.Video;
+    if (mimeType.startsWith("audio/")) return CanvasNodeType.Audio;
+    return CanvasNodeType.Image;
+}
+
+function localMediaMetadata(resolution: LocalMediaResolution): CanvasNodeMetadata {
+    const reference = resolution.reference;
+    return {
+        content: resolution.playbackUrl,
+        storageKey: reference.storageKey,
+        status: NODE_STATUS_SUCCESS,
+        naturalWidth: reference.width,
+        naturalHeight: reference.height,
+        bytes: reference.bytes,
+        mimeType: reference.mimeType,
+        durationMs: reference.durationMs,
+        localMedia: reference,
+        localMediaRuntime: {
+            status: resolution.status,
+            playbackUrl: resolution.playbackUrl,
+            reason: resolution.reason,
+        },
+    };
+}
+
+function localMediaNodeSize(reference: LocalMediaReference, type: CanvasNodeType, existing?: CanvasNodeData) {
+    if (type === CanvasNodeType.Audio) return NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
+    if (type === CanvasNodeType.Video) return fitNodeSize(reference.width || 1280, reference.height || 720, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+    if (existing && isPanoramaNodeType(existing.type)) return PANORAMA_NODE_SIZE;
+    return fitNodeSize(reference.width || 1024, reference.height || 1024);
+}
+
+function buildLocalMediaNode(resolution: LocalMediaResolution, center: Position): CanvasNodeData {
+    const reference = resolution.reference;
+    const type = localMediaNodeType(reference.mimeType);
+    const node = createCanvasNode(type, center, localMediaMetadata(resolution), `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+    const nodeSize = localMediaNodeSize(reference, type);
+    node.title = reference.fileName;
+    node.width = nodeSize.width;
+    node.height = nodeSize.height;
+    node.position = { x: center.x - nodeSize.width / 2, y: center.y - nodeSize.height / 2 };
+    return node;
 }
 
 function buildImageGenerationMetadata(type: CanvasImageGenerationType, config: AiConfig, count: number, references: ReferenceImage[]): CanvasNodeMetadata {
@@ -5844,13 +6106,38 @@ async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
     return Promise.all(
         nodes.map(async (node) => {
             const content = node.metadata?.content;
+            if (node.metadata?.localMedia && isDesktopRuntime()) {
+                try {
+                    const resolution = await resolveLocalMediaReference(node.metadata.localMedia);
+                    if (resolution.status === "available" && resolution.playbackUrl) {
+                        return { ...node, metadata: { ...node.metadata, ...localMediaMetadata(resolution) } };
+                    }
+                    return {
+                        ...node,
+                        metadata: {
+                            ...node.metadata,
+                            content: undefined,
+                            localMedia: resolution.reference,
+                            localMediaRuntime: { status: "missing" as const, reason: resolution.reason || "unavailable" },
+                        },
+                    };
+                } catch (error) {
+                    console.error("Failed to resolve local media reference", error);
+                    return { ...node, metadata: { ...node.metadata, content: undefined, localMediaRuntime: { status: "missing" as const, reason: "unavailable" as const } } };
+                }
+            }
             const desktopTaskId = node.type === CanvasNodeType.Video ? desktopTaskIdFromStorageKey(node.metadata?.storageKey) : null;
             if (desktopTaskId) {
                 try {
-                    const media = await persistDesktopTaskMedia(desktopTaskId);
+                    const media = await resolveDesktopTaskMedia(desktopTaskId);
                     return {
                         ...node,
-                        metadata: materializeDesktopTaskMetadata(node.metadata, media.url),
+                        metadata: {
+                            ...materializeDesktopTaskMetadata(node.metadata || {}, media.url),
+                            storageKey: media.storageKey,
+                            localMedia: media.localMedia,
+                            localMediaRuntime: { status: "available" as const, playbackUrl: media.url },
+                        },
                     };
                 } catch (error) {
                     console.error("Failed to materialize the shared desktop task media", error);

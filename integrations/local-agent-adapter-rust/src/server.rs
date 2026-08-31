@@ -427,7 +427,14 @@ async fn task_status(
     State(state): State<BridgeState>,
     Path(task_id): Path<String>,
 ) -> Result<Json<Success<Value>>, BridgeError> {
-    let snapshot = state.runtime.task_status(&task_id)?;
+    let mut snapshot = state.runtime.task_status(&task_id)?;
+    if let Some(local_media) = snapshot
+        .get_mut("local_media")
+        .and_then(Value::as_object_mut)
+    {
+        local_media.remove("playbackUrl");
+        local_media.remove("playback_url");
+    }
     sync_runtime_task_snapshot(&state.canvas, &task_id, &snapshot)?;
     Ok(Json(Success::new(snapshot)))
 }
@@ -594,15 +601,35 @@ fn ingest_node_metadata(
                 .as_u64()
                 .filter(|value| *value > 0)
                 .ok_or_else(|| BridgeError::internal("The desktop media duration is invalid."))?;
-            let storage_key = format!("local-task:{runtime_task_id}");
+            let local_media = snapshot
+                .get("local_media")
+                .and_then(|value| value.get("reference"))
+                .filter(|value| value.is_object())
+                .ok_or_else(|| {
+                    BridgeError::internal("The completed local media reference is missing.")
+                })?;
+            let storage_key = local_media["storageKey"]
+                .as_str()
+                .filter(|value| value.starts_with("local-ref:asset-"))
+                .ok_or_else(|| {
+                    BridgeError::internal("The completed local media storage key is invalid.")
+                })?;
             metadata.extend([
-                ("content".to_owned(), Value::String(storage_key.clone())),
-                ("storageKey".to_owned(), Value::String(storage_key)),
+                ("content".to_owned(), Value::String(storage_key.to_owned())),
+                (
+                    "storageKey".to_owned(),
+                    Value::String(storage_key.to_owned()),
+                ),
+                ("localMedia".to_owned(), local_media.clone()),
                 ("status".to_owned(), Value::String("success".to_owned())),
                 ("progress".to_owned(), json!(100)),
                 ("naturalWidth".to_owned(), json!(width)),
                 ("naturalHeight".to_owned(), json!(height)),
                 ("durationMs".to_owned(), json!(duration_ms)),
+                (
+                    "bytes".to_owned(),
+                    local_media.get("bytes").cloned().unwrap_or(Value::Null),
+                ),
                 (
                     "localTaskSha256".to_owned(),
                     Value::String(sha256.to_owned()),

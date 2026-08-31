@@ -238,6 +238,67 @@ describe("人与 Agent 共用画布操作协议", () => {
         expect(stored.operationState.revision).toBe(0);
     });
 
+    test("本机引用只持久化受控 asset，Range 播放 URL 不会制造 revision", () => {
+        const localMedia = {
+            assetId: "asset-0123456789abcdef0123456789abcdef",
+            storageKey: "local-ref:asset-0123456789abcdef0123456789abcdef",
+            rootId: "root-fixture",
+            relativePath: "shots/clip.mp4",
+            sha256: "a".repeat(64),
+            mimeType: "video/mp4",
+            bytes: 1024,
+            fileName: "clip.mp4",
+            width: 1920,
+            height: 1080,
+            durationMs: 1000,
+            mode: "reference" as const,
+        };
+        const stored = project([{
+            ...node("local-media"),
+            type: CanvasNodeType.Video,
+            metadata: { content: localMedia.storageKey, storageKey: localMedia.storageKey, localMedia },
+        }]);
+        const hydrated = [{
+            ...stored.nodes[0],
+            metadata: {
+                ...stored.nodes[0].metadata,
+                content: "http://127.0.0.1:3213/v1/media/asset?token=ephemeral",
+                localMediaRuntime: { status: "available" as const, playbackUrl: "http://127.0.0.1:3213/v1/media/asset?token=ephemeral" },
+            },
+        }];
+
+        expect(buildCanvasStructureOperations(stored, hydrated, [])).toEqual([]);
+        expect(stored.nodes[0].metadata?.content).toBe(localMedia.storageKey);
+        expect(stored.nodes[0].metadata?.localMediaRuntime).toBeUndefined();
+        expect(stored.operationState.revision).toBe(0);
+    });
+
+    test("Agent 操作拒绝绝对路径和目录穿越引用", () => {
+        const invalid = {
+            ...node("invalid-media"),
+            type: CanvasNodeType.Video,
+            metadata: {
+                storageKey: "local-ref:asset-0123456789abcdef0123456789abcdef",
+                localMedia: {
+                    assetId: "asset-0123456789abcdef0123456789abcdef",
+                    storageKey: "local-ref:asset-0123456789abcdef0123456789abcdef",
+                    rootId: "root-fixture",
+                    relativePath: "../private/clip.mp4",
+                    sha256: "a".repeat(64),
+                    mimeType: "video/mp4",
+                    bytes: 1024,
+                    fileName: "clip.mp4",
+                    mode: "reference" as const,
+                },
+            },
+        };
+        const result = applyCanvasOperationBatch(project(), batch("agent", "invalid-local-path", 0, [{ type: "node.create", node: invalid }]), { now: () => TIME });
+
+        expect(result.result.error?.code).toBe("invalid_node");
+        expect(result.project.nodes).toEqual([]);
+        expect(result.project.operationState.revision).toBe(0);
+    });
+
     test("Bridge 画布任务已关联 runtime task 时不迁移出第二份任务", () => {
         const source = project([{
             ...node("media"),

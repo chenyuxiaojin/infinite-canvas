@@ -13,9 +13,11 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 mod agent_bridge;
+mod local_media;
 mod runtime;
 
 use agent_bridge::DesktopAgentBridge;
+use local_media::LocalMediaManager;
 use runtime::DesktopRuntime;
 
 #[cfg(not(feature = "integration-acceptance"))]
@@ -30,6 +32,10 @@ const API_PORT: u16 = 3211;
 const AGENT_BRIDGE_PORT: u16 = 3102;
 #[cfg(feature = "integration-acceptance")]
 const AGENT_BRIDGE_PORT: u16 = 3212;
+#[cfg(not(feature = "integration-acceptance"))]
+const LOCAL_MEDIA_PORT: u16 = 3103;
+#[cfg(feature = "integration-acceptance")]
+const LOCAL_MEDIA_PORT: u16 = 3213;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CANVAS_EXPORT_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
@@ -97,6 +103,7 @@ fn write_new_canvas_export(target: &Path, bytes: &[u8]) -> Result<(), String> {
 #[tauri::command]
 async fn save_canvas_export(
     app: AppHandle,
+    local_media: tauri::State<'_, Arc<LocalMediaManager>>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<SaveCanvasExportResult, String> {
     let bytes = match request.body() {
@@ -129,14 +136,20 @@ async fn save_canvas_export(
         FilePath::Path(path) => path,
         FilePath::Url(_) => return Err("URL export paths are not supported on macOS".to_string()),
     };
-    write_new_canvas_export(&target, bytes)?;
+    let saved_bytes = if let Some((envelope, base_zip)) = local_media::parse_export_envelope(bytes)?
+    {
+        local_media.export_archive(&target, base_zip, envelope)? as usize
+    } else {
+        write_new_canvas_export(&target, bytes)?;
+        bytes.len()
+    };
     Ok(SaveCanvasExportResult {
         saved: true,
         file_name: target
             .file_name()
             .and_then(|value| value.to_str())
             .map(ToOwned::to_owned),
-        bytes: bytes.len(),
+        bytes: saved_bytes,
     })
 }
 
@@ -145,7 +158,7 @@ fn loopback_address(port: u16) -> SocketAddr {
 }
 
 fn ensure_ports_available() -> Result<(), String> {
-    for port in [WEB_PORT, API_PORT, AGENT_BRIDGE_PORT] {
+    for port in [WEB_PORT, API_PORT, AGENT_BRIDGE_PORT, LOCAL_MEDIA_PORT] {
         TcpListener::bind(loopback_address(port))
             .map_err(|error| format!("local port {port} is unavailable: {error}"))?;
     }
@@ -187,6 +200,12 @@ fn stop_desktop_runtime<R: Runtime>(app: &AppHandle<R>) {
 fn stop_agent_bridge<R: Runtime>(app: &AppHandle<R>) {
     if let Some(bridge) = app.try_state::<DesktopAgentBridge>() {
         bridge.stop();
+    }
+}
+
+fn stop_local_media<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(manager) = app.try_state::<Arc<LocalMediaManager>>() {
+        manager.shutdown();
     }
 }
 
@@ -239,7 +258,9 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
         .map_err(|error| format!("cannot create app data directory: {error}"))?;
     std::fs::create_dir_all(&log_dir)
         .map_err(|error| format!("cannot create app log directory: {error}"))?;
-    let desktop_runtime = Arc::new(DesktopRuntime::initialize(&app_data_dir));
+    let local_media = LocalMediaManager::start(&app_data_dir, LOCAL_MEDIA_PORT, WEB_PORT)?;
+    app.manage(local_media.clone());
+    let desktop_runtime = Arc::new(DesktopRuntime::initialize(&app_data_dir, local_media));
     app.manage(desktop_runtime.clone());
     if !web_dir.join("server.js").is_file() {
         return Err(format!(
@@ -314,8 +335,13 @@ pub fn run() {
             runtime::generate_desktop_test_clip,
             runtime::generate_canvas_test_clip,
             runtime::desktop_task_status,
-            runtime::desktop_task_media,
+            runtime::desktop_task_media_reference,
             runtime::cancel_desktop_task,
+            local_media::select_local_media,
+            local_media::resolve_local_media_reference,
+            local_media::relink_local_media_reference,
+            local_media::local_media_request_evidence,
+            local_media::import_canvas_archive,
             agent_bridge::desktop_canvas_projects,
             agent_bridge::save_desktop_canvas_project,
             agent_bridge::delete_desktop_canvas_projects,
@@ -325,6 +351,7 @@ pub fn run() {
         .setup(|app| {
             if let Err(error) = start_desktop(app) {
                 stop_agent_bridge(app.handle());
+                stop_local_media(app.handle());
                 stop_desktop_runtime(app.handle());
                 stop_sidecars(app.handle());
                 eprintln!("desktop startup failed: {error}");
@@ -337,6 +364,7 @@ pub fn run() {
         .run(|app, event| {
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
                 stop_agent_bridge(app);
+                stop_local_media(app);
                 stop_desktop_runtime(app);
                 stop_sidecars(app);
             }

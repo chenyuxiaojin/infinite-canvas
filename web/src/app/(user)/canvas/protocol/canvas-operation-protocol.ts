@@ -629,6 +629,27 @@ function validateNode(node: CanvasNodeData) {
     if (!isRecord(node) || !validId(node.id) || !validId(node.type) || typeof node.title !== "string" || !validPosition(node.position) || !Number.isFinite(node.width) || node.width <= 0 || !Number.isFinite(node.height) || node.height <= 0) {
         fail("invalid_node", "节点必须包含有效 id、type、position、width 和 height", { nodeId: node?.id });
     }
+    const localMedia = node.metadata?.localMedia;
+    if (localMedia) {
+        const relativeParts = localMedia.relativePath.split("/");
+        const validRelativePath = localMedia.relativePath.length > 0
+            && localMedia.relativePath.length <= 1024
+            && !localMedia.relativePath.startsWith("/")
+            && !localMedia.relativePath.includes("\\")
+            && relativeParts.every((part) => part.length > 0 && part !== "." && part !== "..");
+        if (
+            !/^asset-[a-z0-9-]{8,74}$/.test(localMedia.assetId)
+            || localMedia.storageKey !== `local-ref:${localMedia.assetId}`
+            || !/^[A-Za-z0-9_-]{1,80}$/.test(localMedia.rootId)
+            || !validRelativePath
+            || !/^[a-f0-9]{64}$/.test(localMedia.sha256)
+            || !Number.isSafeInteger(localMedia.bytes)
+            || localMedia.bytes <= 0
+            || !["reference", "project_copy"].includes(localMedia.mode)
+        ) {
+            fail("invalid_node", "本机媒体引用必须使用受控 asset、root、相对路径和 SHA-256", { nodeId: node.id });
+        }
+    }
 }
 
 function findNode(project: CanvasProtocolProject, nodeId: string) {
@@ -710,21 +731,16 @@ function embeddedStatus(status?: CanvasNodeMetadata["status"]): CanvasProtocolTa
 function canonicalizeStoredNode(node: CanvasNodeData): CanvasNodeData {
     const storageKey = node.metadata?.storageKey;
     const content = node.metadata?.content;
-    if (
-        typeof storageKey !== "string"
-        || !storageKey
-        || storageKey.startsWith("server:")
-        || typeof content !== "string"
-        || (!content.startsWith("blob:") && !content.startsWith("data:"))
-    ) {
-        return node;
-    }
+    const runtimeOnly = node.metadata?.localMediaRuntime;
+    const stableLocalReference = typeof storageKey === "string" && Boolean(storageKey) && (storageKey.startsWith("local-ref:") || storageKey.startsWith("local-task:"));
+    const temporaryObjectUrl = typeof content === "string" && (content.startsWith("blob:") || content.startsWith("data:"));
+    if (!runtimeOnly && (!temporaryObjectUrl || typeof storageKey !== "string" || !storageKey || storageKey.startsWith("server:")) && (!stableLocalReference || content === storageKey)) return node;
+    const metadata = { ...node.metadata };
+    delete metadata.localMediaRuntime;
+    if ((temporaryObjectUrl || stableLocalReference) && typeof storageKey === "string" && storageKey) metadata.content = storageKey;
     return {
         ...node,
-        metadata: {
-            ...node.metadata,
-            content: storageKey,
-        },
+        metadata,
     };
 }
 

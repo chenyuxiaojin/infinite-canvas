@@ -55,8 +55,8 @@
 
 | ID | 通过标准 | 状态 | 证据/复现入口 |
 | --- | --- | --- | --- |
-| P2.1 | 只通过 Tauri IPC 或 `127.0.0.1` 受控接口通信，不向公网暴露本机控制端口 | 通过 | 当前总装只注册 7 个封闭 IPC：运行时探测、桌面/画布固定测试片、任务状态、受限媒体读取、取消、用户原生选择后的 ZIP 保存；capability 只向固定 `http://127.0.0.1:3100/*` 放行这些命令与 `core:default`，无 shell 权限。真实 `.app` 的自有监听仅为 Node `127.0.0.1:3100` 与 Go `127.0.0.1:3101`，未新增控制端口；`lsof -nP -a -p <app/sidecar pid> -iTCP -sTCP:LISTEN` 现场复核 |
-| P2.2 | 命令/路径采用白名单或用户明确选择，画布不能执行任意 shell | 通过 | 任务 IPC 请求没有命令、可执行路径、URL、Host、端口或参数数组字段；画布固定样例只写应用支持目录内注册根，媒体读取再次校验根目录、文件名、大小和 SHA-256。ZIP 导出只接受二进制 ZIP，经原生保存框明确选址，并用同卷 staging + `hard_link` 原子发布且拒绝覆盖。执行核心 17 个测试覆盖路径穿越、符号链接越界、shell 元字符、输出冲突、取消/超时和持久化故障；桌面 8 个测试覆盖固定请求、隐私字段、回环导航及导出拒绝覆盖/非 ZIP；`cargo clippy --locked --all-targets -- -D warnings` 通过 |
+| P2.1 | 只通过 Tauri IPC 或 `127.0.0.1` 受控接口通信，不向公网暴露本机控制端口 | 通过 | Tauri capability 只放行封闭桌面命令与固定 WebView origin，无 shell 权限。正式端口为 Node/Go/Bridge/媒体流 `127.0.0.1:3100/3101/3102/3103`；验收为 3210–3213。媒体流端口需要每进程随机能力凭据并支持 Range；`lsof` 实测全部只监听 IPv4 loopback，退出后四端口全部释放。 |
+| P2.2 | 命令/路径采用白名单或用户明确选择，画布不能执行任意 shell | 通过 | 任务 IPC 没有命令、可执行路径或任意 URL。媒体只接受用户原生选择、受控 asset ID、inbox basename 或已授权 root ID 内相对路径；绝对路径、目录穿越、符号链接越界、摘要不匹配、Origin/凭据错误和大小越界均拒绝。工程只保存 root ID/相对路径/SHA/元数据；私有 root registry 为 0600。桌面 17 tests、本地执行核心 19 tests 与 Agent contract 覆盖这些边界，Clippy `-D warnings` 通过。 |
 | P2.3 | FFmpeg 版本探测和确定性短样例处理通过，输出可完整解码 | 通过 | 真实 `.app` 面板识别 FFmpeg/ffprobe 8.1；从按钮生成任务 `f1aa691f-f2e6-473d-9ca1-2fc7adbc55dd`，产物在应用支持目录，1.000 秒、138603 bytes、320x180 MPEG-4 + 48 kHz 单声道 AAC；`ffprobe` 和 `ffmpeg -v error -xerror -i ... -map 0 -f null -` 通过，SHA-256 `d3bf7ba437acab289ed29638f3e481004c5828af84525c4e1d1c76d47fe1dddd`。退出重启后再次提交复用同一任务，媒体数和 journal 任务数均仍为 1，mtime/hash 不变 |
 | P2.4 | Eagle 健康检查和只读探测，不修改素材 | 通过 | 真实 `.app` 与独立 CLI 均返回 `available`、V2 API 可达且已有 library context。生产 allowlist 只请求 `GET http://127.0.0.1:41595/api/v2/library/info`，800 ms 超时、64 KiB 上限；报告只保留上下文布尔值，没有请求 item/tag/folder/file 或任何写端点，也没有保留库名、路径和素材信息 |
 | P2.5 | 达芬奇可用性/连接只读探测，不改工程、不渲染 | 通过 | 真实 `.app` 返回“已安装但未运行”；标准脚本模块与库存在。Provider 在确认进程未运行后即停止，没有启动 Resolve、没有执行 bridge、没有打开/修改工程或渲染；运行中 bridge 仅含五个固定读取方法并有 3 秒/每流 16 KiB 边界，21 个连接器测试通过。实时版本/工程/时间线状态因 Resolve 未运行而保持未知，不伪造连接成功 |
@@ -78,11 +78,12 @@
 | P3.1 | 测试画布包含文本、图片、视频、音频及生成分支 | 通过 | 真实 `.app` 建立 `P3 本地工作流验收 bedaac2`：文本来源、FFmpeg 视频结果、确定性 PNG、确定性 WAV 共 4 节点，文本到视频 1 条连线；原项目 `b82ao8zI_5hiqAti6Dhy2`，回灌项目 `38h4O29tP8hOy96v2E0va`。重启后侧栏仍显示 4 类节点，视频实际进入“暂停”状态、音频实际进入 `Pause` 且进度为 0.204，证明 WebView 可播放 |
 | P3.2 | 触发一次本地、安全、零付费的最小生产任务，结果回填节点并保留来源关系 | 通过 | 画布“本地测试片”调用固定 Rust/FFmpeg 请求，任务 `17c7aa81-7573-4355-bdbf-af884fd66648` 成功；应用目录产物 `canvas-test-clip-40df373e99b1783b.mp4` 为 1.000 秒、138603 bytes、320x180 MPEG-4 + 48 kHz 单声道 AAC，SHA-256 `d3bf7ba437acab289ed29638f3e481004c5828af84525c4e1d1c76d47fe1dddd`，`ffprobe` 与完整 `ffmpeg -xerror` 通过。结果以 `local-task:<task-id>` 写入视频节点并记录任务、SHA、来源节点；没有云端、Fish 111 或付费调用 |
 | P3.3 | 失败、取消、重启恢复、重复任务防护和输出冲突都有可验证行为 | 通过 | 执行核心自动测试覆盖验证失败清理 partial、queued/running 取消、哈希阶段取消、进程失败/超时、重启将未完成任务标记失败、并发/串行幂等和 Reject 冲突；真实 `.app` 退出重启后任务仍成功且媒体可用。回灌项目点击“本地测试片”只聚焦既有节点并提示“该画布已保留本地测试片及来源关系”，journal 仍为 2 个任务、媒体仍为 2 个文件。桌面 ZIP 发布测试证明同名目标拒绝覆盖且原字节不变 |
-| P3.4 | 全项目导出/重新导入后节点关系和本地媒体不丢失 | 通过 | 桌面原生保存框导出 `data/p3-evidence/P3-workflow-bedaac2.zip`（忽略目录），ZIP 192945 bytes、SHA-256 `8803df0e961dcdde3f054390b3a1d20083e97823b22a95d8f0ebdb716c97b9b9`，`unzip -t` 通过；含 v3 `projects.json` 与 3 份媒体。回灌后仍为 4 节点/1 连线；内嵌视频/音频/图片 SHA 分别为 `d3bf7ba437acab289ed29638f3e481004c5828af84525c4e1d1c76d47fe1dddd`、`c6b6fb62aa740f601ad8fabd41ea0889087eec458e12aabdfb7d6635164005c3`、`51ceaa223006f44c00831e742b7740e682e2c29ba96312e6b898a523d0e2717e`，均与导出前一致并由 FFmpeg 完整解码。退出重启后回灌项目和三份媒体仍可打开/播放 |
+| P3.4 | 全项目导出/重新导入后节点关系和本地媒体不丢失 | 通过 | 旧 v3/v4 ZIP 继续导入；v5 原生导出明确提供“嵌入媒体”和“仅引用/清单”。Rust 往返测试覆盖 v5 embedded 摘要一致、reference-only 不静默丢文件、v3/v4 迁移、重复路径/条目/总量边界和内容寻址幂等。原 P3 三媒体 v3 ZIP 哈希证据继续保留；真实 27 镜 v3 包回灌后变为 40 节点/27 视频/27 连线和 27 个受控 `project_copy` 引用。 |
 | P3.5 | 原始资料、选中结果、失败结果和日志边界清楚，不覆盖用户文件 | 通过 | 用户测试图片/音频只作为独立 Blob 存储，不修改源文件；执行结果只发布到 `~/Library/Application Support/com.chenyuxiaojin.infinitecanvas/local-executor/acceptance/` 的哈希化固定文件名，画布只取得二次 SHA 校验后的受限副本。失败 partial 会清理，任务事件不记录路径/参数，导出只能经原生选择写 `.zip` 且 create-new 语义拒绝覆盖；ZIP 清单区分 `projects.json`、各项目 `files/` 和 storageKey |
 | P3.6 | 人工与内置 Agent、打包 CLI/Bridge、system task 使用同一工程、revision、锁和审计，可见、可测、可撤销 | 通过 | 隔离验收 App `com.chenyuxiaojin.infinitecanvas.integrationtest` 使用固定 `127.0.0.1:3210/3211/3212` 和一次性工程完成 dry-run、Agent 创建、UI 即时显示、重复 request、人工锁、`LOCKED_NODE`、`STALE_REVISION`、重读续写、UI 撤销、重启和 ZIP 往返。用户随后先备份正式 Application Support + WebKit，再启动 `~/Applications/无限画布.app`，现场确认 3100/3101/3102、未授权 401、4 个迁移工程、CLI dry-run/apply、revision 0→1、幂等、审计和撤销快照；正式 SQLite/Bridge 链路不再是空表。协议 15 passed，共编 UI 7 passed。 |
-| P3.7 | CLI 随 `.app` 打包；Bridge 只监听 loopback；凭据不泄露；ZIP 往返保留结构和协议状态 | 通过 | 最终标准 `.app/Contents/MacOS/infinite-canvas` 为 arm64，与 release CLI 的 SHA-256 均为 `b4c5d126240451259252587829ab7cb77e517751b8323a39ea83d93d7afee197`；包内没有 credential/database 文件。`lsof` 现场只见验收 App 在 `127.0.0.1:3210/3211/3212` 监听，用户正式现场也只启用 3100/3101/3102。capabilities 明确拒绝 shell、任意路径/URL、付费生成和公网监听。安装凭据为私有文件，真实 secret 未写入 tracked files 或回复。旧 v3 ZIP 往返已保留完整协议状态；v4 导出的 `local-task:` MP4 也已真实回灌。 |
+| P3.7 | CLI 随 `.app` 打包；Bridge/媒体流只监听 loopback；凭据不泄露；ZIP 往返保留结构和协议状态 | 通过 | 标准与验收 `.app` 均重新构建；包内没有 credential/database。`lsof` 现场只见验收 App 在 `127.0.0.1:3210/3211/3212/3213` 监听，退出后四端口全部释放；正式目标为 3100–3103。Bridge 凭据留在私有文件，媒体流使用另一个每进程随机能力凭据；脱敏 Range 证据不含凭据或路径。capabilities 明确拒绝 shell、任意路径/URL、付费生成和公网监听。 |
 | P3.8 | 外部 Agent 可安全创建一次性工程并把白名单目录 MP4 写成可播放视频节点，不接受任意路径 | 通过 | 新增 `POST /v1/projects`、`GET /v1/media/inbox`、`POST /v1/media/video-ingests` 及对应 CLI。隔离实测：画布库无需刷新即出现 CLI 新工程；固定 inbox 的 2 秒 MP4 生成 640x360、2005 ms 视频节点，UI 自动出现并可播放；稳定 revision 4、1 node、1 canvas task、4 audit，重复 request 计数不变。人工锁后为 `LOCKED_NODE`，人工 revision 5→6 后旧请求为 `STALE_REVISION`；重启后结构/任务/媒体仍在，重复摄入报告当前 revision 6。v4 ZIP 含 491694-byte MP4；修正 `.zip` filter 后副本 `waCbl0WxWvM8Ro1OjHYYa` 成功回灌，保留 revision 6、1 video、1 task、8 audit、重绑定历史及可播放 00:02 媒体。用户确认后从真实 UI 撤销独立媒体批次，UI 显示 0 元素/revision 5/已撤销；CLI 同步读回 0 node、0 connection、0 task、5 audit 和非空 `undoneByRequestId`。2026-08-31 正式 App 冒烟又发现“task 终态已写、节点需 UI 补写”及 H.264 被转 MPEG-4 Part 2 两个缺口；修复后全新隔离工程在从未打开 UI 时已由同一 system 批次写入 `task.update + node.update`，revision 4、节点 `success`、1344x768、6583 ms、稳定 `local-task:` 引用。255441-byte H.264/AAC 输入 stream-copy 为 254832 bytes，完整解码通过；打开并实际播放后 revision 仍为 4、audit 仍为 4。 |
+| P3.9 | 本机已有媒体默认引用，不进 Blob/云端；Range、missing/relink、引用/复制和 ZIP 模式可验证 | 通过（内存回收留风险） | 分支 `feat/local-media-reference-streaming` 使用独立 bundle `com.chenyuxiaojin.infinitecanvas.localmediaacceptance`。真实 17,965,118-byte 27 镜副本导入为 27 个 `local-ref:`，持久化 `blob:`/绝对路径/播放 URL 均为 0；相同包再导入应用支持目录仍为 18,252 KiB。脱敏证据为 54 次 Range、54 次 206；真实播放、滚动、缩放后 operation revision 仍为 1。单测覆盖鉴权、206/Content-Range/416、路径/符号链接/SHA、missing/relink、reference/project_copy、v3/v4/v5。最终进程画布库 952,240 KiB，27% 打开稳定 1,115,216 KiB；离开 10 秒 1,115,456 KiB，未稳定回基线，因此不宣称内存/FPS 性能完全通过。App 退出后 3210–3213 全释放。 |
 
 ### P3 事实、推断、未知
 
@@ -100,11 +101,16 @@
   白屏/崩溃。但相关进程总 RSS 从画布库 1,063,232 KiB 增至 1,303,968 KiB，退回
   画布库 10 秒后仍为 1,307,648 KiB；WebContent 单进程约为 1,013,456 KiB。退出
   隔离 App 后进程和 3210/3211/3212 均释放。
+- 事实：上述 Blob 基线的后续实现已改为 `local-ref:` + 受鉴权 Range 流。全新隔离
+  容器的 27 镜项目持久化检查为 Blob 0、绝对路径 0、播放 URL 0；54 次真实请求均为
+  Range/206。引用/复制、missing/relink、v5 嵌入/仅引用、旧 v3/v4 和 Agent 边界均有
+  自动化覆盖。3213 与原三端口同样只监听 loopback，退出后释放。
 - 推断：当前安全边界足以承载后续本地 Provider 的同类“固定请求 -> 结构化状态 -> 验证后回填”工作流；真实生产任务仍应先扩展任务类型和输入白名单，而不是开放 shell 或任意路径。
-- 未知：本轮只确认交互可用与 RSS 上界，没有 WKWebView 帧时间/FPS 仪表化；约
-  239 MiB 驻留增量在路由离开后不回收，不能作为发行性能通过。当前 ZIP 仍是内存
-  构建并设置 2 GiB IPC 上限，Range 流式播放、流式导出和大量长片压力尚未实现。
-  达芬奇/Eagle 写入和正式用户视频不在本阶段范围内。
+- 未知：本轮仍没有 WKWebView 帧时间/FPS 仪表化，不能冒充 FPS 通过。Range 已消除
+  WebView Blob/整段字节 IPC，但 metadata 预载与显式卸载后，最终进程离开页面 10 秒
+  RSS 仍未稳定回到基线；需要后续视频节点虚拟化/缩略图与更长时长压力。v5 已在
+  Rust 侧流式读写文件，但浏览器兼容导出仍保留旧内存路径。达芬奇/Eagle 写入和正式
+  用户视频不在本阶段范围内。
 
 ## P4 macOS 分发验收
 

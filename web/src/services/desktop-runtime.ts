@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import type { LocalMediaReference } from "@/app/(user)/canvas/types";
 
 export type RuntimeStatus = "available" | "unavailable" | "not_installed" | "not_running" | "permission_missing" | "incompatible" | "ready" | "discovered" | "model_missing" | "error";
 
@@ -40,26 +41,6 @@ export type DesktopRuntimeReport = {
     };
 };
 
-export type DesktopTaskMedia = {
-    task_id: string;
-    mime_type: "video/mp4";
-    file_name: string;
-    sha256: string;
-    probe: {
-        duration_ms?: number;
-        streams: Array<{
-            index: number;
-            codec_type: string;
-            codec_name?: string;
-            width?: number;
-            height?: number;
-            sample_rate?: number;
-            channels?: number;
-        }>;
-    };
-    bytes: number[];
-};
-
 export type DesktopTaskSnapshot = {
     id: string;
     status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -86,6 +67,29 @@ export type DesktopTaskSnapshot = {
         retryable: boolean;
         side_effects_may_exist: boolean;
     };
+    local_media?: LocalMediaResolution;
+};
+
+export type LocalMediaResolution = {
+    reference: LocalMediaReference;
+    status: "available" | "missing";
+    playbackUrl?: string;
+    reason?: "missing" | "digest_mismatch" | "denied" | "unavailable";
+};
+
+export type LocalMediaRequestEvidence = {
+    assetId: string;
+    method: "GET" | "HEAD";
+    requestedRange?: string;
+    status: number;
+    responseBytes: number;
+    recordedAtMs: number;
+};
+
+export type DesktopCanvasImportResult<T> = {
+    sourceVersion: number;
+    projects: T[];
+    importedMedia: number;
 };
 
 export function isDesktopRuntime() {
@@ -108,8 +112,28 @@ export function fetchDesktopTaskStatus(taskId: string) {
     return invoke<DesktopTaskSnapshot>("desktop_task_status", { taskId });
 }
 
-export function fetchDesktopTaskMedia(taskId: string) {
-    return invoke<DesktopTaskMedia>("desktop_task_media", { taskId });
+export function fetchDesktopTaskMediaReference(taskId: string) {
+    return invoke<LocalMediaResolution>("desktop_task_media_reference", { taskId });
+}
+
+export function selectLocalMedia(mode: LocalMediaReference["mode"]) {
+    return invoke<LocalMediaResolution[]>("select_local_media", { mode });
+}
+
+export function resolveLocalMediaReference(reference: LocalMediaReference) {
+    return invoke<LocalMediaResolution>("resolve_local_media_reference", { reference });
+}
+
+export function relinkLocalMediaReference(reference: LocalMediaReference) {
+    return invoke<LocalMediaResolution | null>("relink_local_media_reference", { reference });
+}
+
+export function getLocalMediaRequestEvidence() {
+    return invoke<LocalMediaRequestEvidence[]>("local_media_request_evidence");
+}
+
+export function importDesktopCanvasArchive<T>() {
+    return invoke<DesktopCanvasImportResult<T> | null>("import_canvas_archive");
 }
 
 export function cancelDesktopTask(taskId: string) {
@@ -134,4 +158,15 @@ export function getDesktopCanvasProjectRevision(projectId: string) {
 
 export function saveCanvasExport(bytes: ArrayBuffer) {
     return invoke<{ saved: boolean; file_name?: string; bytes: number }>("save_canvas_export", bytes);
+}
+
+export function saveCanvasExportWithLocalMedia(baseZip: ArrayBuffer, localFiles: Array<{ path: string; reference: LocalMediaReference }>) {
+    const manifest = new TextEncoder().encode(JSON.stringify({ version: 1, localFiles }));
+    const base = new Uint8Array(baseZip);
+    const payload = new Uint8Array(8 + manifest.byteLength + base.byteLength);
+    payload.set([0x49, 0x43, 0x58, 0x35], 0);
+    new DataView(payload.buffer).setUint32(4, manifest.byteLength, false);
+    payload.set(manifest, 8);
+    payload.set(base, 8 + manifest.byteLength);
+    return saveCanvasExport(payload.buffer);
 }

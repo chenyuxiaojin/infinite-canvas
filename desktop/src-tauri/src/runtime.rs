@@ -20,10 +20,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::State;
 
+use crate::local_media::{LocalMediaManager, LocalMediaResolution, TaskMediaReferenceInput};
+
 const ACCEPTANCE_ROOT_ID: &str = "desktop-acceptance";
 const AGENT_MEDIA_ROOT_ID: &str = "agent-media";
 const TEST_CLIP_IDEMPOTENCY_KEY: &str = "desktop-p2-deterministic-clip-v1";
-const MAX_DESKTOP_TASK_MEDIA_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_AGENT_MEDIA_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
@@ -75,30 +76,25 @@ pub(crate) struct SubmittedTask {
     duplicate: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct DesktopTaskMedia {
-    task_id: String,
-    mime_type: &'static str,
-    file_name: String,
-    sha256: String,
-    probe: MediaProbe,
-    bytes: Vec<u8>,
-}
-
 pub(crate) struct DesktopRuntime {
     executor: Mutex<Option<Executor>>,
     ffmpeg: FfmpegSummary,
     acceptance_directory: Option<PathBuf>,
     agent_media_directory: Option<PathBuf>,
+    local_media: std::sync::Arc<LocalMediaManager>,
 }
 
 impl DesktopRuntime {
-    pub(crate) fn initialize(app_data_directory: &Path) -> Self {
+    pub(crate) fn initialize(
+        app_data_directory: &Path,
+        local_media: std::sync::Arc<LocalMediaManager>,
+    ) -> Self {
         let toolchain = match Toolchain::discover(ToolDiscoveryConfig::default()) {
             Ok(toolchain) => toolchain,
             Err(_) => {
                 return Self::unavailable(
                     "FFmpeg or ffprobe was not found in the desktop allowlist.",
+                    local_media,
                 );
             }
         };
@@ -126,6 +122,7 @@ impl DesktopRuntime {
                 executor: Mutex::new(None),
                 acceptance_directory: None,
                 agent_media_directory: None,
+                local_media,
                 ffmpeg: FfmpegSummary {
                     status: "error",
                     diagnostic: "The desktop executor data directories could not be prepared."
@@ -142,6 +139,7 @@ impl DesktopRuntime {
                     executor: Mutex::new(None),
                     acceptance_directory: None,
                     agent_media_directory: None,
+                    local_media,
                     ffmpeg: FfmpegSummary {
                         status: "error",
                         diagnostic: "The built-in desktop root identifier is invalid.".to_owned(),
@@ -157,6 +155,7 @@ impl DesktopRuntime {
                     executor: Mutex::new(None),
                     acceptance_directory: None,
                     agent_media_directory: None,
+                    local_media,
                     ffmpeg: FfmpegSummary {
                         status: "error",
                         diagnostic: "The desktop acceptance root could not be registered."
@@ -173,6 +172,7 @@ impl DesktopRuntime {
                     executor: Mutex::new(None),
                     acceptance_directory: None,
                     agent_media_directory: None,
+                    local_media,
                     ffmpeg: FfmpegSummary {
                         status: "error",
                         diagnostic: "The Agent media root identifier is invalid.".to_owned(),
@@ -188,6 +188,7 @@ impl DesktopRuntime {
                     executor: Mutex::new(None),
                     acceptance_directory: None,
                     agent_media_directory: None,
+                    local_media,
                     ffmpeg: FfmpegSummary {
                         status: "error",
                         diagnostic: "The Agent media root could not be registered.".to_owned(),
@@ -207,6 +208,7 @@ impl DesktopRuntime {
                     executor: Mutex::new(None),
                     acceptance_directory: None,
                     agent_media_directory: None,
+                    local_media,
                     ffmpeg: FfmpegSummary {
                         status: "error",
                         diagnostic: "The desktop media task journal could not be opened."
@@ -221,6 +223,7 @@ impl DesktopRuntime {
             executor: Mutex::new(Some(executor)),
             acceptance_directory: Some(acceptance_directory),
             agent_media_directory: Some(agent_media_directory),
+            local_media,
             ffmpeg: FfmpegSummary {
                 status: "available",
                 diagnostic: "The allowlisted local media executor is ready.".to_owned(),
@@ -229,11 +232,12 @@ impl DesktopRuntime {
         }
     }
 
-    fn unavailable(diagnostic: &str) -> Self {
+    fn unavailable(diagnostic: &str, local_media: std::sync::Arc<LocalMediaManager>) -> Self {
         Self {
             executor: Mutex::new(None),
             acceptance_directory: None,
             agent_media_directory: None,
+            local_media,
             ffmpeg: FfmpegSummary {
                 status: "unavailable",
                 diagnostic: diagnostic.to_owned(),
@@ -320,15 +324,19 @@ impl AgentRuntime for DesktopRuntime {
             .as_ref()
             .map(|directory| directory.join("inbox"))
             .ok_or_else(|| BridgeError::unavailable(self.ffmpeg.diagnostic.clone()))?;
-        let path = directory.to_str().ok_or_else(|| {
-            BridgeError::internal("The Agent media inbox path is not valid UTF-8.")
-        })?;
+        if !directory.is_dir() {
+            return Err(BridgeError::unavailable(
+                "The fixed Agent media inbox is unavailable.",
+            ));
+        }
         Ok(json!({
             "kind": "fixed_app_support_inbox",
-            "path": path,
+            "inbox_id": "agent-media-inbox",
+            "request_field": "inbox_file_name",
             "accepted_mime_types": ["video/mp4"],
             "max_file_bytes": MAX_AGENT_MEDIA_BYTES,
-            "arbitrary_paths": false
+            "arbitrary_paths": false,
+            "absolute_path_exposed": false
         }))
     }
 
@@ -377,8 +385,7 @@ impl AgentRuntime for DesktopRuntime {
     fn task_status(&self, task_id: &str) -> Result<Value, BridgeError> {
         let task_id = parse_task_id(task_id)?;
         let snapshot = self.with_agent_executor(|executor| executor.task(&task_id))?;
-        serde_json::to_value(snapshot)
-            .map_err(|_| BridgeError::internal("The desktop task status could not be encoded."))
+        task_snapshot_value(self, &task_id, snapshot, false).map_err(BridgeError::internal)
     }
 
     fn cancel_task(&self, task_id: &str) -> Result<Value, BridgeError> {
@@ -421,25 +428,58 @@ pub(crate) fn generate_canvas_test_clip(
 pub(crate) fn desktop_task_status(
     runtime: State<'_, std::sync::Arc<DesktopRuntime>>,
     task_id: TaskId,
-) -> Result<TaskSnapshot, String> {
-    runtime.with_executor(|executor| executor.task(&task_id).map_err(|error| error.to_string()))
+) -> Result<Value, String> {
+    let snapshot = runtime
+        .with_executor(|executor| executor.task(&task_id).map_err(|error| error.to_string()))?;
+    task_snapshot_value(&runtime, &task_id, snapshot, true)
 }
 
 #[tauri::command]
-pub(crate) fn desktop_task_media(
+pub(crate) fn desktop_task_media_reference(
     runtime: State<'_, std::sync::Arc<DesktopRuntime>>,
     task_id: TaskId,
-) -> Result<DesktopTaskMedia, String> {
+) -> Result<LocalMediaResolution, String> {
     let snapshot = runtime
         .with_executor(|executor| executor.task(&task_id).map_err(|error| error.to_string()))?;
-    let (scoped, expected_sha256, probe) = completed_media_result(&snapshot)?;
-    let (directory, max_bytes) = if scoped.root.as_str() == ACCEPTANCE_ROOT_ID {
+    task_media_reference(&runtime, &snapshot)
+}
+
+fn task_snapshot_value(
+    runtime: &DesktopRuntime,
+    task_id: &TaskId,
+    snapshot: TaskSnapshot,
+    include_playback_url: bool,
+) -> Result<Value, String> {
+    let mut value = serde_json::to_value(&snapshot)
+        .map_err(|_| "The desktop task status could not be encoded.".to_owned())?;
+    if let Ok(mut reference) = task_media_reference(runtime, &snapshot) {
+        if !include_playback_url {
+            reference.playback_url = None;
+        }
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "local_media".to_owned(),
+                serde_json::to_value(reference)
+                    .map_err(|_| "The local media reference could not be encoded.".to_owned())?,
+            );
+            object.insert("id".to_owned(), Value::String(task_id.as_str().to_owned()));
+        }
+    }
+    Ok(value)
+}
+
+fn task_media_reference(
+    runtime: &DesktopRuntime,
+    snapshot: &TaskSnapshot,
+) -> Result<LocalMediaResolution, String> {
+    let (scoped, expected_sha256, probe) = completed_media_result(snapshot)?;
+    let (root, root_id) = if scoped.root.as_str() == ACCEPTANCE_ROOT_ID {
         (
             runtime
                 .acceptance_directory
                 .as_ref()
                 .ok_or_else(|| "The desktop acceptance directory is unavailable.".to_owned())?,
-            MAX_DESKTOP_TASK_MEDIA_BYTES,
+            ACCEPTANCE_ROOT_ID,
         )
     } else {
         (
@@ -447,35 +487,25 @@ pub(crate) fn desktop_task_media(
                 .agent_media_directory
                 .as_ref()
                 .ok_or_else(|| "The Agent media directory is unavailable.".to_owned())?,
-            MAX_AGENT_MEDIA_BYTES,
+            AGENT_MEDIA_ROOT_ID,
         )
     };
-    let path = directory.join(&scoped.relative);
-    let metadata = std::fs::metadata(&path)
-        .map_err(|_| "The verified desktop task media is unavailable.".to_owned())?;
-    if !metadata.is_file() || metadata.len() > max_bytes {
-        return Err("The desktop task media crossed the fixed size boundary.".to_owned());
-    }
-    let bytes = std::fs::read(&path)
-        .map_err(|_| "The verified desktop task media could not be read.".to_owned())?;
-    let actual_sha256 = hex_sha256(&bytes);
-    if actual_sha256 != expected_sha256 {
-        return Err("The desktop task media no longer matches its verified digest.".to_owned());
-    }
-    let file_name = scoped
-        .relative
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "The desktop task media name is invalid.".to_owned())?
-        .to_owned();
-    Ok(DesktopTaskMedia {
-        task_id: task_id.as_str().to_owned(),
-        mime_type: "video/mp4",
-        file_name,
-        sha256: actual_sha256,
-        probe,
-        bytes,
-    })
+    let video = probe
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type == "video");
+    runtime
+        .local_media
+        .reference_for_task_media(TaskMediaReferenceInput {
+            root_id,
+            root,
+            relative: &scoped.relative,
+            sha256: &expected_sha256,
+            mime_type: "video/mp4",
+            width: video.and_then(|stream| stream.width.map(u64::from)),
+            height: video.and_then(|stream| stream.height.map(u64::from)),
+            duration_ms: probe.duration_ms,
+        })
 }
 
 #[tauri::command]

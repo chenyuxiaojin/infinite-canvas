@@ -135,9 +135,11 @@ impl AgentRuntime for MockRuntime {
     fn media_inbox(&self) -> Result<Value, BridgeError> {
         Ok(json!({
             "kind": "fixed_app_support_inbox",
-            "path": "/fixture/agent-media/inbox",
+            "inbox_id": "agent-media-inbox",
+            "request_field": "inbox_file_name",
             "accepted_mime_types": ["video/mp4"],
-            "arbitrary_paths": false
+            "arbitrary_paths": false,
+            "absolute_path_exposed": false
         }))
     }
 
@@ -179,6 +181,24 @@ impl AgentRuntime for MockRuntime {
                             { "index": 0, "codec_type": "video", "codec_name": "h264", "width": 1344, "height": 768 },
                             { "index": 1, "codec_type": "audio", "codec_name": "aac", "sample_rate": 48000, "channels": 2 }
                         ]
+                    }
+                },
+                "local_media": {
+                    "status": "available",
+                    "playbackUrl": "http://127.0.0.1:3213/v1/media/asset?token=must-not-leak",
+                    "reference": {
+                        "assetId": "asset-0123456789abcdef0123456789abcdef",
+                        "storageKey": "local-ref:asset-0123456789abcdef0123456789abcdef",
+                        "rootId": "agent-media",
+                        "relativePath": "verified/shot-001.mp4",
+                        "sha256": "c".repeat(64),
+                        "mimeType": "video/mp4",
+                        "bytes": 18432,
+                        "fileName": "shot-001.mp4",
+                        "width": 1344,
+                        "height": 768,
+                        "durationMs": 6583,
+                        "mode": "project_copy"
                     }
                 }
             }));
@@ -487,8 +507,22 @@ fn allowlisted_video_ingest_creates_one_shared_video_node_and_task() {
         "succeeded"
     );
     let metadata = &completed_project.project["nodes"][0]["metadata"];
-    assert_eq!(metadata["content"], "local-task:media-ingest-1");
-    assert_eq!(metadata["storageKey"], "local-task:media-ingest-1");
+    assert_eq!(
+        metadata["content"],
+        "local-ref:asset-0123456789abcdef0123456789abcdef"
+    );
+    assert_eq!(
+        metadata["storageKey"],
+        "local-ref:asset-0123456789abcdef0123456789abcdef"
+    );
+    assert_eq!(metadata["localMedia"]["rootId"], "agent-media");
+    assert_eq!(
+        metadata["localMedia"]["relativePath"],
+        "verified/shot-001.mp4"
+    );
+    assert!(completed["data"]["local_media"]
+        .get("playbackUrl")
+        .is_none());
     assert_eq!(metadata["status"], "success");
     assert_eq!(metadata["progress"], 100);
     assert_eq!(metadata["naturalWidth"], 1344);
@@ -560,7 +594,7 @@ fn completed_legacy_ingest_repairs_its_loading_node_without_rewriting_the_task()
     );
     assert_eq!(
         repaired.project["nodes"][0]["metadata"]["content"],
-        "local-task:media-legacy-ingest"
+        "local-ref:asset-0123456789abcdef0123456789abcdef"
     );
     assert_eq!(
         repaired.project["operationState"]["tasks"]["agent-media-legacy-ingest"]["details"]
@@ -702,7 +736,9 @@ fn cli_exposes_project_create_and_fixed_inbox_video_ingest() {
     assert_eq!(inbox.status.code(), Some(0));
     let inbox: Value = serde_json::from_slice(&inbox.stdout).unwrap();
     assert_eq!(inbox["data"]["arbitrary_paths"], false);
-    assert_eq!(inbox["data"]["path"], "/fixture/agent-media/inbox");
+    assert_eq!(inbox["data"]["inbox_id"], "agent-media-inbox");
+    assert_eq!(inbox["data"]["absolute_path_exposed"], false);
+    assert!(inbox["data"].get("path").is_none());
 
     let ingest_file = fixture._root.path().join("ingest-video.json");
     fs::write(

@@ -2,13 +2,13 @@
 
 import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { App, Button } from "antd";
+import { App, Button, Dropdown } from "antd";
 import { Database, Download, FileUp, Plus, TriangleAlert } from "lucide-react";
 
 import { readZip } from "@/lib/zip";
 import { setMediaBlob } from "@/services/file-storage";
 import { setImageBlob } from "@/services/image-storage";
-import { isDesktopRuntime } from "@/services/desktop-runtime";
+import { importDesktopCanvasArchive, isDesktopRuntime } from "@/services/desktop-runtime";
 import { CanvasDeleteProjectsDialog } from "./components/canvas-delete-projects-dialog";
 import { CanvasProjectCard } from "./components/canvas-project-card";
 import type { CanvasExportFile } from "./export-types";
@@ -52,8 +52,15 @@ export default function CanvasPage() {
     };
     const createAndEnter = () => enterProject(createProject(`无限画布 ${projects.length + 1}`));
     const importCanvas = async (file?: File) => {
-        if (!file) return;
         try {
+            if (isDesktopRuntime()) {
+                const imported = await importDesktopCanvasArchive<CanvasExportFile["projects"][number]["project"]>();
+                if (!imported) return;
+                imported.projects.forEach((project) => importProject(project));
+                message.success(`已导入 ${imported.projects.length} 个画布，${imported.importedMedia} 份媒体已进入受控本机存储`);
+                return;
+            }
+            if (!file) return;
             const zip = await readZip(file);
             const projectFile = zip.get("projects.json");
             if (!projectFile) throw new Error("missing projects.json");
@@ -101,9 +108,17 @@ export default function CanvasPage() {
                     <div className="flex items-center gap-2">
                         {selectedIds.length ? (
                             <>
-                                <Button disabled={!hydrated} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `无限画布-${selectedIds.length}个项目`)}>
-                                    导出选中
-                                </Button>
+                                <Dropdown
+                                    menu={{
+                                        items: [
+                                            { key: "embedded", label: "嵌入媒体（可移植工程）" },
+                                            { key: "references", label: "仅引用与媒体清单" },
+                                        ],
+                                        onClick: ({ key }) => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `无限画布-${selectedIds.length}个项目`, key as "embedded" | "references"),
+                                    }}
+                                >
+                                    <Button disabled={!hydrated} icon={<Download className="size-4" />}>导出选中</Button>
+                                </Dropdown>
                                 <Button disabled={!hydrated} onClick={() => setDeleteIds(selectedIds)}>
                                     删除选中
                                 </Button>
@@ -114,7 +129,7 @@ export default function CanvasPage() {
                                 删除全部
                             </Button>
                         ) : null}
-                        <Button disabled={!hydrated} icon={<FileUp className="size-4" />} onClick={() => inputRef.current?.click()}>
+                        <Button disabled={!hydrated} icon={<FileUp className="size-4" />} onClick={() => (isDesktopRuntime() ? void importCanvas() : inputRef.current?.click())}>
                             导入画布
                         </Button>
                         <Button disabled={!hydrated} type="primary" icon={<Plus className="size-4" />} onClick={createAndEnter}>

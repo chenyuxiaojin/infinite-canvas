@@ -170,7 +170,7 @@ pub fn catalog() -> Value {
                 "generate_desktop_test_clip",
                 "generate_canvas_test_clip",
                 "desktop_task_status",
-                "desktop_task_media",
+                "desktop_task_media_reference",
                 "cancel_desktop_task",
                 "desktop_canvas_projects",
                 "save_desktop_canvas_project",

@@ -737,12 +737,14 @@ function PanoramaNodeContent(props: NodeContentRendererProps) {
 }
 
 function EmptyImageContent({ node, theme, isBatchRoot, batchCount, batchExpanded, batchOpening, batchRecovering, onToggleBatch }: NodeContentRendererProps) {
+    const localMediaMissing = node.metadata?.localMediaRuntime?.status === "missing";
     const content = (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
             <div className="flex size-14 items-center justify-center rounded-2xl" style={{ background: theme.toolbar.activeBg }}>
                 <ImageIcon className="size-6 opacity-30" />
             </div>
-            <span className="text-[10px] tracking-[0.18em] opacity-50">{node.type === CanvasNodeType.Panorama ? "空全景图节点" : "空图片节点"}</span>
+            <span className="text-[10px] tracking-[0.18em] opacity-50">{localMediaMissing ? "本机图片已移动或不可用" : node.type === CanvasNodeType.Panorama ? "空全景图节点" : "空图片节点"}</span>
+            {localMediaMissing ? <span className="text-xs opacity-50">请选择“重新定位”</span> : null}
         </div>
     );
     if (isBatchRoot)
@@ -758,6 +760,15 @@ function VideoNodeContent({ node, theme, isSelected, onViewImage }: NodeContentR
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [mediaDurationMs, setMediaDurationMs] = useState(0);
+    useEffect(() => {
+        const video = videoRef.current;
+        return () => {
+            if (!video) return;
+            video.pause();
+            video.removeAttribute("src");
+            video.load();
+        };
+    }, []);
     const togglePlayback = () => {
         const video = videoRef.current;
         if (!video) return;
@@ -772,7 +783,8 @@ function VideoNodeContent({ node, theme, isSelected, onViewImage }: NodeContentR
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
                 <Video className="size-7 opacity-35" />
-                <span className="text-sm">空视频节点</span>
+                <span className="text-sm">{node.metadata?.localMediaRuntime?.status === "missing" ? "本机视频已移动或不可用" : "空视频节点"}</span>
+                {node.metadata?.localMediaRuntime?.status === "missing" ? <span className="text-xs opacity-60">请在节点工具栏选择“重新定位”</span> : null}
             </div>
         );
     const controlStyle = { background: theme.toolbar.panel, color: theme.toolbar.item };
@@ -787,6 +799,7 @@ function VideoNodeContent({ node, theme, isSelected, onViewImage }: NodeContentR
             <video
                 ref={videoRef}
                 src={node.metadata.content}
+                preload="metadata"
                 tabIndex={-1}
                 playsInline
                 className="h-full w-full object-contain outline-none"
@@ -846,7 +859,8 @@ function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-2" style={{ color: theme.node.placeholder }}>
                 <Music2 className="size-7 opacity-35" />
-                <span className="text-sm">空音频节点</span>
+                <span className="text-sm">{node.metadata?.localMediaRuntime?.status === "missing" ? "本机音频已移动或不可用" : "空音频节点"}</span>
+                {node.metadata?.localMediaRuntime?.status === "missing" ? <span className="text-xs opacity-60">请选择“重新定位”</span> : null}
             </div>
         );
     return (
@@ -855,7 +869,7 @@ function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
                 <Music2 className="size-4 shrink-0" />
                 <span className="truncate">{node.title || "音频"}</span>
             </div>
-            <audio src={node.metadata.content} controls className="w-full" data-canvas-no-zoom />
+            <audio src={node.metadata.content} preload="metadata" controls className="w-full" data-canvas-no-zoom />
         </div>
     );
 }

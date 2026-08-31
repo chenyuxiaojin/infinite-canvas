@@ -32,6 +32,27 @@ export type CameraControlOptions = {
     aperture: number;
 };
 
+export type LocalMediaReference = {
+    assetId: string;
+    storageKey: string;
+    rootId: string;
+    relativePath: string;
+    sha256: string;
+    mimeType: string;
+    bytes: number;
+    fileName: string;
+    width?: number;
+    height?: number;
+    durationMs?: number;
+    mode: "reference" | "project_copy";
+};
+
+export type LocalMediaRuntimeState = {
+    status: "available" | "missing";
+    playbackUrl?: string;
+    reason?: "missing" | "digest_mismatch" | "denied" | "unavailable";
+};
+
 export type CanvasNodeMetadata = {
     content?: string;
     groupId?: string;
@@ -82,6 +103,8 @@ export type CanvasNodeMetadata = {
     primaryImageId?: string;
     imageBatchExpanded?: boolean;
     storageKey?: string;
+    localMedia?: LocalMediaReference;
+    localMediaRuntime?: LocalMediaRuntimeState;
     mimeType?: string;
     bytes?: number;
     durationMs?: number;

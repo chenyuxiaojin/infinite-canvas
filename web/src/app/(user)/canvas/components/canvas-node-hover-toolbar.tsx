@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { App, Modal, Segmented, Tooltip } from "antd";
-import { Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, MessageSquare, Minus, Music2, Pencil, Plus, RefreshCw, Settings2, Trash2, Upload, Video } from "lucide-react";
+import { Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, Link2, MessageSquare, Minus, Music2, Pencil, Plus, RefreshCw, Settings2, Trash2, Upload, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, getDataUrlByteSize } from "@/lib/image-utils";
@@ -25,6 +25,7 @@ type CanvasNodeHoverToolbarProps = {
     onToggleDialog: (node: CanvasNodeData) => void;
     onGenerateImage: (node: CanvasNodeData) => void;
     onUpload: (node: CanvasNodeData) => void;
+    onRelinkLocalMedia: (node: CanvasNodeData) => void;
     onDownload: (node: CanvasNodeData) => void;
     onSaveAsset: (node: CanvasNodeData) => void;
     onUploadMediaToCloud: (node: CanvasNodeData) => void;
@@ -64,6 +65,7 @@ export function CanvasNodeHoverToolbar({
     onToggleDialog,
     onGenerateImage,
     onUpload,
+    onRelinkLocalMedia,
     onDownload,
     onSaveAsset,
     onUploadMediaToCloud,
@@ -134,6 +136,7 @@ export function CanvasNodeHoverToolbar({
     const isConfig = node.type === CanvasNodeType.Config;
     const canOpenDialog = isText || hasImage || isVideo;
     const canRetry = node.metadata?.status === "error";
+    const localMediaMissing = node.metadata?.localMediaRuntime?.status === "missing";
     const quickImageToolIdSet = new Set(quickImageToolIds);
     const copyImagePrompt = (target: CanvasNodeData) => {
         const prompt = (isPanoramaNodeType(target.type) ? target.metadata?.panoramaSourcePrompt : target.metadata?.prompt)?.trim();
@@ -157,6 +160,7 @@ export function CanvasNodeHoverToolbar({
         { id: "delete", title: "移除节点", label: "删除", icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true },
     ];
     const nodeToolbarTools: ToolbarTool[] = [
+        ...(localMediaMissing ? [{ id: "relinkLocalMedia", title: "重新定位本机素材", label: "重新定位", icon: <Link2 className="size-4" />, onClick: () => onRelinkLocalMedia(node) }] : []),
         ...(canRetry ? [{ id: "retry", title: "重新生成", label: "重试", icon: <RefreshCw className="size-4" />, onClick: () => onRetry(node) }] : []),
         ...(hasImage || hasVideo || isText ? [{ id: "saveAsset", title: "加入我的素材", label: "存素材", icon: <FolderPlus className="size-4" />, onClick: () => onSaveAsset(node) }] : []),
         ...((hasVideo || hasAudio) && !node.metadata?.storageKey?.startsWith("server:") ? [{ id: "uploadMediaToCloud", title: "上传至云存储", label: "上传至云存储", icon: <Upload className="size-4" />, onClick: () => onUploadMediaToCloud(node) }] : []),
@@ -168,9 +172,9 @@ export function CanvasNodeHoverToolbar({
         ...(isConfig ? [{ id: "config", title: "生成配置", label: "生成配置", icon: <Settings2 className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isText ? [{ id: "decreaseFont", title: "减小字号", label: "缩小", icon: <Minus className="size-4" />, onClick: () => onDecreaseFont(node) }] : []),
         ...(isText ? [{ id: "increaseFont", title: "增大字号", label: "放大", icon: <Plus className="size-4" />, onClick: () => onIncreaseFont(node) }] : []),
-        ...(isImage && !isPanorama && !hasImage ? [{ id: "uploadImage", title: "上传图片", label: "上传图片", icon: <Upload className="size-4" />, onClick: () => onUpload(node) }] : []),
-        ...(isVideo ? [{ id: "uploadVideo", title: hasVideo ? "替换视频" : "上传视频", label: hasVideo ? "替换视频" : "上传视频", icon: <Video className="size-4" />, onClick: () => onUpload(node) }] : []),
-        ...(isAudio ? [{ id: "uploadAudio", title: hasAudio ? "替换音频" : "上传音频", label: hasAudio ? "替换音频" : "上传音频", icon: <Music2 className="size-4" />, onClick: () => onUpload(node) }] : []),
+        ...(isImage && !isPanorama && !hasImage ? [{ id: "uploadImage", title: "选择本机图片", label: "选择图片", icon: <Upload className="size-4" />, onClick: () => onUpload(node) }] : []),
+        ...(isVideo ? [{ id: "uploadVideo", title: hasVideo ? "替换本机视频" : "选择本机视频", label: hasVideo ? "替换视频" : "选择视频", icon: <Video className="size-4" />, onClick: () => onUpload(node) }] : []),
+        ...(isAudio ? [{ id: "uploadAudio", title: hasAudio ? "替换本机音频" : "选择本机音频", label: hasAudio ? "替换音频" : "选择音频", icon: <Music2 className="size-4" />, onClick: () => onUpload(node) }] : []),
         ...(hasImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
     const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id === "uploadImageToCloud" || quickImageToolIdSet.has(tool.id as ImageQuickToolId)) : [...baseToolbarTools, ...nodeToolbarTools];
