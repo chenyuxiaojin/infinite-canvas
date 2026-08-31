@@ -287,6 +287,29 @@ impl DesktopRuntime {
         operation(executor).map_err(map_executor_error)
     }
 
+    pub(crate) fn agent_media_directory(&self) -> Option<&PathBuf> {
+        self.agent_media_directory.as_ref()
+    }
+
+    pub(crate) fn submit_paid_media_verification(
+        &self,
+        request: &VideoIngestRequest,
+    ) -> Result<TaskId, BridgeError> {
+        let media_directory = self
+            .agent_media_directory
+            .as_ref()
+            .ok_or_else(|| BridgeError::unavailable(self.ffmpeg.diagnostic.clone()))?;
+        let task = agent_video_ingest_request(media_directory, request)?;
+        let outcome = self.with_agent_executor(|executor| executor.submit(task))?;
+        Ok(match outcome {
+            SubmitOutcome::Accepted(task_id) | SubmitOutcome::Duplicate(task_id) => task_id,
+        })
+    }
+
+    pub(crate) fn paid_media_task(&self, task_id: &TaskId) -> Result<TaskSnapshot, BridgeError> {
+        self.with_agent_executor(|executor| executor.task(task_id))
+    }
+
     fn report(&self) -> DesktopRuntimeReport {
         DesktopRuntimeReport {
             transport: "agent_bridge",
@@ -378,6 +401,20 @@ impl AgentRuntime for DesktopRuntime {
             .as_ref()
             .ok_or_else(|| BridgeError::unavailable(self.ffmpeg.diagnostic.clone()))?;
         agent_image_ingest(media_directory, &self.local_media, request)
+    }
+
+    fn quote_video_generation(
+        &self,
+        resolution: &str,
+        duration_seconds: u64,
+    ) -> Result<Value, BridgeError> {
+        let config = crate::paid_generation::load_config(self.local_media.app_data_directory())
+            .map_err(BridgeError::unavailable)?;
+        crate::paid_generation::quote(&config, resolution, duration_seconds).ok_or_else(|| {
+            BridgeError::unavailable(format!(
+                "付费生成配置缺少 {resolution} 的单价，请补充 price_yuan_per_second"
+            ))
+        })
     }
 
     fn submit_test_clip(&self, request: &TestClipRequest) -> Result<Value, BridgeError> {
@@ -481,7 +518,7 @@ fn task_snapshot_value(
     Ok(value)
 }
 
-fn task_media_reference(
+pub(crate) fn task_media_reference(
     runtime: &DesktopRuntime,
     snapshot: &TaskSnapshot,
 ) -> Result<LocalMediaResolution, String> {

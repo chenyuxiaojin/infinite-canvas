@@ -4,7 +4,7 @@ export const CANVAS_OPERATION_PROTOCOL_VERSION = 1 as const;
 
 export type CanvasOperationActor = "human" | "agent" | "system";
 
-export type CanvasProtocolTaskStatus = "queued" | "running" | "cancel_requested" | "cancelled" | "succeeded" | "failed";
+export type CanvasProtocolTaskStatus = "pending_approval" | "queued" | "running" | "cancel_requested" | "cancelled" | "succeeded" | "failed";
 
 export type CanvasProtocolTask = {
     id: string;
@@ -34,9 +34,10 @@ export type CanvasOperation =
     | { type: "connection.create"; connection: CanvasConnection }
     | { type: "connection.delete"; connectionId: string }
     | { type: "layout.apply"; positions: Record<string, Position> }
-    | { type: "task.start"; task: Omit<CanvasProtocolTask, "status" | "createdAt" | "updatedAt"> & { status?: "queued" | "running" } }
+    | { type: "task.start"; task: Omit<CanvasProtocolTask, "status" | "createdAt" | "updatedAt"> & { status?: "pending_approval" | "queued" | "running" } }
+    | { type: "task.approve"; taskId: string }
     | { type: "task.cancel"; taskId: string; reason?: string }
-    | { type: "task.update"; taskId: string; status: Exclude<CanvasProtocolTaskStatus, "queued" | "cancel_requested">; details?: Record<string, unknown> }
+    | { type: "task.update"; taskId: string; status: Exclude<CanvasProtocolTaskStatus, "pending_approval" | "queued" | "cancel_requested">; details?: Record<string, unknown> }
     | { type: "lock.set"; nodeId: string; locked: boolean }
     | { type: "batch.undo"; targetRequestId: string };
 
@@ -67,6 +68,8 @@ export type CanvasOperationError = {
         | "task_exists"
         | "task_terminal"
         | "task_update_forbidden"
+        | "task_approve_forbidden"
+        | "paid_task_requires_approval"
         | "lock_forbidden"
         | "undo_not_found"
         | "undo_forbidden"
@@ -451,14 +454,31 @@ function applyOperation<TProject extends CanvasProtocolProject>(project: TProjec
             if (!findNode(project, task.nodeId)) fail("node_not_found", `找不到节点 ${task.nodeId}`, { nodeId: task.nodeId });
             assertAgentMayTouchNode(project, batch.actor, task.nodeId);
             if (project.operationState.tasks[task.id]) fail("task_exists", `任务 ${task.id} 已存在`);
+            const startStatus = task.status || "queued";
+            if (batch.actor === "agent" && Boolean(task.details?.paid) && startStatus !== "pending_approval") {
+                fail("paid_task_requires_approval", "Agent 发起的付费任务必须以 pending_approval 状态提交，由人工批准后才能执行");
+            }
             project.operationState.tasks[task.id] = {
                 ...clone(task),
-                status: task.status || "queued",
+                status: startStatus,
                 createdAt: processedAt,
                 updatedAt: processedAt,
                 requestId: task.requestId || batch.requestId,
             };
             return { type: operation.type, nodeId: task.nodeId, taskId: task.id };
+        }
+        case "task.approve": {
+            if (batch.actor !== "human") fail("task_approve_forbidden", "只有人工批次可以批准付费任务");
+            const task = project.operationState.tasks[operation.taskId];
+            if (!task) fail("task_not_found", `找不到任务 ${operation.taskId}`);
+            if (task.status !== "pending_approval") fail("invalid_batch", `任务 ${operation.taskId} 不在待批准状态`);
+            project.operationState.tasks[operation.taskId] = {
+                ...task,
+                status: "queued",
+                updatedAt: processedAt,
+                details: { ...task.details, approvedAt: processedAt, approvedByRequestId: batch.requestId },
+            };
+            return { type: operation.type, nodeId: task.nodeId, taskId: operation.taskId };
         }
         case "task.cancel": {
             const task = project.operationState.tasks[operation.taskId];
@@ -467,7 +487,7 @@ function applyOperation<TProject extends CanvasProtocolProject>(project: TProjec
             if (["cancelled", "succeeded", "failed"].includes(task.status)) fail("task_terminal", `任务 ${operation.taskId} 已进入终态`);
             project.operationState.tasks[operation.taskId] = {
                 ...task,
-                status: "cancel_requested",
+                status: task.status === "pending_approval" ? "cancelled" : "cancel_requested",
                 updatedAt: processedAt,
                 details: operation.reason ? { ...task.details, cancelReason: operation.reason } : task.details,
             };

@@ -136,6 +136,14 @@ export function importDesktopCanvasArchive<T>() {
     return invoke<DesktopCanvasImportResult<T> | null>("import_canvas_archive");
 }
 
+export function approvePaidGeneration(projectId: string, taskId: string) {
+    return invoke<{ approved: boolean; task_id: string }>("approve_paid_generation", { projectId, taskId });
+}
+
+export function rejectPaidGeneration(projectId: string, taskId: string, reason?: string) {
+    return invoke<{ rejected: boolean; task_id: string }>("reject_paid_generation", { projectId, taskId, reason });
+}
+
 export function cancelDesktopTask(taskId: string) {
     return invoke<boolean>("cancel_desktop_task", { taskId });
 }

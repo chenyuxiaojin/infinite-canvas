@@ -14,6 +14,7 @@ use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 mod agent_bridge;
 mod local_media;
+mod paid_generation;
 mod runtime;
 
 use agent_bridge::DesktopAgentBridge;
@@ -342,6 +343,8 @@ pub fn run() {
             local_media::relink_local_media_reference,
             local_media::local_media_request_evidence,
             local_media::import_canvas_archive,
+            paid_generation::approve_paid_generation,
+            paid_generation::reject_paid_generation,
             agent_bridge::desktop_canvas_projects,
             agent_bridge::save_desktop_canvas_project,
             agent_bridge::delete_desktop_canvas_projects,

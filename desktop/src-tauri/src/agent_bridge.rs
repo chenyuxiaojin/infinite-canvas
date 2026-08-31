@@ -48,6 +48,10 @@ impl DesktopAgentBridge {
         })
     }
 
+    pub(crate) fn canvas(&self) -> Arc<CanonicalCanvasAdapter> {
+        self.canvas.clone()
+    }
+
     pub(crate) fn stop(&self) {
         if let Ok(mut server) = self.server.lock() {
             if let Some(mut server) = server.take() {

@@ -15,6 +15,30 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 自动化覆盖公共协议、Store 与共编状态映射；隔离桌面 Bridge 闭环证据及正式旧
   包尚未切换的边界见总装 handoff 和统一验收矩阵。
 
+## 付费生成执行器（H3 图生视频 + 人工批准闸门）
+
+- 协议层新增 `pending_approval` 任务状态与人工专属 `task.approve` 操作；reducer 级
+  不变量：Agent 发起且 `details.paid` 为真的 `task.start` 必须以 `pending_approval`
+  提交，否则整批拒绝——花钱闸门不依赖 UI 约定。拒绝复用 `task.cancel`（待批准任务
+  直接进 `cancelled`）。
+- Bridge 新增 `POST /v1/generation/video-requests` 与 CLI `generation video request`：
+  校验提示词/分辨率(768P/2K)/时长(4-15s)/关键帧引用后，单个原子批次创建视频占位
+  节点 + 来源连线 + `pending_approval` 任务，并从桌面配置报出预计成本；不调用任何
+  付费 API。能力清单声明 `paid: true, approval_required: true`，显式拒绝项由
+  `paid_generation` 改为 `unapproved_paid_generation`。
+- 节点卡显示「待批准 · 预计 ¥X」+ 提示词摘要 + 批准/拒绝按钮；批准走 Tauri 命令：
+  人工 `task.approve` 批次落库后，Rust 驱动线程调 H3（`/v2/video_generation` 提交、
+  `/v2/query/video_generation/{id}` 轮询、下载）→ 结果进 agent-media inbox → 复用
+  既有 executor 转码 + ffprobe/解码验收 → system 批次回填任务终态与 `local-ref:`
+  媒体引用。驱动在 Rust 侧运行，UI 切走不中断；App 退出会中断执行中的任务（停留
+  running，需人工取消后重新提交）。
+- H3 凭据存应用支持目录 `paid-generation/config.json`（0600，模板自动生成）：
+  base_url/api_key/model/price_yuan_per_second；Bridge 不回显 key，任务快照与节点
+  数据不含供应商 URL 与凭据。
+- 自动化：web 协议 19 tests（含批准生命周期与闸门不变量）、Agent contract
+  12 tests（含付费请求端到端）、桌面 crate 19 tests。仍需实机验证：真实 H3 一笔
+  付费生成闭环（预计 ¥0.5 左右）。
+
 ## 受控图片摄入（Agent 关键帧静图）
 
 - Bridge 新增 `POST /v1/media/image-ingests` 与 CLI `media image ingest`：只接受固定

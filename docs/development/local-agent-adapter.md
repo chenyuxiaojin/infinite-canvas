@@ -58,6 +58,7 @@ infinite-canvas runtime
 infinite-canvas media inbox
 infinite-canvas media video ingest --file video-ingest-request.json
 infinite-canvas media image ingest --file image-ingest-request.json
+infinite-canvas generation video request --file video-generation-request.json
 infinite-canvas tasks status TASK_ID
 infinite-canvas tasks cancel TASK_ID
 infinite-canvas tasks test-clip --file test-clip-request.json
@@ -95,6 +96,38 @@ request 幂等，图片在 inbox 文件清理后重放仍返回同一 `local-ref
   "size": { "width": 320, "height": 180 }
 }
 ```
+
+## 付费生成（人工批准闸门）
+
+`generation video request` 是唯一的付费入口，且**不直接花钱**：它只在画布上创建
+视频占位节点、关键帧来源连线和一个 `pending_approval` 任务，同时给出预计成本。
+只有用户在画布节点卡上点「批准生成」，桌面执行器才调用 MiniMax-H3 API；点「拒绝」
+任务直接终止。该闸门是协议 reducer 级不变量，任何 Agent 都不能绕过或代为批准。
+
+```json
+{
+  "project_id": "PROJECT_ID",
+  "node_id": "agent-gen-1",
+  "request_id": "agent-gen-0001",
+  "base_revision": 12,
+  "actor": "agent",
+  "title": "S01 生成",
+  "prompt": "镜头缓推……",
+  "image_node_id": "已摄入的关键帧图片节点 ID",
+  "resolution": "768P",
+  "duration_seconds": 6,
+  "position": { "x": 640, "y": 160 },
+  "size": { "width": 420, "height": 236 }
+}
+```
+
+- `image_node_id` 必须指向本工程内带受控 `localMedia` 引用的 image 节点（先走
+  `media image ingest`）。分辨率只收 `768P`/`2K`，时长 4-15 秒。
+- 响应含 `estimated_cost_yuan` 与 `canvas_task_id`；之后用 `projects get` 轮询任务
+  状态（`pending_approval → queued → running → succeeded/failed`），任务 `details`
+  即台账（提示词/参数/预计成本/供应商任务 ID/输出摘要）。
+- H3 凭据只存桌面私有配置 `paid-generation/config.json`；Bridge 不回显 key，也不
+  接受 Agent 修改配置。
 
 ## 画布操作请求
 

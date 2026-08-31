@@ -128,6 +128,20 @@ pub fn catalog() -> Value {
                 "canvas_node_type": "image"
             },
             {
+                "id": "generation.video_request",
+                "method": "POST",
+                "path": "/v1/generation/video-requests",
+                "risk": "paid_write_pending_human_approval",
+                "dry_run": false,
+                "paid": true,
+                "approval_required": true,
+                "source": "DesktopRuntime+CanonicalCanvasAdapter",
+                "resolutions": ["768P", "2K"],
+                "duration_seconds_range": [4, 15],
+                "keyframe_scope": "existing_image_node_with_local_media",
+                "note": "只创建 pending_approval 任务与占位节点；人工在画布上批准前不调用任何付费 API"
+            },
+            {
                 "id": "tasks.test_clip",
                 "method": "POST",
                 "path": "/v1/tasks/test-clips",
@@ -205,7 +219,7 @@ pub fn catalog() -> Value {
             "arbitrary_executable",
             "arbitrary_path",
             "arbitrary_url",
-            "paid_generation",
+            "unapproved_paid_generation",
             "public_network_listener",
             "raw_sql"
         ]

@@ -45,6 +45,10 @@ web/src/app/(user)/canvas/protocol/canvas-operation-protocol.ts
   在同一工程先创建 `video` 节点与 canvas task，再交给现有 Rust executor；
   ffprobe 结果由同一个 system 批次直接回填 task 终态以及节点的稳定
   `local-ref:` 资产引用、尺寸、时长和摘要，不建立第二套媒体画布，也不要求 UI 已打开。
+- 付费生成闸门：`POST /v1/generation/video-requests` 只创建 `pending_approval`
+  任务 + 占位节点 + 来源连线，不触发付费调用；reducer 不变量保证 Agent 的
+  `details.paid` 任务必须待批准。人工在节点卡批准后，桌面 Rust 驱动调 H3、下载
+  结果、复用受控 MP4 验收链路，以 system 批次回填 `local-ref:` 引用与任务台账。
 - 受控图片摄入：`POST /v1/media/image-ingests` 沿同一 inbox basename + SHA-256
   边界收 `.png/.jpg/.jpeg/.webp`（上限 100 MiB），校验、内容寻址拷贝与 ffprobe
   尺寸探测同步完成后，用单个 agent 原子批次直接建成品 `image` 节点；不产生
@@ -107,7 +111,7 @@ tasks、requests 和 audit。WebView 通过 Tauri IPC 读写这些行并轮询�
 - 正式端口固定 `127.0.0.1:3100/3101/3102/3103`；验收 feature 使用独立固定
   `127.0.0.1:3210/3211/3212/3213`。3103/3213 是随机能力凭据保护、支持 HTTP
   Range 的媒体流，只监听 IPv4 loopback，不接受动态 host 或公网监听。
-- Bridge 不开放 shell、可执行路径、任意路径、任意 URL、raw SQL 或付费生成。
+- Bridge 不开放 shell、可执行路径、任意路径、任意 URL、raw SQL；付费生成只有「人工批准后执行」一条受控通道，未批准的付费调用仍被显式拒绝。
 - Agent 不能提交任意路径：`GET /v1/media/inbox` 只返回应用私有固定 inbox，摄入
   只接受受控 asset ID、inbox basename 或已授权 root ID 内相对路径；绝对路径、
   目录穿越、符号链接越界、摘要不匹配、空文件和超过 1 GiB 均结构化拒绝。

@@ -20,7 +20,8 @@ use tokio::sync::oneshot;
 
 use crate::{
     capabilities, AgentOperationRequest, AgentRuntime, BridgeError, CanvasOperationAdapter,
-    CredentialStore, ImageIngestRequest, ProjectCreateRequest, TestClipRequest, VideoIngestRequest,
+    CredentialStore, ImageIngestRequest, ProjectCreateRequest, TestClipRequest,
+    VideoGenerationRequest, VideoIngestRequest,
 };
 
 pub const BRIDGE_PORT: u16 = 3102;
@@ -137,6 +138,10 @@ fn router(state: BridgeState) -> Router {
         .route("/v1/media/inbox", get(media_inbox))
         .route("/v1/media/video-ingests", post(submit_video_ingest))
         .route("/v1/media/image-ingests", post(submit_image_ingest))
+        .route(
+            "/v1/generation/video-requests",
+            post(submit_video_generation),
+        )
         .route("/v1/tasks/test-clips", post(submit_test_clip))
         .route("/v1/tasks/:task_id", get(task_status))
         .route("/v1/tasks/:task_id/cancel", post(cancel_task))
@@ -426,6 +431,139 @@ async fn submit_image_ingest(
         "node_id": request.node_id,
         "canvas_revision": applied.revision,
         "reference": reference
+    }))))
+}
+
+async fn submit_video_generation(
+    State(state): State<BridgeState>,
+    payload: Result<Json<VideoGenerationRequest>, JsonRejection>,
+) -> Result<Json<Success<Value>>, BridgeError> {
+    let Json(request) = structured_json(payload)?;
+    if request.prompt.trim().is_empty() || request.prompt.len() > 4000 {
+        return Err(BridgeError::invalid(
+            "The generation prompt must be 1-4000 bytes.",
+        ));
+    }
+    if request.title.trim().is_empty() || request.title.len() > 256 {
+        return Err(BridgeError::invalid("The generation title is invalid."));
+    }
+    if !matches!(request.resolution.as_str(), "768P" | "2K") {
+        return Err(BridgeError::invalid(
+            "The generation resolution must be 768P or 2K.",
+        ));
+    }
+    if !(4..=15).contains(&request.duration_seconds) {
+        return Err(BridgeError::invalid(
+            "The generation duration must be 4-15 seconds.",
+        ));
+    }
+    let quote = state
+        .runtime
+        .quote_video_generation(&request.resolution, request.duration_seconds)?;
+    let estimated_cost_yuan = quote["estimated_cost_yuan"]
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| BridgeError::internal("The generation cost quote is invalid."))?;
+    let model = quote["model"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| BridgeError::internal("The generation model is not configured."))?
+        .to_owned();
+
+    let current = state.canvas.get_project(&request.project_id)?;
+    let image_node = current.project["nodes"]
+        .as_array()
+        .and_then(|nodes| {
+            nodes
+                .iter()
+                .find(|node| node["id"].as_str() == Some(request.image_node_id.as_str()))
+        })
+        .ok_or_else(|| BridgeError::not_found("The keyframe image node was not found."))?;
+    if image_node["type"].as_str() != Some("image")
+        || !image_node["metadata"]["localMedia"].is_object()
+    {
+        return Err(BridgeError::invalid(
+            "The keyframe node must be an image with a controlled local media reference.",
+        ));
+    }
+
+    let canvas_task_id = format!("paid-gen-{}", request.request_id);
+    let connection_id = format!("conn-{}", request.request_id);
+    let timestamp = now_rfc3339()?;
+    let applied = state.canvas.apply_protocol_batch(
+        &request.project_id,
+        json!({
+            "protocolVersion": 1,
+            "actor": "agent",
+            "requestId": request.request_id,
+            "projectId": request.project_id,
+            "baseRevision": request.base_revision,
+            "timestamp": timestamp,
+            "operations": [
+                {
+                    "type": "node.create",
+                    "node": {
+                        "id": request.node_id,
+                        "type": "video",
+                        "title": request.title,
+                        "position": request.position,
+                        "width": request.size.width,
+                        "height": request.size.height,
+                        "metadata": {
+                            "status": "pending_approval",
+                            "generationMode": "video",
+                            "prompt": request.prompt,
+                            "localTaskKind": "paid_video_generation",
+                            "localCanvasTaskId": canvas_task_id,
+                            "imageNodeId": request.image_node_id,
+                            "estimatedCostYuan": estimated_cost_yuan,
+                            "paidModel": model
+                        }
+                    }
+                },
+                {
+                    "type": "connection.create",
+                    "connection": {
+                        "id": connection_id,
+                        "fromNodeId": request.image_node_id,
+                        "toNodeId": request.node_id
+                    }
+                },
+                {
+                    "type": "task.start",
+                    "task": {
+                        "id": canvas_task_id,
+                        "nodeId": request.node_id,
+                        "kind": "paid_video_generation",
+                        "status": "pending_approval",
+                        "requestId": request.request_id,
+                        "details": {
+                            "paid": true,
+                            "source": "agent_bridge",
+                            "prompt": request.prompt,
+                            "model": model,
+                            "resolution": request.resolution,
+                            "durationSeconds": request.duration_seconds,
+                            "imageNodeId": request.image_node_id,
+                            "estimatedCostYuan": estimated_cost_yuan
+                        }
+                    }
+                }
+            ]
+        }),
+        false,
+    )?;
+    Ok(Json(Success::new(json!({
+        "mode": "paid_video_generation",
+        "paid": true,
+        "approval_required": true,
+        "status": "pending_approval",
+        "duplicate": applied.duplicate,
+        "node_id": request.node_id,
+        "canvas_task_id": canvas_task_id,
+        "canvas_revision": applied.revision,
+        "estimated_cost_yuan": estimated_cost_yuan,
+        "model": model
     }))))
 }
 
