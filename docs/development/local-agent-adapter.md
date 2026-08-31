@@ -8,8 +8,9 @@
 - 桌面首次启动时在应用数据目录生成安装专属凭据，文件权限为 `0600`，目录权限为 `0700`。
 - CLI 只从凭据文件读取认证信息；不提供 token 命令行参数，也不要把凭据写入环境变量、日志、脚本或项目导出。
 - `infinite-canvas credentials revoke` 会立即废止当前 bearer，并把替代凭据原子写回同一私有文件；响应不会返回 secret。
-- Bridge 没有任意 shell、任意可执行文件、任意路径、任意 URL、原始 SQL
-  或付费生成入口。
+- Bridge 没有任意 shell、任意可执行文件、任意路径、任意 URL 或原始 SQL。
+  付费生成只有下文的受控请求入口：Agent 只能建待批准任务，只有人工
+  `task.approve` 批次才能启动桌面执行器；未批准的付费调用被明确拒绝。
 - Agent 写请求必须包含 `project_id`、`request_id`、`base_revision` 和
   `actor: "agent"`。人类编辑造成 revision 变化时，Agent 写入以
   `STALE_REVISION` 失败，不覆盖较新的人工版本。
@@ -165,7 +166,8 @@ request 幂等，图片在 inbox 文件清理后重放仍返回同一 `local-ref
 - `remove_connection`
 
 媒体引用整对象从 `projects get` 返回的节点 `metadata.localMedia` 原样复制；
-不存在或校验失败的引用返回 `MEDIA_REFERENCE_UNAVAILABLE`，不会创建节点。
+运行时同时校验资产 ID/storageKey 与受控内容或根内路径身份一致。不存在、伪造 ID
+或校验失败的引用返回 `MEDIA_REFERENCE_UNAVAILABLE`，不会创建节点。
 不接受文件路径、命令、URL 或自由格式节点 JSON。先执行 `dry-run`；
 确认结果后使用完全相同的 base revision 执行 `apply`。重复提交相同
 `request_id` 和相同 payload 会返回同一结果并标记 `duplicate: true`；

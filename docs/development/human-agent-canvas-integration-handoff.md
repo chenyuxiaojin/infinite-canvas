@@ -1,6 +1,6 @@
 ---
 title: 人与本机 Agent 共用无限画布总装 Handoff
-description: 三分支总装决策、公共接口、真实验收证据与发行接线
+description: 四板总装决策、公共接口、真实验收证据与发行接线
 ---
 
 # 人与本机 Agent 共用无限画布总装 Handoff
@@ -16,6 +16,13 @@ description: 三分支总装决策、公共接口、真实验收证据与发行�
 - 本机媒体引用增量分支：`feat/local-media-reference-streaming`
 - 本机媒体引用增量基线：`88a827274f80dfaaf97fc1b755088f18d4c01416`
 - 本机媒体引用验收 worktree：`infinite-canvas-worktrees/local-media-reference-streaming`
+- 板 2 受控图片摄入：`feat/agent-image-ingest` / `42d86b6`
+- 板 3 Bridge 节点白名单：`feat/bridge-node-whitelist` / `7efffa8`
+- 板 4 本机媒体引用与 Range：`feat/local-media-reference-streaming` /
+  `c32b62d`
+- 板 1 人工批准付费执行器：`feat/paid-generation-executor` / `bc1f508`，
+  合入提交 `1a69a17`
+- 收尾起点：`525931b`（含同步合入的上游 0.6.0 能力与审片卡 UI）
 
 最终提交以本分支 HEAD 为准；不在本 worktree 合并回主线。
 
@@ -154,7 +161,7 @@ tasks、requests 和 audit。WebView 通过 Tauri IPC 读写这些行并轮询�
 - 服务凭据每次进程启动随机生成；请求必须同时满足能力凭据、固定 asset ID、已注册
   引用和允许的 loopback Origin。记录的验收证据不含能力凭据或绝对路径。
 
-## 真实零付费验收
+## 隔离包与真实付费验收
 
 以下结果来自隔离 bundle `com.chenyuxiaojin.infinitecanvas.integrationtest`，证明
 总装代码的数据流成立，但不证明基线主检出生成的旧 `无限画布.app` 已包含这些
@@ -237,6 +244,32 @@ PATH=/Users/chenhuajin/.cargo/bin:$PATH \
     不把它换算成 FPS。离开页面 10 秒为 1,115,456 KiB，没有稳定回到基线；视频
     卸载已显式 pause/remove-src/load，但 WKWebView RSS 仍保留，这是残留风险而非
     性能通过。最终退出后 App/Go/Node/WebKit 验收进程均退出，3210–3213 全部释放。
+17. 板 2 在隔离工程「图片摄入验收（可删）」用案例 1 真实关键帧
+    `S01-全景剪影.png`（2048×1152）完成：固定 inbox + SHA-256 摄入、尺寸
+    探测、内容寻址、inbox 删除后幂等重放、无凭据 401、四端口 loopback
+    与重启保留均通过；没有修改正式用户工程或 Eagle/达芬奇数据。
+18. 用户在动作前明确批准「这一次 ¥0.54」后，人工按钮只触发 1 次
+    MiniMax-H3 768P/6s 图生视频；供应商任务 `2094385551669305344`，未自动
+    重试。审计序列为 revision 7→8 human `task.approve`，8→9/9→10/10→11/11→12
+    system `task.update + node.update`，终态 `succeeded/delivered`。下载结果为
+    H.264/AAC、1344×768、6583 ms、595651 bytes，SHA-256
+    `639b8211b4d4a74c55ee77a0eeea35609f438406c40f1364e7399ff464b9dd62`；
+    `ffprobe`、完整 `ffmpeg -xerror` 解码、206/Content-Range、UI 实际播放和重启读回均通过。
+    工程 JSON 不含 key、供应商 URL 或运行态播放 URL。
+19. 视觉质量不作过度结论：0.5s 仍是原首帧的桌前金钱剪影，2.5s/5.5s
+    转为落地窗前人物，首帧与任务提示词的场景不一致。因此只认定技术链
+    通过，这次结果不作生产采用；必要信息已回读写入案例 1 `台账.md`。
+20. 合流后统一 bundle 在隔离工程
+    `unified-whitelist-acceptance-v2-20260831` 复测板 3：dry-run 维持 revision 1/
+    0 节点，apply 一次建立 image/video/config 三节点并进入 revision 2，同 request
+    重放返回 `duplicate:true` 且不增 revision。实机首次发现“伪造 asset ID 但沿用
+    已有路径/摘要”会被放行，随后补上 asset ID 与受控内容/路径身份一致性
+    校验并重包；修复后相同伪引用返回 `MEDIA_REFERENCE_UNAVAILABLE`，工程仍为
+    revision 2/3 节点，禁止节点数为 0。UI 初次打开后真实图片、视频和配置均可见，
+    当下读回 revision 仍为 2；图片空 `durationMs` 已规范化删除，不再制造伪 revision。
+    后续审计明确记录了一组真实 human 全景节点 create/update/delete，revision 合法
+    2→8，最终结构回到 3 节点；以当前 base revision 8 再次提交伪引用仍是
+    `MEDIA_REFERENCE_UNAVAILABLE`，revision 8/3 节点/禁止节点 0，没有把正常人工编辑误判为水合问题。
 
 ## 用户现场复核与交付断点
 
@@ -297,24 +330,29 @@ PATH=/Users/chenhuajin/.cargo/bin:$PATH \
   --features integration-acceptance
 ```
 
-最终硬门禁计数：Web 协议/Store/共编/本地媒体共 26 tests，本机 Agent crate
-7 unit + 10 contract tests，桌面 crate 17 tests，本地 executor 19 tests（另有
-1 个需显式 trusted FFmpeg 的测试默认 ignored）。Go 全部 package、Next 生产构建、
-标准 arm64 `.app` 与独立本机媒体验收 `.app` 均构建通过；真实 H.264 headless、
-v3/v4 迁移、v5 两种导出、missing/relink 和 HTTP Range 闭环已覆盖。标准包与验收包
-内 CLI SHA-256 均为
-`9d43d06bd3d8ffb7a1de1d736beb1d1dbdc7f4bfb9001c1e0d6dd84f803af57c`。
+本次四板收尾的最终硬门禁计数：Web 全量 33 tests，本机 Agent crate
+9 unit + 13 contract tests，桌面 crate 19 tests，本地 executor 19 tests；默认 ignored 的
+1 个 trusted FFmpeg 集成测试也已单独执行并通过。Go 全部 package、Next 生产构建和
+`--features integration-acceptance` 统一 arm64 验收 `.app` 均构建通过；真实 H.264
+headless、v3/v4 迁移、v5 两种导出、missing/relink、HTTP Range、付费生成与白名单
+闭环均已覆盖。最终统一验收包的 CLI SHA-256 为
+`1de3cb7a74e0787caad1fbac2d72ad4aa37c7afb193f79f608b5d07014a64b34`，桌面主程序为
+`c61ff8590009a1cccfb50eb996cf1dc34f314837b9f6f51b1645bcfa55b93f60`。本轮未覆盖安装正式 App。
 
 `bun x tsc --noEmit` 仍有 8 个基线错误，位于
 `canvas-resource-references.ts`、`video-settings-panel.tsx`、`gemini.ts` 和
-`canvas-agent.ts`；这些文件未因总装修改，Next 构建不受影响。
+`canvas-agent.ts`；本次同步合入的审片卡 UI 初始额外带来 2 个错误（未定义 `selectOnly`
+和可选 metadata），已修复并重跑确认只剩上述 8 个基线。Next 生产构建不受影响。
 
 ## 残留风险与发行接线
 
 - 当前标准 `.app` 是技术构建；Developer ID、公证、staple 和干净机升级仍按
   P4 矩阵执行，不能把 ad-hoc 包当发行包。
-- 用户当前正式包已包含受控视频增量，但仍是“UI 打开后补回填 + MPEG-4 Part 2
-  重编码”的旧实现；headless/H.264 修正版不能在运行中覆盖，需用户退出后换装。
+- 正式新版 App 之前已安入 `~/Applications/无限画布.app`，且本机媒体引用分支
+  `c32b62d` 已推送；本轮实时核对时正式 App 没有运行，正式数据库与换装备份的
+  5 个画布工程摘要一致。当前四板最终统一 bundle 与已安装主程序并非同一产物，
+  但本轮按用户边界没有再次覆盖正式 App。若后续要换装四板最终包，必须先说明
+  产物差异、退出正式进程并复用或重做 Application Support + WebKit 成对备份。
 - 27 个真实 MP4 已不再持久化或恢复成 WebView Blob；受控 loopback Range、稳定
   `local-ref:`、引用/复制选择和 v5 导出均已落地。剩余性能风险是 WKWebView 即使在
   `preload="metadata"`、卸载时显式释放 `<video>` 后，路由离开 10 秒的 RSS 仍没有

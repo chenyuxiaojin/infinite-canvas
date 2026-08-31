@@ -9,7 +9,8 @@
 - Rust 负责受控本地执行核心；原 Go 后端先保留，出现明确桌面阻碍后再提出替换方案。
 - 本地控制只允许 Tauri IPC 或 `127.0.0.1` 受控接口；路径和命令必须白名单化或来自用户明确选择。
 - 验收只使用测试素材或确定性短样例；不渲染或导出正式用户视频。
-- Fish 111 是独立付费 Provider，未经单次授权不得调用；不得把敏感凭据写入源码、日志、提交、产物或文档。
+- Fish 111 和 MiniMax-H3 均是独立付费 Provider，未经单次授权不得调用；
+  不得把敏感凭据写入源码、日志、提交、产物或文档，付费超时不得自动重试。
 - 分发方向为 Developer ID 签名、公证 DMG，不以 Mac App Store 为首发渠道。
 - 保留 MIT 许可证、原作者声明、前端标识和 `upstream` remote。
 
@@ -81,9 +82,11 @@
 | P3.4 | 全项目导出/重新导入后节点关系和本地媒体不丢失 | 通过 | 旧 v3/v4 ZIP 继续导入；v5 原生导出明确提供“嵌入媒体”和“仅引用/清单”。Rust 往返测试覆盖 v5 embedded 摘要一致、reference-only 不静默丢文件、v3/v4 迁移、重复路径/条目/总量边界和内容寻址幂等。原 P3 三媒体 v3 ZIP 哈希证据继续保留；真实 27 镜 v3 包回灌后变为 40 节点/27 视频/27 连线和 27 个受控 `project_copy` 引用。 |
 | P3.5 | 原始资料、选中结果、失败结果和日志边界清楚，不覆盖用户文件 | 通过 | 用户测试图片/音频只作为独立 Blob 存储，不修改源文件；执行结果只发布到 `~/Library/Application Support/com.chenyuxiaojin.infinitecanvas/local-executor/acceptance/` 的哈希化固定文件名，画布只取得二次 SHA 校验后的受限副本。失败 partial 会清理，任务事件不记录路径/参数，导出只能经原生选择写 `.zip` 且 create-new 语义拒绝覆盖；ZIP 清单区分 `projects.json`、各项目 `files/` 和 storageKey |
 | P3.6 | 人工与内置 Agent、打包 CLI/Bridge、system task 使用同一工程、revision、锁和审计，可见、可测、可撤销 | 通过 | 隔离验收 App `com.chenyuxiaojin.infinitecanvas.integrationtest` 使用固定 `127.0.0.1:3210/3211/3212` 和一次性工程完成 dry-run、Agent 创建、UI 即时显示、重复 request、人工锁、`LOCKED_NODE`、`STALE_REVISION`、重读续写、UI 撤销、重启和 ZIP 往返。用户随后先备份正式 Application Support + WebKit，再启动 `~/Applications/无限画布.app`，现场确认 3100/3101/3102、未授权 401、4 个迁移工程、CLI dry-run/apply、revision 0→1、幂等、审计和撤销快照；正式 SQLite/Bridge 链路不再是空表。协议 15 passed，共编 UI 7 passed。 |
-| P3.7 | CLI 随 `.app` 打包；Bridge/媒体流只监听 loopback；凭据不泄露；ZIP 往返保留结构和协议状态 | 通过 | 标准与验收 `.app` 均重新构建；包内没有 credential/database。`lsof` 现场只见验收 App 在 `127.0.0.1:3210/3211/3212/3213` 监听，退出后四端口全部释放；正式目标为 3100–3103。Bridge 凭据留在私有文件，媒体流使用另一个每进程随机能力凭据；脱敏 Range 证据不含凭据或路径。capabilities 明确拒绝 shell、任意路径/URL、付费生成和公网监听。 |
+| P3.7 | CLI 随 `.app` 打包；Bridge/媒体流只监听 loopback；凭据不泄露；ZIP 往返保留结构和协议状态 | 通过 | 标准与验收 `.app` 均重新构建；包内没有 credential/database。`lsof` 现场只见验收 App 在 `127.0.0.1:3210/3211/3212/3213` 或正式端口组 `3100/3101/3102/3103` 的 IPv4 loopback 监听，退出后四端口全部释放。Bridge 凭据留在私有文件，媒体流使用另一个每进程随机能力凭据；脱敏 Range 证据不含凭据或路径。capabilities 明确拒绝 shell、任意路径/URL、未批准付费生成和公网监听。 |
 | P3.8 | 外部 Agent 可安全创建一次性工程并把白名单目录 MP4 写成可播放视频节点，不接受任意路径 | 通过 | 新增 `POST /v1/projects`、`GET /v1/media/inbox`、`POST /v1/media/video-ingests` 及对应 CLI。隔离实测：画布库无需刷新即出现 CLI 新工程；固定 inbox 的 2 秒 MP4 生成 640x360、2005 ms 视频节点，UI 自动出现并可播放；稳定 revision 4、1 node、1 canvas task、4 audit，重复 request 计数不变。人工锁后为 `LOCKED_NODE`，人工 revision 5→6 后旧请求为 `STALE_REVISION`；重启后结构/任务/媒体仍在，重复摄入报告当前 revision 6。v4 ZIP 含 491694-byte MP4；修正 `.zip` filter 后副本 `waCbl0WxWvM8Ro1OjHYYa` 成功回灌，保留 revision 6、1 video、1 task、8 audit、重绑定历史及可播放 00:02 媒体。用户确认后从真实 UI 撤销独立媒体批次，UI 显示 0 元素/revision 5/已撤销；CLI 同步读回 0 node、0 connection、0 task、5 audit 和非空 `undoneByRequestId`。2026-08-31 正式 App 冒烟又发现“task 终态已写、节点需 UI 补写”及 H.264 被转 MPEG-4 Part 2 两个缺口；修复后全新隔离工程在从未打开 UI 时已由同一 system 批次写入 `task.update + node.update`，revision 4、节点 `success`、1344x768、6583 ms、稳定 `local-task:` 引用。255441-byte H.264/AAC 输入 stream-copy 为 254832 bytes，完整解码通过；打开并实际播放后 revision 仍为 4、audit 仍为 4。 |
 | P3.9 | 本机已有媒体默认引用，不进 Blob/云端；Range、missing/relink、引用/复制和 ZIP 模式可验证 | 通过（内存回收留风险） | 分支 `feat/local-media-reference-streaming` 使用独立 bundle `com.chenyuxiaojin.infinitecanvas.localmediaacceptance`。真实 17,965,118-byte 27 镜副本导入为 27 个 `local-ref:`，持久化 `blob:`/绝对路径/播放 URL 均为 0；相同包再导入应用支持目录仍为 18,252 KiB。脱敏证据为 54 次 Range、54 次 206；真实播放、滚动、缩放后 operation revision 仍为 1。单测覆盖鉴权、206/Content-Range/416、路径/符号链接/SHA、missing/relink、reference/project_copy、v3/v4/v5。最终进程画布库 952,240 KiB，27% 打开稳定 1,115,216 KiB；离开 10 秒 1,115,456 KiB，未稳定回基线，因此不宣称内存/FPS 性能完全通过。App 退出后 3210–3213 全释放。 |
+| P3.10 | 真实关键帧可受控摄入；统一 bundle 只允许已验收图片/视频引用与白名单配置，伪造资产不建节点 | 通过 | 案例 1 `S01-全景剪影.png`（2048×1152）在隔离工程完成 inbox + SHA-256 摄入、尺寸探测、内容寻址、inbox 删除后幂等重放、无凭据 401 与重启保留。统一 bundle 工程 `unified-whitelist-acceptance-v2-20260831` 的 dry-run 保持 revision 1/0 节点，apply 建立 image/video/config 三节点后 revision 2，幂等重放不增 revision。实机曾发现伪 asset ID 可沿用真路径/摘要的缺口；修复为 asset ID 必须匹配受控内容/路径身份后重包，同请求返回 `MEDIA_REFERENCE_UNAVAILABLE`，仍为 revision 2/3 节点/禁止节点 0。UI 初次打开当下 revision 仍为 2。后续审计记录真实 human 全景节点 create/update/delete 使 revision 2→8，结构回到 3 节点；用当前 base revision 8 再验伪引用仍被拒绝，revision 8/3 节点不变。 |
+| P3.11 | Agent 付费任务必须待批准；人工单次批准后只调用一次，下载、解码、流式引用、system 回填、幂等和无敏感泄漏均有真实证据 | 通过（视觉结果不采用） | 用户在动作前明确批准这一次 MiniMax-H3 768P/6s（预计 ¥0.54）；供应商任务 `2094385551669305344` 仅提交一次，未自动重试。revision 7→8 是 human `task.approve`，后续四个 system 批次到 revision 12；终态 `succeeded/delivered`。产物 H.264/AAC、1344×768、6583 ms、595651 bytes，SHA-256 `639b8211b4d4a74c55ee77a0eeea35609f438406c40f1364e7399ff464b9dd62`；`ffprobe`、完整 `ffmpeg -xerror`、206/Content-Range、UI 播放、重启读回均通过。工程 JSON 无 key/供应商 URL/运行态播放 URL。但画面从桌前金钱剪影过渡到落地窗人物，首帧与提示词场景不一致，只判定技术链通过。 |
 
 ### P3 事实、推断、未知
 
@@ -93,6 +96,12 @@
 - 事实：Agent 视频完工现在由 Bridge 在同一批次提交 task 终态和节点稳定引用；UI
   仅物化临时播放 URL。H.264/AAC 输入走 stream copy，其他视频回退到 libx264/AAC，
   不再生成浏览器不兼容的 MPEG-4 Part 2。
+- 事实：MiniMax-H3 付费闭环已用当下单次授权完成；仅提交 1 次、未自动重试，
+  且从 human 批准到 system 四阶段回填全部进入同一 `operationState`。技术产物完整可解码
+  且可 Range 播放，但首帧与提示词场景跳变，所以不能把技术通过写成视觉质量通过。
+- 事实：统一 bundle 实机复测暴露并修复了伪 asset ID 可沿用真路径/摘要的身份
+  绑定缺口；修复后伪引用结构化拒绝且不建节点。图片的空 `durationMs` 也在水合
+  规范化时删除，真实 UI 打开后 revision 不再平白增加。
 - 事实：用户已在成对备份后完成正式包换装；3102 Bridge、迁移工程、CLI 直写和
   一次性视频冒烟均由真实 UI 确认。headless/H.264 修复仍需换装新构建；其他正式
   用户工程未用于写入测试。

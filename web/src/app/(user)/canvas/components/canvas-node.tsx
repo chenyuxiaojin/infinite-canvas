@@ -950,7 +950,7 @@ function VideoNodeContent({ node, theme, isSelected, onViewImage, onMetadataChan
                         type="button"
                         onClick={(e) => {
                             e.stopPropagation();
-                            navigator.clipboard.writeText(node.metadata.prompt || "");
+                            navigator.clipboard.writeText(node.metadata?.prompt || "");
                             message.success("已复制 Prompt 到剪贴板");
                         }}
                         className="flex items-center gap-1 text-stone-300 hover:text-white"

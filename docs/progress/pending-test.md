@@ -24,8 +24,9 @@ description: 当前版本已实现但仍需人工验证的变更项
 - dry-run 与 apply 都先做引用存在性预检；web reducer 零改动（`node.create` 泛化 +
   既有 `localMedia` 形状校验兜底）。
 - 自动化：canvas 单测 9（含映射与穿越/错 MIME/错 key 负例）、contract 12（含
-  白名单媒体节点端到端与不可用引用拒绝）。仍需实机验证：CLI 复用已摄入关键帧
-  建图片节点后画布显示与连线。
+  白名单媒体节点端到端与不可用引用拒绝）。统一 bundle 已实机复测：真实受控
+  图片/视频/配置节点可见，dry-run 不落库，重放幂等。实机发现的伪 asset ID
+  身份绑定缺口已修复；复测返回 `MEDIA_REFERENCE_UNAVAILABLE`，revision/节点数不变。
 
 ## 付费生成执行器（H3 图生视频 + 人工批准闸门）
 
@@ -48,8 +49,10 @@ description: 当前版本已实现但仍需人工验证的变更项
   base_url/api_key/model/price_yuan_per_second；Bridge 不回显 key，任务快照与节点
   数据不含供应商 URL 与凭据。
 - 自动化：web 协议 19 tests（含批准生命周期与闸门不变量）、Agent contract
-  12 tests（含付费请求端到端）、桌面 crate 19 tests。仍需实机验证：真实 H3 一笔
-  付费生成闭环（预计 ¥0.5 左右）。
+  12 tests（含付费请求端到端）、桌面 crate 19 tests。真实 H3 闭环已在动作前获得用户
+  单次授权，只提交 1 次（¥0.54）且未自动重试；下载、ffprobe、完整解码、Range、
+  system 回填、重启与无敏感泄漏检查均通过。视觉上存在首帧到提示词场景跳变，
+  该片只用于技术验收，不作生产采用。
 
 ## 受控图片摄入（Agent 关键帧静图）
 
@@ -64,8 +67,10 @@ description: 当前版本已实现但仍需人工验证的变更项
 - `probe_media` 改为从可信目录（/opt/homebrew/bin、/usr/local/bin、/usr/bin）解析
   ffprobe，修复 GUI 启动的 App 因无 shell PATH 而探测不到媒体尺寸的问题。
 - 自动化：桌面 crate 19 tests（含摄入校验矩阵与无 inbox 重放）、Agent contract
-  11 tests（含图片摄入端到端与 CLI 子命令）。仍需实机验证：真实关键帧 PNG 从
-  inbox 摄入后画布显示、缩放与导出回灌。
+  11 tests（含图片摄入端到端与 CLI 子命令）。案例 1 真实 `S01-全景剪影.png`
+  （2048×1152）已完成隔离实机摄入、尺寸探测、内容寻址、inbox 删除后幂等重放、
+  无凭据 401、四端口 loopback、UI 显示和重启保留。本轮未再执行导出回灌；其边界
+  已由本机媒体 v5 及 v3/v4 兼容验收覆盖。
 
 ## 本机 Agent 适配层
 

@@ -4811,6 +4811,13 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         setAssetPickerOpen(false);
     }, []);
 
+    const selectOnly = useCallback((nodeId: string) => {
+        const nextSelection = new Set([nodeId]);
+        selectedNodeIdsRef.current = nextSelection;
+        setSelectedNodeIds(nextSelection);
+        setSelectedConnectionId(null);
+    }, []);
+
     const focusNode = useCallback(
         (nodeId: string) => {
             const node = nodesRef.current.find((item) => item.id === nodeId);
