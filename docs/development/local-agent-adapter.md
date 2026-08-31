@@ -55,6 +55,9 @@ infinite-canvas projects get PROJECT_ID
 infinite-canvas canvas operations dry-run --file request.json
 infinite-canvas canvas operations apply --file request.json
 infinite-canvas runtime
+infinite-canvas media inbox
+infinite-canvas media video ingest --file video-ingest-request.json
+infinite-canvas media image ingest --file image-ingest-request.json
 infinite-canvas tasks status TASK_ID
 infinite-canvas tasks cancel TASK_ID
 infinite-canvas tasks test-clip --file test-clip-request.json
@@ -62,6 +65,36 @@ infinite-canvas credentials revoke
 ```
 
 `--file -` 可从标准输入读取 JSON。生成类命令只有确定性的本地测试片，不调用模型、不扣费。
+
+## 受控媒体摄入
+
+`media inbox` 不回传绝对路径。正式桌面包的固定 inbox 按约定位于：
+
+```text
+~/Library/Application Support/com.chenyuxiaojin.infinitecanvas/agent-media/inbox
+```
+
+Agent 以同一 POSIX 用户把文件复制成该目录内的一层 basename（不建子目录），再提交
+摄入请求；请求只含 basename 和小写 SHA-256，不含任何路径。视频只收 `.mp4`
+（上限 1 GiB，异步 canvas task + system 回填）；图片收 `.png/.jpg/.jpeg/.webp`
+（上限 100 MiB，同步验收，单个原子批次直接建成品 `image` 节点，不产生 task）。
+目录穿越、符号链接、摘要不匹配、空文件、零尺寸图片均被结构化拒绝；重复提交同
+request 幂等，图片在 inbox 文件清理后重放仍返回同一 `local-ref:` 引用。
+
+```json
+{
+  "project_id": "PROJECT_ID",
+  "node_id": "agent-image-1",
+  "request_id": "agent-image-ingest-0001",
+  "base_revision": 12,
+  "actor": "agent",
+  "inbox_file_name": "frame-001.png",
+  "expected_sha256": "小写 64 位十六进制",
+  "title": "S01 关键帧",
+  "position": { "x": 240, "y": 160 },
+  "size": { "width": 320, "height": 180 }
+}
+```
 
 ## 画布操作请求
 
