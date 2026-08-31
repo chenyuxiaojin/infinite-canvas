@@ -505,12 +505,15 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const [localMediaEvidence, setLocalMediaEvidence] = useState<LocalMediaRequestEvidence[]>([]);
     const resolvedAgentConfig = useMemo<CanvasAgentConfig>(
         () =>
-            agentConfig || {
-                imageQuality: effectiveConfig.quality,
-                imageSize: effectiveConfig.size,
-                videoQuality: effectiveConfig.vquality,
-                videoSize: effectiveConfig.videoSize,
-            },
+            agentConfig
+                ? { autoGenerateMedia: false, ...agentConfig }
+                : {
+                    autoGenerateMedia: false,
+                    imageQuality: effectiveConfig.quality,
+                    imageSize: effectiveConfig.size,
+                    videoQuality: effectiveConfig.vquality,
+                    videoSize: effectiveConfig.videoSize,
+                },
         [agentConfig, effectiveConfig.quality, effectiveConfig.size, effectiveConfig.videoSize, effectiveConfig.vquality],
     );
     const agentEffectiveConfig = useMemo(
@@ -4002,11 +4005,12 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 connections: connectionsRef.current,
                 selectedNodeIds: selectedNodeIdsRef.current,
                 config: agentEffectiveConfig,
+                autoGenerateMedia: resolvedAgentConfig.autoGenerateMedia,
                 agentState,
                 operationState: project.operationState,
             });
         },
-        [agentEffectiveConfig, currentProject?.title, projectId],
+        [agentEffectiveConfig, currentProject?.title, projectId, resolvedAgentConfig.autoGenerateMedia],
     );
 
     const executeCanvasAgentAction = useCallback(
@@ -4455,6 +4459,19 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                         };
                     }
 
+                    if (!resolvedAgentConfig.autoGenerateMedia) {
+                        return {
+                            ok: true,
+                            message: "媒体节点已创建并完成参数配置，尚未提交生成",
+                            submitted: false,
+                            nodeId: node.id,
+                            createdNodeIds: [node.id],
+                            connectionIds: createdConnections.map((connection) => connection.id),
+                            type: node.type,
+                            status: "idle",
+                        };
+                    }
+
                     await handleGenerateNode(node.id, mode, prompt);
                     await new Promise<void>((resolve) => setTimeout(resolve, 0));
                     const generatedNode = getNode(node.id) || node;
@@ -4476,6 +4493,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     }
                     return {
                         ok: true,
+                        submitted: true,
                         nodeId: node.id,
                         createdNodeIds,
                         connectionIds: createdConnections.map((connection) => connection.id),
@@ -4488,7 +4506,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 return { ok: false, code: "tool_error", message: error instanceof Error ? error.message : "画布工具执行失败" };
             }
         },
-        [agentEffectiveConfig, applyOperationBatch, chatSessions, cleanupCanvasFiles, currentProject?.title, deleteCanvasTaskRecords, getCanvasCenter, handleGenerateNode, isAiConfigReady, projectId, renameProject, updateProject],
+        [agentEffectiveConfig, applyOperationBatch, chatSessions, cleanupCanvasFiles, currentProject?.title, deleteCanvasTaskRecords, getCanvasCenter, handleGenerateNode, isAiConfigReady, projectId, renameProject, resolvedAgentConfig.autoGenerateMedia, updateProject],
     );
 
     const runLocalCollaborationDemo = useCallback(async () => {

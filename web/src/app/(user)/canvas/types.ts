@@ -247,6 +247,7 @@ export type CanvasAssistantImage = {
 export type CanvasAgentPhase = "intake" | "concept" | "script" | "breakdown" | "references" | "storyboard" | "video" | "audio" | "review" | "complete";
 
 export type CanvasAgentConfig = {
+    autoGenerateMedia?: boolean;
     imageQuality: string;
     imageSize: string;
     videoQuality: string;
