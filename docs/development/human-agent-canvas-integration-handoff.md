@@ -45,6 +45,9 @@ web/src/app/(user)/canvas/protocol/canvas-operation-protocol.ts
   在同一工程先创建 `video` 节点与 canvas task，再交给现有 Rust executor；
   ffprobe 结果由同一个 system 批次直接回填 task 终态以及节点的稳定
   `local-ref:` 资产引用、尺寸、时长和摘要，不建立第二套媒体画布，也不要求 UI 已打开。
+- 白名单节点扩容：`create_image_node`/`create_video_node` 只接受已验收的受控
+  `local-ref:` 引用（Bridge 预检资产真实存在），`create_config_node` 只收
+  model/size/count；协议映射仍是外部命名到公共 `node.create` 的转换。
 - 受控图片摄入：`POST /v1/media/image-ingests` 沿同一 inbox basename + SHA-256
   边界收 `.png/.jpg/.jpeg/.webp`（上限 100 MiB），校验、内容寻址拷贝与 ffprobe
   尺寸探测同步完成后，用单个 agent 原子批次直接建成品 `image` 节点；不产生

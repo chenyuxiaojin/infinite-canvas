@@ -49,6 +49,7 @@ pub trait AgentRuntime: Send + Sync {
     fn validate_video_ingest(&self, request: &VideoIngestRequest) -> Result<(), BridgeError>;
     fn submit_video_ingest(&self, request: &VideoIngestRequest) -> Result<Value, BridgeError>;
     fn ingest_image(&self, request: &ImageIngestRequest) -> Result<Value, BridgeError>;
+    fn verify_media_reference(&self, reference: &Value) -> Result<(), BridgeError>;
     fn submit_test_clip(&self, request: &TestClipRequest) -> Result<Value, BridgeError>;
     fn task_status(&self, task_id: &str) -> Result<Value, BridgeError>;
     fn cancel_task(&self, task_id: &str) -> Result<Value, BridgeError>;

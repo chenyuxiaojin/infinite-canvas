@@ -199,6 +199,7 @@ async fn dry_run_operations(
     payload: Result<Json<AgentOperationRequest>, JsonRejection>,
 ) -> Result<Json<Success<Value>>, BridgeError> {
     let Json(request) = structured_json(payload)?;
+    verify_operation_media_references(&state, &request)?;
     Ok(Json(Success::new(json!(state
         .canvas
         .apply_operations(request, true)?))))
@@ -209,9 +210,24 @@ async fn apply_operations(
     payload: Result<Json<AgentOperationRequest>, JsonRejection>,
 ) -> Result<Json<Success<Value>>, BridgeError> {
     let Json(request) = structured_json(payload)?;
+    verify_operation_media_references(&state, &request)?;
     Ok(Json(Success::new(json!(state
         .canvas
         .apply_operations(request, false)?))))
+}
+
+fn verify_operation_media_references(
+    state: &BridgeState,
+    request: &AgentOperationRequest,
+) -> Result<(), BridgeError> {
+    for operation in &request.operations {
+        if let crate::CanvasOperation::CreateImageNode { reference, .. }
+        | crate::CanvasOperation::CreateVideoNode { reference, .. } = operation
+        {
+            state.runtime.verify_media_reference(&json!(reference))?;
+        }
+    }
+    Ok(())
 }
 
 async fn runtime_report(

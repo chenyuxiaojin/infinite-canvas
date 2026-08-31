@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [新增] Bridge 白名单扩容：Agent 可创建图片/视频节点（仅限已验收的受控 `local-ref:` 引用，运行时先确认资产存在）与生成配置节点（model/size/count 白名单字段）
+
 + [新增] Agent Bridge 新增受控图片摄入：固定 inbox + SHA-256 同步验收，单个原子批次直接生成带受控 `local-ref:` 引用的成品图片节点
 
 + [新增] 无限画布加入人与 Agent 共编状态、节点人工锁、revision 冲突保护、Agent 批次历史和可逆批次撤销

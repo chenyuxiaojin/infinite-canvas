@@ -39,6 +39,26 @@ pub struct CanvasSize {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MediaReferencePayload {
+    pub asset_id: String,
+    pub storage_key: String,
+    pub root_id: String,
+    pub relative_path: String,
+    pub sha256: String,
+    pub mime_type: String,
+    pub bytes: u64,
+    pub file_name: String,
+    #[serde(default)]
+    pub width: Option<u64>,
+    #[serde(default)]
+    pub height: Option<u64>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    pub mode: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CanvasOperation {
     CreateTextNode {
@@ -47,6 +67,32 @@ pub enum CanvasOperation {
         content: String,
         position: Point,
         size: CanvasSize,
+    },
+    CreateImageNode {
+        node_id: String,
+        title: String,
+        reference: MediaReferencePayload,
+        position: Point,
+        size: CanvasSize,
+    },
+    CreateVideoNode {
+        node_id: String,
+        title: String,
+        reference: MediaReferencePayload,
+        position: Point,
+        size: CanvasSize,
+    },
+    CreateConfigNode {
+        node_id: String,
+        title: String,
+        position: Point,
+        size: CanvasSize,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        generation_size: Option<String>,
+        #[serde(default)]
+        count: Option<u32>,
     },
     MoveNode {
         node_id: String,
@@ -705,6 +751,52 @@ fn canonical_operation(operation: &CanvasOperation) -> Result<Value, BridgeError
                 "metadata": { "content": content, "prompt": content, "status": "success" }
             }
         }),
+        CanvasOperation::CreateImageNode {
+            node_id,
+            title,
+            reference,
+            position,
+            size,
+        } => media_node_operation(node_id, "image", title, reference, position, size),
+        CanvasOperation::CreateVideoNode {
+            node_id,
+            title,
+            reference,
+            position,
+            size,
+        } => media_node_operation(node_id, "video", title, reference, position, size),
+        CanvasOperation::CreateConfigNode {
+            node_id,
+            title,
+            position,
+            size,
+            model,
+            generation_size,
+            count,
+        } => {
+            let mut metadata = serde_json::Map::new();
+            if let Some(model) = model {
+                metadata.insert("model".to_owned(), Value::String(model.clone()));
+            }
+            if let Some(generation_size) = generation_size {
+                metadata.insert("size".to_owned(), Value::String(generation_size.clone()));
+            }
+            if let Some(count) = count {
+                metadata.insert("count".to_owned(), json!(count));
+            }
+            json!({
+                "type": "node.create",
+                "node": {
+                    "id": node_id,
+                    "type": "config",
+                    "title": title,
+                    "position": position,
+                    "width": size.width,
+                    "height": size.height,
+                    "metadata": metadata
+                }
+            })
+        }
         CanvasOperation::MoveNode { node_id, position } => {
             json!({ "type": "node.update", "nodeId": node_id, "patch": { "position": position } })
         }
@@ -738,6 +830,45 @@ fn canonical_operation(operation: &CanvasOperation) -> Result<Value, BridgeError
         }),
         CanvasOperation::RemoveConnection { connection_id } => {
             json!({ "type": "connection.delete", "connectionId": connection_id })
+        }
+    })
+}
+
+fn media_node_operation(
+    node_id: &str,
+    node_type: &str,
+    title: &str,
+    reference: &MediaReferencePayload,
+    position: &Point,
+    size: &CanvasSize,
+) -> Value {
+    let mut metadata = json!({
+        "content": reference.storage_key,
+        "storageKey": reference.storage_key,
+        "localMedia": reference,
+        "status": "success",
+        "bytes": reference.bytes,
+        "mimeType": reference.mime_type
+    });
+    if let Some(width) = reference.width {
+        metadata["naturalWidth"] = json!(width);
+    }
+    if let Some(height) = reference.height {
+        metadata["naturalHeight"] = json!(height);
+    }
+    if let Some(duration_ms) = reference.duration_ms {
+        metadata["durationMs"] = json!(duration_ms);
+    }
+    json!({
+        "type": "node.create",
+        "node": {
+            "id": node_id,
+            "type": node_type,
+            "title": title,
+            "position": position,
+            "width": size.width,
+            "height": size.height,
+            "metadata": metadata
         }
     })
 }
@@ -892,6 +1023,59 @@ fn validate_request(request: &AgentOperationRequest) -> Result<(), BridgeError> 
                 validate_point(position)?;
                 validate_size(size)?;
             }
+            CanvasOperation::CreateImageNode {
+                node_id,
+                title,
+                reference,
+                position,
+                size,
+            } => {
+                validate_identifier("node_id", node_id, 64)?;
+                validate_text("title", title, 256)?;
+                validate_media_reference(reference, "image/")?;
+                validate_point(position)?;
+                validate_size(size)?;
+            }
+            CanvasOperation::CreateVideoNode {
+                node_id,
+                title,
+                reference,
+                position,
+                size,
+            } => {
+                validate_identifier("node_id", node_id, 64)?;
+                validate_text("title", title, 256)?;
+                validate_media_reference(reference, "video/")?;
+                validate_point(position)?;
+                validate_size(size)?;
+            }
+            CanvasOperation::CreateConfigNode {
+                node_id,
+                title,
+                position,
+                size,
+                model,
+                generation_size,
+                count,
+            } => {
+                validate_identifier("node_id", node_id, 64)?;
+                validate_text("title", title, 256)?;
+                validate_point(position)?;
+                validate_size(size)?;
+                if let Some(model) = model {
+                    validate_text("model", model, 64)?;
+                }
+                if let Some(generation_size) = generation_size {
+                    validate_text("generation_size", generation_size, 32)?;
+                }
+                if let Some(count) = count {
+                    if !(1..=9).contains(count) {
+                        return Err(BridgeError::invalid(
+                            "The config node count must be between 1 and 9.",
+                        ));
+                    }
+                }
+            }
             CanvasOperation::MoveNode { node_id, position } => {
                 validate_identifier("node_id", node_id, 64)?;
                 validate_point(position)?;
@@ -940,6 +1124,52 @@ fn valid_identifier(value: &str, max: usize) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+fn validate_media_reference(
+    reference: &MediaReferencePayload,
+    mime_prefix: &str,
+) -> Result<(), BridgeError> {
+    let asset_valid = reference.asset_id.starts_with("asset-")
+        && reference.asset_id.len() <= 80
+        && reference
+            .asset_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    let sha_valid = reference.sha256.len() == 64
+        && reference
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+    let relative = &reference.relative_path;
+    let relative_valid = !relative.is_empty()
+        && relative.len() <= 1024
+        && !relative.starts_with('/')
+        && !relative.contains('\\')
+        && !relative.chars().any(char::is_control)
+        && relative
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    let root_valid = !reference.root_id.is_empty()
+        && reference.root_id.len() <= 80
+        && reference
+            .root_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if !asset_valid
+        || reference.storage_key != format!("local-ref:{}", reference.asset_id)
+        || !sha_valid
+        || !relative_valid
+        || !root_valid
+        || !reference.mime_type.starts_with(mime_prefix)
+        || reference.bytes == 0
+        || !matches!(reference.mode.as_str(), "reference" | "project_copy")
+    {
+        return Err(BridgeError::invalid(
+            "The media reference must be a controlled local-ref asset with a valid root, relative path and SHA-256.",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_text(label: &str, value: &str, max: usize) -> Result<(), BridgeError> {
@@ -1065,6 +1295,105 @@ mod tests {
             batch["operations"][1]["patch"]["metadata"]["content"],
             "Editable"
         );
+    }
+
+    fn media_reference(mime_type: &str) -> MediaReferencePayload {
+        MediaReferencePayload {
+            asset_id: "asset-0123456789abcdef0123456789abcdef".to_owned(),
+            storage_key: "local-ref:asset-0123456789abcdef0123456789abcdef".to_owned(),
+            root_id: "agent-media".to_owned(),
+            relative_path: "verified/agent-image-0123.png".to_owned(),
+            sha256: "a".repeat(64),
+            mime_type: mime_type.to_owned(),
+            bytes: 2048,
+            file_name: "agent-image-0123.png".to_owned(),
+            width: Some(2048),
+            height: Some(1152),
+            duration_ms: None,
+            mode: "project_copy".to_owned(),
+        }
+    }
+
+    #[test]
+    fn media_and_config_nodes_map_to_generic_node_create_with_controlled_references() {
+        let request = AgentOperationRequest {
+            project_id: "project-1".to_owned(),
+            request_id: "request-media".to_owned(),
+            base_revision: 3,
+            actor: Actor::Agent,
+            operations: vec![
+                CanvasOperation::CreateImageNode {
+                    node_id: "image-1".to_owned(),
+                    title: "关键帧".to_owned(),
+                    reference: media_reference("image/png"),
+                    position: Point { x: 0.0, y: 0.0 },
+                    size: CanvasSize {
+                        width: 320.0,
+                        height: 180.0,
+                    },
+                },
+                CanvasOperation::CreateConfigNode {
+                    node_id: "config-1".to_owned(),
+                    title: "生成配置".to_owned(),
+                    position: Point { x: 400.0, y: 0.0 },
+                    size: CanvasSize {
+                        width: 240.0,
+                        height: 160.0,
+                    },
+                    model: Some("MiniMax-H3".to_owned()),
+                    generation_size: Some("16:9".to_owned()),
+                    count: Some(1),
+                },
+            ],
+        };
+        let batch = canonical_batch(&request, "2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(batch["operations"][0]["type"], "node.create");
+        assert_eq!(batch["operations"][0]["node"]["type"], "image");
+        let metadata = &batch["operations"][0]["node"]["metadata"];
+        assert_eq!(
+            metadata["storageKey"],
+            "local-ref:asset-0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(metadata["content"], metadata["storageKey"]);
+        assert_eq!(metadata["localMedia"]["rootId"], "agent-media");
+        assert_eq!(metadata["naturalWidth"], 2048);
+        assert_eq!(batch["operations"][1]["node"]["type"], "config");
+        assert_eq!(
+            batch["operations"][1]["node"]["metadata"]["model"],
+            "MiniMax-H3"
+        );
+        assert_eq!(batch["operations"][1]["node"]["metadata"]["count"], 1);
+    }
+
+    #[test]
+    fn media_node_references_reject_wrong_mime_traversal_and_free_form_keys() {
+        let base = |reference: MediaReferencePayload| AgentOperationRequest {
+            project_id: "project-1".to_owned(),
+            request_id: "request-neg".to_owned(),
+            base_revision: 0,
+            actor: Actor::Agent,
+            operations: vec![CanvasOperation::CreateImageNode {
+                node_id: "image-1".to_owned(),
+                title: "关键帧".to_owned(),
+                reference,
+                position: Point { x: 0.0, y: 0.0 },
+                size: CanvasSize {
+                    width: 320.0,
+                    height: 180.0,
+                },
+            }],
+        };
+        assert!(validate_request(&base(media_reference("video/mp4"))).is_err());
+        let mut traversal = media_reference("image/png");
+        traversal.relative_path = "../escape.png".to_owned();
+        assert!(validate_request(&base(traversal)).is_err());
+        let mut mismatched_key = media_reference("image/png");
+        mismatched_key.storage_key = "local-ref:asset-other".to_owned();
+        assert!(validate_request(&base(mismatched_key)).is_err());
+        let mut absolute = media_reference("image/png");
+        absolute.relative_path = "/etc/passwd".to_owned();
+        assert!(validate_request(&base(absolute)).is_err());
+        assert!(validate_request(&base(media_reference("image/png"))).is_ok());
     }
 
     #[test]

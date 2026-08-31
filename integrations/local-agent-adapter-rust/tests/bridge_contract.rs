@@ -11,7 +11,8 @@ use local_agent_adapter::{
     read_credential_token, Actor, AgentOperationRequest, AgentRuntime, BridgeClient, BridgeError,
     BridgeServer, CanonicalCanvasAdapter, CanvasOperation, CanvasOperationAdapter,
     CanvasProtocolExecutor, CanvasSize, CredentialDocument, CredentialStore, ImageIngestRequest,
-    Point, ProjectCreateRequest, ProtocolOutcome, TestClipRequest, VideoIngestRequest,
+    MediaReferencePayload, Point, ProjectCreateRequest, ProtocolOutcome, TestClipRequest,
+    VideoIngestRequest,
 };
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -174,6 +175,17 @@ impl AgentRuntime for MockRuntime {
             "mode": "allowlisted_mp4_ingest",
             "paid": false
         }))
+    }
+
+    fn verify_media_reference(&self, reference: &Value) -> Result<(), BridgeError> {
+        let asset_id = reference["assetId"].as_str().unwrap_or_default();
+        if asset_id.contains("missing") {
+            return Err(BridgeError::conflict(
+                "MEDIA_REFERENCE_UNAVAILABLE",
+                "The referenced media is not available.",
+            ));
+        }
+        Ok(())
     }
 
     fn submit_test_clip(&self, request: &TestClipRequest) -> Result<Value, BridgeError> {
@@ -553,6 +565,103 @@ fn allowlisted_video_ingest_creates_one_shared_video_node_and_task() {
 
     fixture.client().get("/v1/tasks/media-ingest-1").unwrap();
     assert_eq!(fixture.canvas.get_project("project-1").unwrap().revision, 3);
+}
+
+#[test]
+fn allowlisted_media_reference_nodes_require_runtime_verification() {
+    let fixture = Fixture::new();
+    let reference = MediaReferencePayload {
+        asset_id: "asset-0123456789abcdef0123456789abcdef".to_owned(),
+        storage_key: "local-ref:asset-0123456789abcdef0123456789abcdef".to_owned(),
+        root_id: "agent-media".to_owned(),
+        relative_path: "verified/agent-image-0123.png".to_owned(),
+        sha256: "a".repeat(64),
+        mime_type: "image/png".to_owned(),
+        bytes: 2048,
+        file_name: "agent-image-0123.png".to_owned(),
+        width: Some(2048),
+        height: Some(1152),
+        duration_ms: None,
+        mode: "project_copy".to_owned(),
+    };
+    let request = AgentOperationRequest {
+        project_id: "project-1".to_owned(),
+        request_id: "whitelist-media-1".to_owned(),
+        base_revision: 0,
+        actor: Actor::Agent,
+        operations: vec![
+            CanvasOperation::CreateImageNode {
+                node_id: "wl-image-1".to_owned(),
+                title: "复用关键帧".to_owned(),
+                reference: reference.clone(),
+                position: Point { x: 0.0, y: 0.0 },
+                size: CanvasSize {
+                    width: 320.0,
+                    height: 180.0,
+                },
+            },
+            CanvasOperation::CreateConfigNode {
+                node_id: "wl-config-1".to_owned(),
+                title: "生成配置".to_owned(),
+                position: Point { x: 400.0, y: 0.0 },
+                size: CanvasSize {
+                    width: 240.0,
+                    height: 160.0,
+                },
+                model: Some("MiniMax-H3".to_owned()),
+                generation_size: Some("16:9".to_owned()),
+                count: Some(1),
+            },
+        ],
+    };
+    let applied = fixture
+        .client()
+        .post("/v1/canvas/operations/apply", &request)
+        .unwrap();
+    assert_eq!(applied["data"]["operations_applied"], 2);
+    let project = fixture.canvas.get_project("project-1").unwrap().project;
+    let nodes = project["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["type"], "image");
+    assert_eq!(
+        nodes[0]["metadata"]["localMedia"]["assetId"],
+        "asset-0123456789abcdef0123456789abcdef"
+    );
+    assert_eq!(nodes[1]["type"], "config");
+    assert_eq!(nodes[1]["metadata"]["model"], "MiniMax-H3");
+
+    let mut unavailable_reference = reference;
+    unavailable_reference.asset_id = "asset-missing0123456789abcdef012345".to_owned();
+    unavailable_reference.storage_key = "local-ref:asset-missing0123456789abcdef012345".to_owned();
+    let unavailable = AgentOperationRequest {
+        project_id: "project-1".to_owned(),
+        request_id: "whitelist-media-2".to_owned(),
+        base_revision: 1,
+        actor: Actor::Agent,
+        operations: vec![CanvasOperation::CreateVideoNode {
+            node_id: "wl-video-1".to_owned(),
+            title: "不存在的引用".to_owned(),
+            reference: unavailable_reference,
+            position: Point { x: 0.0, y: 0.0 },
+            size: CanvasSize {
+                width: 320.0,
+                height: 180.0,
+            },
+        }],
+    };
+    let rejected = fixture
+        .client()
+        .post("/v1/canvas/operations/apply", &unavailable)
+        .unwrap_err();
+    assert_eq!(rejected.code, "MEDIA_REFERENCE_UNAVAILABLE");
+    assert_eq!(
+        fixture.canvas.get_project("project-1").unwrap().project["nodes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "rejected references must not create nodes"
+    );
 }
 
 #[test]

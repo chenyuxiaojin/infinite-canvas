@@ -75,6 +75,9 @@ pub fn catalog() -> Value {
                 "source": "CanonicalCanvasAdapter",
                 "operations": [
                     "create_text_node",
+                    "create_image_node",
+                    "create_video_node",
+                    "create_config_node",
                     "move_node",
                     "set_node_text",
                     "set_project_title",

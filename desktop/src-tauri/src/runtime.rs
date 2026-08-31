@@ -380,6 +380,24 @@ impl AgentRuntime for DesktopRuntime {
         agent_image_ingest(media_directory, &self.local_media, request)
     }
 
+    fn verify_media_reference(&self, reference: &Value) -> Result<(), BridgeError> {
+        let reference: crate::local_media::LocalMediaReference =
+            serde_json::from_value(reference.clone())
+                .map_err(|_| BridgeError::invalid("The media reference payload is invalid."))?;
+        let resolution = self.local_media.resolve_reference(reference);
+        if resolution.status == "available" {
+            Ok(())
+        } else {
+            Err(BridgeError::conflict(
+                "MEDIA_REFERENCE_UNAVAILABLE",
+                format!(
+                    "The referenced media is not available: {}",
+                    resolution.reason.unwrap_or("unknown")
+                ),
+            ))
+        }
+    }
+
     fn submit_test_clip(&self, request: &TestClipRequest) -> Result<Value, BridgeError> {
         let task = agent_test_clip_request(&request.project_id, &request.request_id)?;
         let outcome = self.with_agent_executor(|executor| executor.submit(task))?;

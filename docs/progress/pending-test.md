@@ -15,6 +15,18 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 自动化覆盖公共协议、Store 与共编状态映射；隔离桌面 Bridge 闭环证据及正式旧
   包尚未切换的边界见总装 handoff 和统一验收矩阵。
 
+## Bridge 白名单扩容（图片/视频/生成配置节点）
+
+- 白名单新增 `create_image_node` / `create_video_node` / `create_config_node`；
+  媒体节点只接受已验收的受控 `local-ref:` 引用（结构校验 + 桌面运行时确认资产
+  在受管根内存在且摘要一致，失败返回 `MEDIA_REFERENCE_UNAVAILABLE` 且不建节点），
+  配置节点只收 model/size/count 白名单字段，metadata 形状与 UI 配置节点一致。
+- dry-run 与 apply 都先做引用存在性预检；web reducer 零改动（`node.create` 泛化 +
+  既有 `localMedia` 形状校验兜底）。
+- 自动化：canvas 单测 9（含映射与穿越/错 MIME/错 key 负例）、contract 12（含
+  白名单媒体节点端到端与不可用引用拒绝）。仍需实机验证：CLI 复用已摄入关键帧
+  建图片节点后画布显示与连线。
+
 ## 受控图片摄入（Agent 关键帧静图）
 
 - Bridge 新增 `POST /v1/media/image-ingests` 与 CLI `media image ingest`：只接受固定

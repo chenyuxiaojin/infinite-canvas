@@ -11,8 +11,8 @@ pub use auth::{read_credential_token, CredentialDocument, CredentialStore};
 pub use canvas::{
     Actor, AgentOperationRequest, CanonicalCanvasAdapter, CanvasOperation, CanvasOperationAdapter,
     CanvasOperationResult, CanvasProtocolExecutor, CanvasRuntimeTaskReference, CanvasSize,
-    HttpCanvasProtocolExecutor, Point, ProjectCreateRequest, ProjectCreateResult, ProjectDocument,
-    ProjectSummary, ProtocolOutcome,
+    HttpCanvasProtocolExecutor, MediaReferencePayload, Point, ProjectCreateRequest,
+    ProjectCreateResult, ProjectDocument, ProjectSummary, ProtocolOutcome,
 };
 pub use cli::{run_cli, Cli, ExitCode};
 pub use client::BridgeClient;

@@ -122,12 +122,17 @@ request 幂等，图片在 inbox 文件清理后重放仍返回同一 `local-ref
 白名单操作只有：
 
 - `create_text_node`
+- `create_image_node`（`reference` 必须是已验收的受控 `local-ref:` 媒体引用，Bridge 会先向桌面运行时确认该资产在受管根内真实存在且摘要一致）
+- `create_video_node`（同上，MIME 限 video/*）
+- `create_config_node`（只收 `model` / `generation_size` / `count` 三个白名单字段）
 - `move_node`
 - `set_node_text`
 - `set_project_title`
 - `add_connection`
 - `remove_connection`
 
+媒体引用整对象从 `projects get` 返回的节点 `metadata.localMedia` 原样复制；
+不存在或校验失败的引用返回 `MEDIA_REFERENCE_UNAVAILABLE`，不会创建节点。
 不接受文件路径、命令、URL 或自由格式节点 JSON。先执行 `dry-run`；
 确认结果后使用完全相同的 base revision 执行 `apply`。重复提交相同
 `request_id` 和相同 payload 会返回同一结果并标记 `duplicate: true`；
