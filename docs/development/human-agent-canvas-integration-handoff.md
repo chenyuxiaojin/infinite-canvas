@@ -45,6 +45,10 @@ web/src/app/(user)/canvas/protocol/canvas-operation-protocol.ts
   在同一工程先创建 `video` 节点与 canvas task，再交给现有 Rust executor；
   ffprobe 结果由同一个 system 批次直接回填 task 终态以及节点的稳定
   `local-ref:` 资产引用、尺寸、时长和摘要，不建立第二套媒体画布，也不要求 UI 已打开。
+- 受控图片摄入：`POST /v1/media/image-ingests` 沿同一 inbox basename + SHA-256
+  边界收 `.png/.jpg/.jpeg/.webp`（上限 100 MiB），校验、内容寻址拷贝与 ffprobe
+  尺寸探测同步完成后，用单个 agent 原子批次直接建成品 `image` 节点；不产生
+  canvas task，Bridge 响应不含播放 URL，重放同一请求在 inbox 清理后仍幂等。
 - 本机已有素材：工程只保存 root ID、根内相对路径、SHA-256、媒体元数据和稳定
   asset/storage key；临时播放 URL 和随机凭据只存在当前 App 进程内，不进入
   `CanvasProject`、Agent 上下文、ZIP 清单或日志。

@@ -7,8 +7,8 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
 use crate::{
-    read_credential_token, AgentOperationRequest, BridgeClient, BridgeError, ProjectCreateRequest,
-    TestClipRequest, VideoIngestRequest,
+    read_credential_token, AgentOperationRequest, BridgeClient, BridgeError, ImageIngestRequest,
+    ProjectCreateRequest, TestClipRequest, VideoIngestRequest,
 };
 
 #[derive(Debug, Parser)]
@@ -62,6 +62,7 @@ pub struct MediaArgs {
 pub enum MediaCommand {
     Inbox,
     Video(MediaVideoArgs),
+    Image(MediaImageArgs),
 }
 
 #[derive(Debug, Args)]
@@ -72,6 +73,17 @@ pub struct MediaVideoArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum MediaVideoCommand {
+    Ingest(InputFile),
+}
+
+#[derive(Debug, Args)]
+pub struct MediaImageArgs {
+    #[command(subcommand)]
+    pub command: MediaImageCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MediaImageCommand {
     Ingest(InputFile),
 }
 
@@ -193,6 +205,12 @@ fn execute(cli: Cli) -> Result<Value, BridgeError> {
                 MediaVideoCommand::Ingest(input) => {
                     let request = read_json::<VideoIngestRequest>(&input.file)?;
                     client.post("/v1/media/video-ingests", &request)
+                }
+            },
+            MediaCommand::Image(args) => match args.command {
+                MediaImageCommand::Ingest(input) => {
+                    let request = read_json::<ImageIngestRequest>(&input.file)?;
+                    client.post("/v1/media/image-ingests", &request)
                 }
             },
         },

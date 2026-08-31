@@ -768,6 +768,31 @@ impl LocalMediaManager {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn offline_for_tests(app_data_directory: &Path) -> Result<Arc<Self>, String> {
+        let managed_root = app_data_directory.join("project-media");
+        std::fs::create_dir_all(managed_root.join("owned"))
+            .map_err(|error| format!("cannot create the managed media root: {error}"))?;
+        let roots_path = app_data_directory.join("local-media-roots.json");
+        let mut roots = load_root_registry(&roots_path)?;
+        roots.roots.insert(
+            MANAGED_ROOT_ID.to_owned(),
+            path_to_private_string(&managed_root)?,
+        );
+        save_root_registry(&roots_path, &roots)?;
+        Ok(Arc::new(Self {
+            roots_path,
+            managed_root,
+            roots: Mutex::new(roots),
+            assets: RwLock::new(HashMap::new()),
+            credential: "offline-test-credential".to_owned(),
+            port: 0,
+            web_port: 0,
+            evidence: Mutex::new(Vec::new()),
+            shutdown: Mutex::new(None),
+        }))
+    }
+
     fn playback_url(&self, asset_id: &str) -> String {
         format!(
             "http://127.0.0.1:{}/v1/media/{}?token={}",
@@ -793,10 +818,10 @@ enum LocalMediaResolveError {
 }
 
 #[derive(Default)]
-struct MediaProbeSummary {
-    width: Option<u64>,
-    height: Option<u64>,
-    duration_ms: Option<u64>,
+pub(crate) struct MediaProbeSummary {
+    pub(crate) width: Option<u64>,
+    pub(crate) height: Option<u64>,
+    pub(crate) duration_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1149,7 +1174,7 @@ fn ensure_media_size(bytes: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn mime_type_for_path(path: &Path) -> Result<String, String> {
+pub(crate) fn mime_type_for_path(path: &Path) -> Result<String, String> {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -1273,7 +1298,11 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn copy_verified_file(source: &Path, target: &Path, expected_sha256: &str) -> Result<(), String> {
+pub(crate) fn copy_verified_file(
+    source: &Path,
+    target: &Path,
+    expected_sha256: &str,
+) -> Result<(), String> {
     if target.exists() {
         if sha256_file(target)? == expected_sha256 {
             return Ok(());

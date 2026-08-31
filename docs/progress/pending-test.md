@@ -15,6 +15,22 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 自动化覆盖公共协议、Store 与共编状态映射；隔离桌面 Bridge 闭环证据及正式旧
   包尚未切换的边界见总装 handoff 和统一验收矩阵。
 
+## 受控图片摄入（Agent 关键帧静图）
+
+- Bridge 新增 `POST /v1/media/image-ingests` 与 CLI `media image ingest`：只接受固定
+  inbox 内的 `.png/.jpg/.jpeg/.webp` basename + 小写 SHA-256，上限 100 MiB；目录穿越、
+  符号链接、摘要不匹配、零尺寸/不可解码内容均结构化拒绝。
+- 图片验收为同步流程：校验 + 哈希 + 内容寻址拷贝进 `verified/` + ffprobe 尺寸探测
+  在请求内完成，单个 agent 原子批次直接建成品 `image` 节点（含 `local-ref:` 引用与
+  `localMedia` 元数据），不留 canvas task。
+- 已验收副本按内容寻址；inbox 文件被清理后，相同请求重放仍返回同一引用。
+- Bridge 响应不含播放 URL；UI 打开时经既有 `localMedia` 补水走 3103 Range 流显示。
+- `probe_media` 改为从可信目录（/opt/homebrew/bin、/usr/local/bin、/usr/bin）解析
+  ffprobe，修复 GUI 启动的 App 因无 shell PATH 而探测不到媒体尺寸的问题。
+- 自动化：桌面 crate 19 tests（含摄入校验矩阵与无 inbox 重放）、Agent contract
+  11 tests（含图片摄入端到端与 CLI 子命令）。仍需实机验证：真实关键帧 PNG 从
+  inbox 摄入后画布显示、缩放与导出回灌。
+
 ## 本机 Agent 适配层
 
 - 新增只监听 `127.0.0.1:3102` 的 Agent Bridge，以及桌面安装专属、

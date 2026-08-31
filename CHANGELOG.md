@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [新增] Agent Bridge 新增受控图片摄入：固定 inbox + SHA-256 同步验收，单个原子批次直接生成带受控 `local-ref:` 引用的成品图片节点
+
 + [新增] 无限画布加入人与 Agent 共编状态、节点人工锁、revision 冲突保护、Agent 批次历史和可逆批次撤销
 + [新增] 新增 macOS 本机 Agent Bridge 与 `infinite-canvas` CLI，支持安装专属凭据、能力目录、同画布 revision/幂等操作和受限桌面任务
 + [新增] 画布可触发本地固定 FFmpeg 测试片，验证后回填视频节点并保留来源关系、幂等与重启恢复信息

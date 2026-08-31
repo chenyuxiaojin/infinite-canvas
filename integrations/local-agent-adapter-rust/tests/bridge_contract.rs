@@ -10,8 +10,8 @@ use assert_cmd::cargo::cargo_bin;
 use local_agent_adapter::{
     read_credential_token, Actor, AgentOperationRequest, AgentRuntime, BridgeClient, BridgeError,
     BridgeServer, CanonicalCanvasAdapter, CanvasOperation, CanvasOperationAdapter,
-    CanvasProtocolExecutor, CanvasSize, CredentialDocument, CredentialStore, Point,
-    ProjectCreateRequest, ProtocolOutcome, TestClipRequest, VideoIngestRequest,
+    CanvasProtocolExecutor, CanvasSize, CredentialDocument, CredentialStore, ImageIngestRequest,
+    Point, ProjectCreateRequest, ProtocolOutcome, TestClipRequest, VideoIngestRequest,
 };
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -137,7 +137,7 @@ impl AgentRuntime for MockRuntime {
             "kind": "fixed_app_support_inbox",
             "inbox_id": "agent-media-inbox",
             "request_field": "inbox_file_name",
-            "accepted_mime_types": ["video/mp4"],
+            "accepted_mime_types": ["video/mp4", "image/png", "image/jpeg", "image/webp"],
             "arbitrary_paths": false,
             "absolute_path_exposed": false
         }))
@@ -145,6 +145,26 @@ impl AgentRuntime for MockRuntime {
 
     fn validate_video_ingest(&self, _request: &VideoIngestRequest) -> Result<(), BridgeError> {
         Ok(())
+    }
+
+    fn ingest_image(&self, request: &ImageIngestRequest) -> Result<Value, BridgeError> {
+        Ok(json!({
+            "mode": "allowlisted_image_ingest",
+            "paid": false,
+            "reference": {
+                "assetId": "asset-fedcba9876543210fedcba9876543210",
+                "storageKey": "local-ref:asset-fedcba9876543210fedcba9876543210",
+                "rootId": "agent-media",
+                "relativePath": format!("verified/agent-image-{}.png", &request.expected_sha256[..32]),
+                "sha256": request.expected_sha256,
+                "mimeType": "image/png",
+                "bytes": 67,
+                "fileName": request.inbox_file_name,
+                "width": 1024,
+                "height": 576,
+                "mode": "project_copy"
+            }
+        }))
     }
 
     fn submit_video_ingest(&self, request: &VideoIngestRequest) -> Result<Value, BridgeError> {
@@ -536,6 +556,71 @@ fn allowlisted_video_ingest_creates_one_shared_video_node_and_task() {
 }
 
 #[test]
+fn allowlisted_image_ingest_creates_one_final_image_node_without_playback_urls() {
+    let fixture = Fixture::new();
+    let request = ImageIngestRequest {
+        project_id: "project-1".to_owned(),
+        node_id: "image-1".to_owned(),
+        request_id: "image-ingest-1".to_owned(),
+        base_revision: 0,
+        actor: Actor::Agent,
+        inbox_file_name: "frame-001.png".to_owned(),
+        expected_sha256: "e".repeat(64),
+        title: "Frame 001".to_owned(),
+        position: Point { x: 10.0, y: 20.0 },
+        size: CanvasSize {
+            width: 320.0,
+            height: 180.0,
+        },
+    };
+    let first = fixture
+        .client()
+        .post("/v1/media/image-ingests", &request)
+        .unwrap();
+    assert_eq!(first["data"]["mode"], "allowlisted_image_ingest");
+    assert_eq!(first["data"]["paid"], false);
+    assert_eq!(first["data"]["duplicate"], false);
+    assert_eq!(first["data"]["node_id"], "image-1");
+    assert_eq!(first["data"]["canvas_revision"], 1);
+    assert!(first["data"]["reference"].get("playbackUrl").is_none());
+
+    let duplicate = fixture
+        .client()
+        .post("/v1/media/image-ingests", &request)
+        .unwrap();
+    assert_eq!(duplicate["data"]["duplicate"], true);
+    assert_eq!(duplicate["data"]["canvas_revision"], 1);
+
+    let project = fixture.canvas.get_project("project-1").unwrap();
+    assert_eq!(project.revision, 1);
+    assert_eq!(project.project["nodes"].as_array().unwrap().len(), 1);
+    let node = &project.project["nodes"][0];
+    assert_eq!(node["type"], "image");
+    assert_eq!(node["title"], "Frame 001");
+    let metadata = &node["metadata"];
+    assert_eq!(
+        metadata["storageKey"],
+        "local-ref:asset-fedcba9876543210fedcba9876543210"
+    );
+    assert_eq!(metadata["content"], metadata["storageKey"]);
+    assert_eq!(metadata["status"], "success");
+    assert_eq!(metadata["naturalWidth"], 1024);
+    assert_eq!(metadata["naturalHeight"], 576);
+    assert_eq!(metadata["mimeType"], "image/png");
+    assert_eq!(metadata["localMedia"]["rootId"], "agent-media");
+    assert_eq!(metadata["localMedia"]["sha256"], "e".repeat(64));
+    assert!(metadata["localMedia"].get("playbackUrl").is_none());
+    assert_eq!(
+        project.project["operationState"]["tasks"]
+            .as_object()
+            .unwrap()
+            .len(),
+        0,
+        "synchronous image ingest must not leave a task behind"
+    );
+}
+
+#[test]
 fn completed_legacy_ingest_repairs_its_loading_node_without_rewriting_the_task() {
     let fixture = Fixture::new();
     let request = VideoIngestRequest {
@@ -761,7 +846,7 @@ fn cli_exposes_project_create_and_fixed_inbox_video_ingest() {
         .unwrap(),
     )
     .unwrap();
-    let ingested = Command::new(binary)
+    let ingested = Command::new(&binary)
         .args(common)
         .args(["media", "video", "ingest", "--file"])
         .arg(&ingest_file)
@@ -771,4 +856,36 @@ fn cli_exposes_project_create_and_fixed_inbox_video_ingest() {
     let ingested: Value = serde_json::from_slice(&ingested.stdout).unwrap();
     assert_eq!(ingested["data"]["task_id"], "media-cli-ingest-1");
     assert_eq!(ingested["data"]["canvas_revision"], 2);
+
+    let image_file = fixture._root.path().join("ingest-image.json");
+    fs::write(
+        &image_file,
+        serde_json::to_vec(&ImageIngestRequest {
+            project_id: "project-1".to_owned(),
+            node_id: "cli-image-1".to_owned(),
+            request_id: "cli-image-ingest-1".to_owned(),
+            base_revision: 2,
+            actor: Actor::Agent,
+            inbox_file_name: "frame-001.png".to_owned(),
+            expected_sha256: "f".repeat(64),
+            title: "CLI Frame 001".to_owned(),
+            position: Point { x: 0.0, y: 0.0 },
+            size: CanvasSize {
+                width: 320.0,
+                height: 240.0,
+            },
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let image_ingested = Command::new(binary)
+        .args(common)
+        .args(["media", "image", "ingest", "--file"])
+        .arg(&image_file)
+        .output()
+        .unwrap();
+    assert_eq!(image_ingested.status.code(), Some(0));
+    let image_ingested: Value = serde_json::from_slice(&image_ingested.stdout).unwrap();
+    assert_eq!(image_ingested["data"]["node_id"], "cli-image-1");
+    assert_eq!(image_ingested["data"]["canvas_revision"], 3);
 }

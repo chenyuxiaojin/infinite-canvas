@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     capabilities, AgentOperationRequest, AgentRuntime, BridgeError, CanvasOperationAdapter,
-    CredentialStore, ProjectCreateRequest, TestClipRequest, VideoIngestRequest,
+    CredentialStore, ImageIngestRequest, ProjectCreateRequest, TestClipRequest, VideoIngestRequest,
 };
 
 pub const BRIDGE_PORT: u16 = 3102;
@@ -136,6 +136,7 @@ fn router(state: BridgeState) -> Router {
         .route("/v1/runtime", get(runtime_report))
         .route("/v1/media/inbox", get(media_inbox))
         .route("/v1/media/video-ingests", post(submit_video_ingest))
+        .route("/v1/media/image-ingests", post(submit_image_ingest))
         .route("/v1/tasks/test-clips", post(submit_test_clip))
         .route("/v1/tasks/:task_id", get(task_status))
         .route("/v1/tasks/:task_id/cancel", post(cancel_task))
@@ -358,6 +359,74 @@ async fn submit_video_ingest(
     response["canvas_task_id"] = Value::String(canvas_task_id);
     response["canvas_revision"] = json!(updated.revision.max(started.revision));
     Ok(Json(Success::new(response)))
+}
+
+async fn submit_image_ingest(
+    State(state): State<BridgeState>,
+    payload: Result<Json<ImageIngestRequest>, JsonRejection>,
+) -> Result<Json<Success<Value>>, BridgeError> {
+    let Json(request) = structured_json(payload)?;
+    let ingested = state.runtime.ingest_image(&request)?;
+    let reference = ingested
+        .get("reference")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| BridgeError::internal("The ingested image reference is missing."))?;
+    let storage_key = reference["storageKey"]
+        .as_str()
+        .filter(|value| value.starts_with("local-ref:asset-"))
+        .ok_or_else(|| BridgeError::internal("The ingested image storage key is invalid."))?
+        .to_owned();
+    let width = reference["width"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| BridgeError::internal("The ingested image width is invalid."))?;
+    let height = reference["height"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| BridgeError::internal("The ingested image height is invalid."))?;
+    let timestamp = now_rfc3339()?;
+    let applied = state.canvas.apply_protocol_batch(
+        &request.project_id,
+        json!({
+            "protocolVersion": 1,
+            "actor": "agent",
+            "requestId": request.request_id,
+            "projectId": request.project_id,
+            "baseRevision": request.base_revision,
+            "timestamp": timestamp,
+            "operations": [{
+                "type": "node.create",
+                "node": {
+                    "id": request.node_id,
+                    "type": "image",
+                    "title": request.title,
+                    "position": request.position,
+                    "width": request.size.width,
+                    "height": request.size.height,
+                    "metadata": {
+                        "content": storage_key,
+                        "storageKey": storage_key,
+                        "localMedia": reference,
+                        "status": "success",
+                        "naturalWidth": width,
+                        "naturalHeight": height,
+                        "bytes": reference["bytes"],
+                        "mimeType": reference["mimeType"]
+                    }
+                }
+            }]
+        }),
+        false,
+    )?;
+    Ok(Json(Success::new(json!({
+        "mode": "allowlisted_image_ingest",
+        "paid": false,
+        "duplicate": applied.duplicate,
+        "node_id": request.node_id,
+        "canvas_revision": applied.revision,
+        "reference": reference
+    }))))
 }
 
 async fn submit_test_clip(

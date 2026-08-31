@@ -115,6 +115,19 @@ pub fn catalog() -> Value {
                 "canvas_node_type": "video"
             },
             {
+                "id": "media.image_ingest",
+                "method": "POST",
+                "path": "/v1/media/image-ingests",
+                "risk": "reversible_write",
+                "dry_run": false,
+                "paid": false,
+                "source": "DesktopRuntime+CanonicalCanvasAdapter",
+                "accepted_mime_types": ["image/png", "image/jpeg", "image/webp"],
+                "path_scope": "fixed_app_support_inbox_basename_only",
+                "integrity": "required_lowercase_sha256",
+                "canvas_node_type": "image"
+            },
+            {
                 "id": "tasks.test_clip",
                 "method": "POST",
                 "path": "/v1/tasks/test-clips",
@@ -182,6 +195,7 @@ pub fn catalog() -> Value {
                 "local_audio_service_probe",
                 "deterministic_test_clip",
                 "allowlisted_mp4_ingest",
+                "allowlisted_image_ingest",
                 "task_status",
                 "task_cancel"
             ]

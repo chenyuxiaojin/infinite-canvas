@@ -5,7 +5,9 @@ use std::{
     time::Duration,
 };
 
-use local_agent_adapter::{AgentRuntime, BridgeError, TestClipRequest, VideoIngestRequest};
+use local_agent_adapter::{
+    AgentRuntime, BridgeError, ImageIngestRequest, TestClipRequest, VideoIngestRequest,
+};
 use local_ai_audio::{
     Capability, EndToEndStatus, LoopbackServiceProbe, ProviderId as AudioProviderId,
     ProviderStatus as AudioProviderStatus, ServiceProbe, ServiceState, ServiceStatus,
@@ -26,6 +28,8 @@ const ACCEPTANCE_ROOT_ID: &str = "desktop-acceptance";
 const AGENT_MEDIA_ROOT_ID: &str = "agent-media";
 const TEST_CLIP_IDEMPOTENCY_KEY: &str = "desktop-p2-deterministic-clip-v1";
 const MAX_AGENT_MEDIA_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_AGENT_IMAGE_BYTES: u64 = 100 * 1024 * 1024;
+const AGENT_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp"];
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ToolSummary {
@@ -333,8 +337,9 @@ impl AgentRuntime for DesktopRuntime {
             "kind": "fixed_app_support_inbox",
             "inbox_id": "agent-media-inbox",
             "request_field": "inbox_file_name",
-            "accepted_mime_types": ["video/mp4"],
+            "accepted_mime_types": ["video/mp4", "image/png", "image/jpeg", "image/webp"],
             "max_file_bytes": MAX_AGENT_MEDIA_BYTES,
+            "max_image_file_bytes": MAX_AGENT_IMAGE_BYTES,
             "arbitrary_paths": false,
             "absolute_path_exposed": false
         }))
@@ -365,6 +370,14 @@ impl AgentRuntime for DesktopRuntime {
             "mode": "allowlisted_mp4_ingest",
             "paid": false
         }))
+    }
+
+    fn ingest_image(&self, request: &ImageIngestRequest) -> Result<Value, BridgeError> {
+        let media_directory = self
+            .agent_media_directory
+            .as_ref()
+            .ok_or_else(|| BridgeError::unavailable(self.ffmpeg.diagnostic.clone()))?;
+        agent_image_ingest(media_directory, &self.local_media, request)
     }
 
     fn submit_test_clip(&self, request: &TestClipRequest) -> Result<Value, BridgeError> {
@@ -591,11 +604,11 @@ fn agent_video_ingest_request(
             "The Agent video size is outside the allowed range.",
         ));
     }
-    validate_inbox_file_name(&request.inbox_file_name)?;
+    validate_inbox_file_name(&request.inbox_file_name, &["mp4"])?;
     validate_sha256(&request.expected_sha256)?;
     let input_path = media_directory.join("inbox").join(&request.inbox_file_name);
     let metadata = std::fs::symlink_metadata(&input_path)
-        .map_err(|_| BridgeError::not_found("The allowlisted inbox video was not found."))?;
+        .map_err(|_| BridgeError::not_found("The allowlisted inbox media was not found."))?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.len() == 0
@@ -635,6 +648,114 @@ fn agent_video_ingest_request(
             conflict_policy: OutputConflictPolicy::Reject,
         }),
     })
+}
+
+fn agent_image_ingest(
+    media_directory: &Path,
+    local_media: &LocalMediaManager,
+    request: &ImageIngestRequest,
+) -> Result<Value, BridgeError> {
+    validate_project_id(&request.project_id).map_err(BridgeError::invalid)?;
+    validate_agent_identifier("node_id", &request.node_id, 64)?;
+    validate_agent_identifier("request_id", &request.request_id, 128)?;
+    if request.title.trim().is_empty() || request.title.len() > 256 {
+        return Err(BridgeError::invalid("The Agent image title is invalid."));
+    }
+    if !request.position.x.is_finite()
+        || !request.position.y.is_finite()
+        || request.position.x.abs() > 10_000_000.0
+        || request.position.y.abs() > 10_000_000.0
+    {
+        return Err(BridgeError::invalid(
+            "The Agent image position is outside the allowed range.",
+        ));
+    }
+    if !request.size.width.is_finite()
+        || !request.size.height.is_finite()
+        || !(40.0..=10_000.0).contains(&request.size.width)
+        || !(40.0..=10_000.0).contains(&request.size.height)
+    {
+        return Err(BridgeError::invalid(
+            "The Agent image size is outside the allowed range.",
+        ));
+    }
+    validate_inbox_file_name(&request.inbox_file_name, AGENT_IMAGE_EXTENSIONS)?;
+    validate_sha256(&request.expected_sha256)?;
+    let file_name = Path::new(&request.inbox_file_name);
+    let extension = file_name
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .ok_or_else(|| BridgeError::invalid("The inbox image extension is invalid."))?;
+    let mime_type = crate::local_media::mime_type_for_path(file_name)
+        .map_err(BridgeError::invalid)
+        .and_then(|mime| {
+            if mime.starts_with("image/") {
+                Ok(mime)
+            } else {
+                Err(BridgeError::invalid(
+                    "The inbox image MIME type is not an image.",
+                ))
+            }
+        })?;
+    let relative_output = format!(
+        "verified/agent-image-{}.{extension}",
+        &request.expected_sha256[..32]
+    );
+    let target = media_directory.join(&relative_output);
+    // 已验收副本按内容寻址；inbox 文件被清理后同一请求重放仍可成功。
+    let verified_exists =
+        matches!(std::fs::symlink_metadata(&target), Ok(metadata) if metadata.is_file());
+    if !verified_exists {
+        let input_path = media_directory.join("inbox").join(&request.inbox_file_name);
+        let metadata = std::fs::symlink_metadata(&input_path)
+            .map_err(|_| BridgeError::not_found("The allowlisted inbox image was not found."))?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_AGENT_IMAGE_BYTES
+        {
+            return Err(BridgeError::forbidden(
+                "The inbox image crossed the fixed media boundary.",
+            ));
+        }
+        let actual_sha256 = sha256_file(&input_path)?;
+        if actual_sha256 != request.expected_sha256 {
+            return Err(BridgeError::conflict(
+                "MEDIA_DIGEST_MISMATCH",
+                "The inbox image does not match expected_sha256.",
+            ));
+        }
+        crate::local_media::copy_verified_file(&input_path, &target, &request.expected_sha256)
+            .map_err(BridgeError::internal)?;
+    }
+    let probe = crate::local_media::probe_media(&target)
+        .map_err(|_| BridgeError::invalid("The inbox image could not be decoded as an image."))?;
+    // ffprobe 对损坏文件可能回 0×0 流而不报错，必须拒绝零尺寸。
+    let (Some(width), Some(height)) = (
+        probe.width.filter(|value| *value > 0),
+        probe.height.filter(|value| *value > 0),
+    ) else {
+        return Err(BridgeError::invalid(
+            "The inbox image has no decodable dimensions.",
+        ));
+    };
+    let resolution = local_media
+        .reference_for_task_media(TaskMediaReferenceInput {
+            root_id: AGENT_MEDIA_ROOT_ID,
+            root: media_directory,
+            relative: Path::new(&relative_output),
+            sha256: &request.expected_sha256,
+            mime_type: &mime_type,
+            width: Some(width),
+            height: Some(height),
+            duration_ms: None,
+        })
+        .map_err(BridgeError::internal)?;
+    Ok(json!({
+        "mode": "allowlisted_image_ingest",
+        "paid": false,
+        "reference": resolution.reference,
+    }))
 }
 
 fn fixed_test_clip_request(
@@ -737,18 +858,20 @@ fn validate_agent_identifier(label: &str, value: &str, max: usize) -> Result<(),
     Ok(())
 }
 
-fn validate_inbox_file_name(value: &str) -> Result<(), BridgeError> {
+fn validate_inbox_file_name(value: &str, extensions: &[&str]) -> Result<(), BridgeError> {
     let path = Path::new(value);
+    let extension = path.extension().and_then(|extension| extension.to_str());
     if value.is_empty()
         || value.len() > 255
         || value.chars().any(char::is_control)
         || path.components().count() != 1
         || path.file_name().and_then(|name| name.to_str()) != Some(value)
-        || path.extension().and_then(|extension| extension.to_str()) != Some("mp4")
+        || !extension.is_some_and(|extension| extensions.contains(&extension))
     {
-        return Err(BridgeError::invalid(
-            "inbox_file_name must be one .mp4 file name without a path.",
-        ));
+        return Err(BridgeError::invalid(format!(
+            "inbox_file_name must be one {} file name without a path.",
+            extensions.join("/")
+        )));
     }
     Ok(())
 }
@@ -768,13 +891,13 @@ fn validate_sha256(value: &str) -> Result<(), BridgeError> {
 
 fn sha256_file(path: &Path) -> Result<String, BridgeError> {
     let mut file = std::fs::File::open(path)
-        .map_err(|_| BridgeError::not_found("The allowlisted inbox video was not found."))?;
+        .map_err(|_| BridgeError::not_found("The allowlisted inbox media was not found."))?;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 1024 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
-            .map_err(|_| BridgeError::internal("The inbox video could not be hashed."))?;
+            .map_err(|_| BridgeError::internal("The inbox media could not be hashed."))?;
         if read == 0 {
             break;
         }
@@ -983,6 +1106,127 @@ mod tests {
             let symlink = video_ingest_request("link.mp4", hex_sha256(b"fixture"));
             assert_eq!(
                 agent_video_ingest_request(root.path(), &symlink)
+                    .unwrap_err()
+                    .code,
+                "CAPABILITY_DENIED"
+            );
+        }
+    }
+
+    fn image_ingest_request(file_name: &str, sha256: String) -> ImageIngestRequest {
+        ImageIngestRequest {
+            project_id: "project-1".to_owned(),
+            node_id: "image-1".to_owned(),
+            request_id: "image-ingest-1".to_owned(),
+            base_revision: 0,
+            actor: local_agent_adapter::Actor::Agent,
+            inbox_file_name: file_name.to_owned(),
+            expected_sha256: sha256,
+            title: "Frame 001".to_owned(),
+            position: local_agent_adapter::Point { x: 0.0, y: 0.0 },
+            size: local_agent_adapter::CanvasSize {
+                width: 320.0,
+                height: 240.0,
+            },
+        }
+    }
+
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn image_ingest_registers_a_content_addressed_reference_and_replays_without_inbox() {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("agent-media");
+        std::fs::create_dir_all(media.join("inbox")).unwrap();
+        let inbox_file = media.join("inbox").join("frame-001.png");
+        std::fs::write(&inbox_file, TINY_PNG).unwrap();
+        if crate::local_media::probe_media(&inbox_file).is_err() {
+            eprintln!("skipping image ingest probe test: ffprobe unavailable");
+            return;
+        }
+        let local_media = LocalMediaManager::offline_for_tests(root.path()).unwrap();
+        let request = image_ingest_request("frame-001.png", hex_sha256(TINY_PNG));
+        let result = agent_image_ingest(&media, &local_media, &request).unwrap();
+        assert_eq!(result["mode"], "allowlisted_image_ingest");
+        assert_eq!(result["paid"], false);
+        let reference = &result["reference"];
+        assert_eq!(reference["rootId"], AGENT_MEDIA_ROOT_ID);
+        assert_eq!(reference["width"], 1);
+        assert_eq!(reference["height"], 1);
+        assert_eq!(reference["mimeType"], "image/png");
+        assert_eq!(reference["sha256"], hex_sha256(TINY_PNG));
+        let relative = reference["relativePath"].as_str().unwrap();
+        assert!(relative.starts_with("verified/agent-image-") && relative.ends_with(".png"));
+        assert!(reference["storageKey"]
+            .as_str()
+            .unwrap()
+            .starts_with("local-ref:asset-"));
+        assert!(result.get("playbackUrl").is_none());
+        assert!(reference.get("playbackUrl").is_none());
+
+        std::fs::remove_file(&inbox_file).unwrap();
+        let replay = agent_image_ingest(&media, &local_media, &request).unwrap();
+        assert_eq!(replay["reference"]["sha256"], reference["sha256"]);
+
+        let garbage = media.join("inbox").join("broken.webp");
+        std::fs::write(&garbage, b"not-an-image").unwrap();
+        let broken = image_ingest_request("broken.webp", hex_sha256(b"not-an-image"));
+        assert_eq!(
+            agent_image_ingest(&media, &local_media, &broken)
+                .unwrap_err()
+                .code,
+            "INVALID_REQUEST"
+        );
+    }
+
+    #[test]
+    fn image_ingest_rejects_paths_extensions_symlinks_and_digest_mismatches() {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("agent-media");
+        std::fs::create_dir_all(media.join("inbox")).unwrap();
+        let local_media = LocalMediaManager::offline_for_tests(root.path()).unwrap();
+        std::fs::write(media.join("inbox").join("frame.png"), b"fixture").unwrap();
+
+        let traversal = image_ingest_request("../frame.png", hex_sha256(b"fixture"));
+        assert_eq!(
+            agent_image_ingest(&media, &local_media, &traversal)
+                .unwrap_err()
+                .code,
+            "INVALID_REQUEST"
+        );
+
+        let wrong_extension = image_ingest_request("frame.mp4", hex_sha256(b"fixture"));
+        assert_eq!(
+            agent_image_ingest(&media, &local_media, &wrong_extension)
+                .unwrap_err()
+                .code,
+            "INVALID_REQUEST"
+        );
+
+        let mismatch = image_ingest_request("frame.png", "a".repeat(64));
+        assert_eq!(
+            agent_image_ingest(&media, &local_media, &mismatch)
+                .unwrap_err()
+                .code,
+            "MEDIA_DIGEST_MISMATCH"
+        );
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                media.join("inbox").join("frame.png"),
+                media.join("inbox").join("link.png"),
+            )
+            .unwrap();
+            let symlink = image_ingest_request("link.png", hex_sha256(b"fixture"));
+            assert_eq!(
+                agent_image_ingest(&media, &local_media, &symlink)
                     .unwrap_err()
                     .code,
                 "CAPABILITY_DENIED"
