@@ -17,5 +17,7 @@ pub use canvas::{
 pub use cli::{run_cli, Cli, ExitCode};
 pub use client::BridgeClient;
 pub use error::{BridgeError, ErrorBody, ErrorEnvelope};
-pub use runtime::{AgentRuntime, ImageIngestRequest, TestClipRequest, VideoIngestRequest};
+pub use runtime::{
+    AgentRuntime, ImageIngestRequest, TestClipRequest, VideoGenerationRequest, VideoIngestRequest,
+};
 pub use server::{BridgeServer, BRIDGE_PORT};

@@ -134,6 +134,7 @@ struct RegisteredAsset {
 }
 
 pub(crate) struct LocalMediaManager {
+    app_data_directory: PathBuf,
     roots_path: PathBuf,
     managed_root: PathBuf,
     roots: Mutex<RootRegistry>,
@@ -162,6 +163,7 @@ impl LocalMediaManager {
         );
         save_root_registry(&roots_path, &roots)?;
         let manager = Arc::new(Self {
+            app_data_directory: app_data_directory.to_path_buf(),
             roots_path,
             managed_root,
             roots: Mutex::new(roots),
@@ -781,6 +783,7 @@ impl LocalMediaManager {
         );
         save_root_registry(&roots_path, &roots)?;
         Ok(Arc::new(Self {
+            app_data_directory: app_data_directory.to_path_buf(),
             roots_path,
             managed_root,
             roots: Mutex::new(roots),
@@ -791,6 +794,24 @@ impl LocalMediaManager {
             evidence: Mutex::new(Vec::new()),
             shutdown: Mutex::new(None),
         }))
+    }
+
+    pub(crate) fn app_data_directory(&self) -> &Path {
+        &self.app_data_directory
+    }
+
+    pub(crate) fn read_verified_media(
+        &self,
+        reference: &LocalMediaReference,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, String> {
+        if reference.bytes > max_bytes {
+            return Err("the referenced media crossed the fixed read boundary".to_owned());
+        }
+        let path = self
+            .resolve_and_verify(reference)
+            .map_err(|error| format!("the referenced media is unavailable: {error:?}"))?;
+        std::fs::read(path).map_err(|error| format!("cannot read the referenced media: {error}"))
     }
 
     fn playback_url(&self, asset_id: &str) -> String {
@@ -1729,6 +1750,7 @@ mod tests {
         };
         save_root_registry(&roots_path, &roots).unwrap();
         Arc::new(LocalMediaManager {
+            app_data_directory: root.path().to_path_buf(),
             roots_path,
             managed_root: managed,
             roots: Mutex::new(roots),

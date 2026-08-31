@@ -273,6 +273,40 @@ describe("人与 Agent 共用画布操作协议", () => {
         expect(stored.operationState.revision).toBe(0);
     });
 
+    test("图片本机引用水合的空时长不会制造 revision", () => {
+        const localMedia = {
+            assetId: "asset-abcdef0123456789abcdef0123456789",
+            storageKey: "local-ref:asset-abcdef0123456789abcdef0123456789",
+            rootId: "agent-media",
+            relativePath: "verified/keyframe.png",
+            sha256: "b".repeat(64),
+            mimeType: "image/png",
+            bytes: 2048,
+            fileName: "keyframe.png",
+            width: 2048,
+            height: 1152,
+            durationMs: null as never,
+            mode: "project_copy" as const,
+        };
+        const stored = project([{
+            ...node("local-image"),
+            type: CanvasNodeType.Image,
+            metadata: { content: localMedia.storageKey, storageKey: localMedia.storageKey, localMedia },
+        }]);
+        const hydrated = [{
+            ...stored.nodes[0],
+            metadata: {
+                ...stored.nodes[0].metadata,
+                content: "http://127.0.0.1:3213/v1/media/asset?token=ephemeral",
+                durationMs: null as never,
+                localMediaRuntime: { status: "available" as const, playbackUrl: "http://127.0.0.1:3213/v1/media/asset?token=ephemeral" },
+            },
+        }];
+
+        expect(buildCanvasStructureOperations(stored, hydrated, [])).toEqual([]);
+        expect(stored.operationState.revision).toBe(0);
+    });
+
     test("Agent 操作拒绝绝对路径和目录穿越引用", () => {
         const invalid = {
             ...node("invalid-media"),
@@ -366,5 +400,52 @@ describe("人与 Agent 共用画布操作协议", () => {
         expect(reloaded.connections).toEqual(edited.project.connections);
         expect(reloaded.operationState).toEqual(edited.project.operationState);
         expect(reloaded.nodes[0].title).toBe("旧工程可编辑");
+    });
+
+    test("Agent 付费任务必须以待批准提交，人工批准后才能进入执行", () => {
+        const initial = project([node("gen-node")]);
+        const paidTask = { id: "paid-1", nodeId: "gen-node", kind: "paid_video_generation", details: { paid: true, estimatedCostYuan: 0.54 } };
+
+        const sneak = applyCanvasOperationBatch(initial, batch("agent", "paid-sneak", 0, [{ type: "task.start", task: { ...paidTask, status: "queued" } }]), { now: () => TIME });
+        expect(sneak.result.ok).toBe(false);
+        expect(sneak.result.error?.code).toBe("paid_task_requires_approval");
+
+        const started = applyCanvasOperationBatch(initial, batch("agent", "paid-start", 0, [{ type: "task.start", task: { ...paidTask, status: "pending_approval" } }]), { now: () => TIME });
+        expect(started.result.ok).toBe(true);
+        expect(started.project.operationState.tasks["paid-1"].status).toBe("pending_approval");
+
+        const agentApprove = applyCanvasOperationBatch(started.project, batch("agent", "agent-approve", 1, [{ type: "task.approve", taskId: "paid-1" }]), { now: () => TIME });
+        expect(agentApprove.result.error?.code).toBe("task_approve_forbidden");
+        const systemApprove = applyCanvasOperationBatch(started.project, batch("system", "system-approve", 1, [{ type: "task.approve", taskId: "paid-1" }]), { now: () => TIME });
+        expect(systemApprove.result.error?.code).toBe("task_approve_forbidden");
+
+        const approved = applyCanvasOperationBatch(started.project, batch("human", "human-approve", 1, [{ type: "task.approve", taskId: "paid-1" }]), { now: () => TIME });
+        expect(approved.result.ok).toBe(true);
+        expect(approved.project.operationState.tasks["paid-1"].status).toBe("queued");
+        expect(approved.project.operationState.tasks["paid-1"].details?.approvedByRequestId).toBe("human-approve");
+
+        const running = applyCanvasOperationBatch(approved.project, batch("system", "system-run", 2, [{ type: "task.update", taskId: "paid-1", status: "running" }]), { now: () => TIME });
+        const succeeded = applyCanvasOperationBatch(running.project, batch("system", "system-done", 3, [{ type: "task.update", taskId: "paid-1", status: "succeeded", details: { actualCostYuan: 0.54 } }]), { now: () => TIME });
+        expect(succeeded.result.ok).toBe(true);
+        expect(succeeded.project.operationState.tasks["paid-1"].status).toBe("succeeded");
+
+        const reApprove = applyCanvasOperationBatch(succeeded.project, batch("human", "human-reapprove", 4, [{ type: "task.approve", taskId: "paid-1" }]), { now: () => TIME });
+        expect(reApprove.result.error?.code).toBe("invalid_batch");
+    });
+
+    test("拒绝待批准任务直接进入 cancelled，不经过 cancel_requested", () => {
+        const initial = project([node("gen-node")]);
+        const started = applyCanvasOperationBatch(
+            initial,
+            batch("agent", "paid-start", 0, [{ type: "task.start", task: { id: "paid-2", nodeId: "gen-node", kind: "paid_video_generation", status: "pending_approval", details: { paid: true } } }]),
+            { now: () => TIME },
+        );
+        const rejected = applyCanvasOperationBatch(started.project, batch("human", "human-reject", 1, [{ type: "task.cancel", taskId: "paid-2", reason: "成本不值" }]), { now: () => TIME });
+        expect(rejected.result.ok).toBe(true);
+        expect(rejected.project.operationState.tasks["paid-2"].status).toBe("cancelled");
+        expect(rejected.project.operationState.tasks["paid-2"].details?.cancelReason).toBe("成本不值");
+
+        const approveCancelled = applyCanvasOperationBatch(rejected.project, batch("human", "human-late-approve", 2, [{ type: "task.approve", taskId: "paid-2" }]), { now: () => TIME });
+        expect(approveCancelled.result.error?.code).toBe("invalid_batch");
     });
 });

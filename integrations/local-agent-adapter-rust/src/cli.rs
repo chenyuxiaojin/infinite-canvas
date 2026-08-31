@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::{
     read_credential_token, AgentOperationRequest, BridgeClient, BridgeError, ImageIngestRequest,
-    ProjectCreateRequest, TestClipRequest, VideoIngestRequest,
+    ProjectCreateRequest, TestClipRequest, VideoGenerationRequest, VideoIngestRequest,
 };
 
 #[derive(Debug, Parser)]
@@ -34,9 +34,32 @@ pub enum Command {
     Projects(ProjectsArgs),
     Canvas(CanvasArgs),
     Media(MediaArgs),
+    Generation(GenerationArgs),
     Tasks(TasksArgs),
     Runtime,
     Credentials(CredentialsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct GenerationArgs {
+    #[command(subcommand)]
+    pub command: GenerationCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GenerationCommand {
+    Video(GenerationVideoArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct GenerationVideoArgs {
+    #[command(subcommand)]
+    pub command: GenerationVideoCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GenerationVideoCommand {
+    Request(InputFile),
 }
 
 #[derive(Debug, Args)]
@@ -211,6 +234,14 @@ fn execute(cli: Cli) -> Result<Value, BridgeError> {
                 MediaImageCommand::Ingest(input) => {
                     let request = read_json::<ImageIngestRequest>(&input.file)?;
                     client.post("/v1/media/image-ingests", &request)
+                }
+            },
+        },
+        Command::Generation(args) => match args.command {
+            GenerationCommand::Video(args) => match args.command {
+                GenerationVideoCommand::Request(input) => {
+                    let request = read_json::<VideoGenerationRequest>(&input.file)?;
+                    client.post("/v1/generation/video-requests", &request)
                 }
             },
         },

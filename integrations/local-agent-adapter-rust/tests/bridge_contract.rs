@@ -12,6 +12,7 @@ use local_agent_adapter::{
     BridgeServer, CanonicalCanvasAdapter, CanvasOperation, CanvasOperationAdapter,
     CanvasProtocolExecutor, CanvasSize, CredentialDocument, CredentialStore, ImageIngestRequest,
     MediaReferencePayload, Point, ProjectCreateRequest, ProtocolOutcome, TestClipRequest,
+    VideoGenerationRequest,
     VideoIngestRequest,
 };
 use rusqlite::Connection;
@@ -186,6 +187,21 @@ impl AgentRuntime for MockRuntime {
             ));
         }
         Ok(())
+    }
+
+    fn quote_video_generation(
+        &self,
+        resolution: &str,
+        duration_seconds: u64,
+    ) -> Result<Value, BridgeError> {
+        let unit = if resolution == "2K" { 0.36 } else { 0.09 };
+        Ok(json!({
+            "configured": true,
+            "model": "MiniMax-H3",
+            "estimated_cost_yuan": unit * duration_seconds as f64,
+            "unit_price_yuan_per_second": unit,
+            "currency": "CNY"
+        }))
     }
 
     fn submit_test_clip(&self, request: &TestClipRequest) -> Result<Value, BridgeError> {
@@ -727,6 +743,109 @@ fn allowlisted_image_ingest_creates_one_final_image_node_without_playback_urls()
         0,
         "synchronous image ingest must not leave a task behind"
     );
+}
+
+#[test]
+fn paid_video_generation_only_creates_a_pending_approval_task_and_placeholder() {
+    let fixture = Fixture::new();
+    let ingest = ImageIngestRequest {
+        project_id: "project-1".to_owned(),
+        node_id: "keyframe-1".to_owned(),
+        request_id: "keyframe-ingest-1".to_owned(),
+        base_revision: 0,
+        actor: Actor::Agent,
+        inbox_file_name: "frame-001.png".to_owned(),
+        expected_sha256: "e".repeat(64),
+        title: "Frame 001".to_owned(),
+        position: Point { x: 0.0, y: 0.0 },
+        size: CanvasSize {
+            width: 320.0,
+            height: 180.0,
+        },
+    };
+    fixture
+        .client()
+        .post("/v1/media/image-ingests", &ingest)
+        .unwrap();
+
+    let request = VideoGenerationRequest {
+        project_id: "project-1".to_owned(),
+        node_id: "gen-1".to_owned(),
+        request_id: "paid-request-1".to_owned(),
+        base_revision: 1,
+        actor: Actor::Agent,
+        title: "S01 生成".to_owned(),
+        prompt: "镜头缓推，全景剪影，写实光线".to_owned(),
+        image_node_id: "keyframe-1".to_owned(),
+        resolution: "768P".to_owned(),
+        duration_seconds: 6,
+        position: Point { x: 400.0, y: 0.0 },
+        size: CanvasSize {
+            width: 420.0,
+            height: 236.0,
+        },
+    };
+    let first = fixture
+        .client()
+        .post("/v1/generation/video-requests", &request)
+        .unwrap();
+    assert_eq!(first["data"]["status"], "pending_approval");
+    assert_eq!(first["data"]["paid"], true);
+    assert_eq!(first["data"]["approval_required"], true);
+    assert_eq!(first["data"]["duplicate"], false);
+    assert_eq!(first["data"]["canvas_task_id"], "paid-gen-paid-request-1");
+    assert_eq!(first["data"]["canvas_revision"], 2);
+    let cost = first["data"]["estimated_cost_yuan"].as_f64().unwrap();
+    assert!((cost - 0.54).abs() < 1e-9);
+
+    let duplicate = fixture
+        .client()
+        .post("/v1/generation/video-requests", &request)
+        .unwrap();
+    assert_eq!(duplicate["data"]["duplicate"], true);
+    assert_eq!(duplicate["data"]["canvas_revision"], 2);
+
+    let project = fixture.canvas.get_project("project-1").unwrap();
+    assert_eq!(project.revision, 2);
+    assert_eq!(project.project["nodes"].as_array().unwrap().len(), 2);
+    let generated = project.project["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "gen-1")
+        .unwrap();
+    assert_eq!(generated["type"], "video");
+    assert_eq!(generated["metadata"]["status"], "pending_approval");
+    assert_eq!(generated["metadata"]["imageNodeId"], "keyframe-1");
+    let task = &project.project["operationState"]["tasks"]["paid-gen-paid-request-1"];
+    assert_eq!(task["status"], "pending_approval");
+    assert_eq!(task["kind"], "paid_video_generation");
+    assert_eq!(task["details"]["paid"], true);
+    assert_eq!(task["details"]["prompt"], "镜头缓推，全景剪影，写实光线");
+    assert_eq!(task["details"]["resolution"], "768P");
+    assert_eq!(task["details"]["durationSeconds"], 6);
+
+    let mut missing_keyframe = request.clone();
+    missing_keyframe.request_id = "paid-request-2".to_owned();
+    missing_keyframe.node_id = "gen-2".to_owned();
+    missing_keyframe.image_node_id = "no-such-node".to_owned();
+    missing_keyframe.base_revision = 2;
+    let not_found = fixture
+        .client()
+        .post("/v1/generation/video-requests", &missing_keyframe)
+        .unwrap_err();
+    assert_eq!(not_found.code, "NOT_FOUND");
+
+    let mut bad_resolution = request.clone();
+    bad_resolution.request_id = "paid-request-3".to_owned();
+    bad_resolution.node_id = "gen-3".to_owned();
+    bad_resolution.resolution = "4K".to_owned();
+    bad_resolution.base_revision = 2;
+    let invalid = fixture
+        .client()
+        .post("/v1/generation/video-requests", &bad_resolution)
+        .unwrap_err();
+    assert_eq!(invalid.code, "INVALID_REQUEST");
 }
 
 #[test]

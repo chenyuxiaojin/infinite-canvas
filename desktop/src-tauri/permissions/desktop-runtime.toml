@@ -13,6 +13,8 @@ commands.allow = [
   "relink_local_media_reference",
   "local_media_request_evidence",
   "import_canvas_archive",
+  "approve_paid_generation",
+  "reject_paid_generation",
   "desktop_canvas_projects",
   "save_desktop_canvas_project",
   "delete_desktop_canvas_projects",

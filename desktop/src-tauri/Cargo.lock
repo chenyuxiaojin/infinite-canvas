@@ -1716,6 +1716,7 @@ name = "infinite-canvas-desktop"
 version = "0.5.5"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "bytes",
  "getrandom 0.3.4",
  "http-body-util",
@@ -1731,9 +1732,11 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
  "tempfile",
+ "time",
  "tokio",
  "tokio-util",
  "tower",
+ "ureq",
  "zip",
 ]
 

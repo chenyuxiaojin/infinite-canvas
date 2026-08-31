@@ -20,7 +20,7 @@ export enum CanvasNodeType {
     Group = "group",
 }
 
-export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
+export type CanvasNodeStatus = "idle" | "success" | "loading" | "error" | "pending_approval";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
 
@@ -105,6 +105,9 @@ export type CanvasNodeMetadata = {
     storageKey?: string;
     localMedia?: LocalMediaReference;
     localMediaRuntime?: LocalMediaRuntimeState;
+    estimatedCostYuan?: number;
+    imageNodeId?: string;
+    paidModel?: string;
     mimeType?: string;
     bytes?: number;
     durationMs?: number;
