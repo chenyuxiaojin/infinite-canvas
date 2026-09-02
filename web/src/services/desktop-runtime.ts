@@ -77,6 +77,14 @@ export type LocalMediaResolution = {
     reason?: "missing" | "digest_mismatch" | "denied" | "unavailable";
 };
 
+export type LocalMediaImportOutcome = {
+    resolution: LocalMediaResolution;
+    /** referenced = 原地引用；moved = 临时文件已移进素材目录；copied = 复制了一份 */
+    action: "referenced" | "moved" | "copied";
+    destination: "in_place" | "project_directory" | "managed_root";
+    temporarySource: boolean;
+};
+
 export type LocalMediaRequestEvidence = {
     assetId: string;
     method: "GET" | "HEAD";
@@ -116,12 +124,25 @@ export function fetchDesktopTaskMediaReference(taskId: string) {
     return invoke<LocalMediaResolution>("desktop_task_media_reference", { taskId });
 }
 
-export function selectLocalMedia(mode: LocalMediaReference["mode"]) {
-    return invoke<LocalMediaResolution[]>("select_local_media", { mode });
+export function selectLocalMedia(mode: LocalMediaReference["mode"], projectId?: string) {
+    return invoke<LocalMediaImportOutcome[]>("select_local_media", { mode, projectId });
 }
 
-export function resolveLocalMediaReference(reference: LocalMediaReference) {
-    return invoke<LocalMediaResolution>("resolve_local_media_reference", { reference });
+/** 原生拖放拿到的是真实路径：交给桌面端按同一套收编策略登记（不经过浏览器上传） */
+export function importLocalMediaPaths(projectId: string | undefined, paths: string[], mode: LocalMediaReference["mode"]) {
+    return invoke<LocalMediaImportOutcome[]>("import_local_media_paths", { projectId, paths, mode });
+}
+
+export function getProjectMediaDirectory(projectId: string) {
+    return invoke<string | null>("project_media_directory", { projectId });
+}
+
+export function selectProjectMediaDirectory(projectId: string) {
+    return invoke<string | null>("select_project_media_directory", { projectId });
+}
+
+export function resolveLocalMediaReference(reference: LocalMediaReference, projectId?: string) {
+    return invoke<LocalMediaResolution>("resolve_local_media_reference", { reference, projectId });
 }
 
 export function relinkLocalMediaReference(reference: LocalMediaReference) {

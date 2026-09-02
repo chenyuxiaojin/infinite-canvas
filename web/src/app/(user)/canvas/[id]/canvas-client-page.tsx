@@ -48,10 +48,14 @@ import {
     generateCanvasTestClip,
     getLocalMediaRequestEvidence,
     isDesktopRuntime,
+    getProjectMediaDirectory,
+    importLocalMediaPaths,
     relinkLocalMediaReference,
     resolveLocalMediaReference,
     selectLocalMedia,
+    selectProjectMediaDirectory,
     type DesktopTaskSnapshot,
+    type LocalMediaImportOutcome,
     type LocalMediaRequestEvidence,
     type LocalMediaResolution,
 } from "@/services/desktop-runtime";
@@ -181,6 +185,8 @@ const CONNECTION_NODE_HIT_PADDING = 32;
 const NODE_STATUS_LOADING = "loading" as const;
 // 稳定空数组：避免每次渲染用 `|| []` 生成新身份打穿 CanvasNode 的 React.memo
 const EMPTY_MENTION_REFERENCES: never[] = [];
+// 原生拖放只接受桌面端受控引用支持的媒体类型，其余文件静默忽略
+const LOCAL_MEDIA_DROP_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm", "mp3", "wav", "m4a", "png", "jpg", "jpeg", "webp", "gif"]);
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
 const AGENT_PRIMARY_SCRIPT_NODE_SIZE = { width: 550, height: 600 };
@@ -476,6 +482,10 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
     const [assetPickerTab, setAssetPickerTab] = useState<AssetPickerTab>("my-assets");
     const [localMediaImportOpen, setLocalMediaImportOpen] = useState(false);
+    const [projectMediaDirectory, setProjectMediaDirectory] = useState<string | null>(null);
+    // 原生拖放监听在早期 effect 里注册，处理函数在后面才定义：用 ref 桥接最新实现
+    const handleDroppedPathsRef = useRef<(paths: string[], client: { x: number; y: number }) => void>(() => {});
+    const persistRelocatedLocalMediaRef = useRef<(before: CanvasNodeData[], after: CanvasNodeData[]) => void>(() => {});
     const [pendingPanoramaImport, setPendingPanoramaImport] = useState<PendingPanoramaImport | null>(null);
     const [projectLoaded, setProjectLoaded] = useState(false);
     const [toolbarNodeId, setToolbarNodeId] = useState<string | null>(null);
@@ -686,7 +696,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         }
 
         const restore = async () => {
-            const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes));
+            const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes), projectId);
             const restoredSessions = syncAssistantReferences(project.chatSessions || [], restoredNodes, true);
             const restoredStatus = canvasCollaborationAdapter.normalizeStatus(undefined, project.operationState);
             setNodes(restoredNodes);
@@ -718,6 +728,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             setHistoryState({ canUndo: false, canRedo: false });
             loadedProjectVersionRef.current = `${project.operationState.revision}:${project.updatedAt}`;
             setProjectLoaded(true);
+            persistRelocatedLocalMediaRef.current(project.nodes, restoredNodes);
         };
         void restore();
     }, [hydrated, openProject, projectId, router]);
@@ -746,12 +757,13 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         loadedProjectVersionRef.current = version;
         applyingProjectVersionRef.current = version;
         let active = true;
-        void hydrateCanvasImages(currentProject.nodes).then((restoredNodes) => {
+        void hydrateCanvasImages(currentProject.nodes, projectId).then((restoredNodes) => {
             if (!active || loadedProjectVersionRef.current !== version) return;
             nodesRef.current = restoredNodes;
             connectionsRef.current = currentProject.connections;
             setNodes(restoredNodes);
             setConnections(currentProject.connections);
+            persistRelocatedLocalMediaRef.current(currentProject.nodes, restoredNodes);
         }).catch((error) => {
             if (!active || loadedProjectVersionRef.current !== version) return;
             console.error("Failed to hydrate the refreshed desktop canvas", error);
@@ -3113,57 +3125,66 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         else imageInputRef.current?.click();
     }, [desktopRuntime]);
 
+    // 把桌面端登记好的素材落成节点：文件选择器和原生拖放共用这一段
+    const applyLocalMediaOutcomes = useCallback(
+        async (outcomes: LocalMediaImportOutcome[], target: { nodeId?: string; position?: Position } | null) => {
+            if (!outcomes.length) return;
+            const candidates = outcomes.map((outcome) => outcome.resolution);
+            const targetNode = target?.nodeId ? nodesRef.current.find((node) => node.id === target.nodeId) : undefined;
+            if (targetNode && candidates.length > 1) message.info("替换节点时仅使用所选的第一个文件");
+            const resolutions = targetNode ? candidates.slice(0, 1) : candidates;
+            if (targetNode && isPanoramaNodeType(targetNode.type) && !resolutions[0]?.reference.mimeType.startsWith("image/")) {
+                message.warning("全景图节点仅支持图片参考");
+                return;
+            }
+
+            if (targetNode) {
+                const resolution = resolutions[0];
+                const reference = resolution.reference;
+                const mediaType = localMediaNodeType(reference.mimeType);
+                const metadata = localMediaMetadata(resolution);
+                const targetSize = localMediaNodeSize(reference, mediaType, targetNode);
+                commitHumanNodeMutation([targetNode.id], (current) =>
+                    current.map((node) =>
+                        node.id === targetNode.id
+                            ? {
+                                  ...node,
+                                  type: isPanoramaNodeType(node.type) ? CanvasNodeType.Panorama : mediaType,
+                                  title: isPanoramaNodeType(node.type) ? node.title : reference.fileName,
+                                  position: { x: node.position.x + node.width / 2 - targetSize.width / 2, y: node.position.y + node.height / 2 - targetSize.height / 2 },
+                                  width: targetSize.width,
+                                  height: targetSize.height,
+                                  metadata: { ...node.metadata, ...metadata, errorDetails: undefined },
+                              }
+                            : node,
+                    ),
+                );
+                setSelectedNodeIds(new Set([targetNode.id]));
+                setSelectedConnectionId(null);
+            } else {
+                const center = target?.position || screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+                const imported = resolutions.map((resolution, index) => buildLocalMediaNode(resolution, { x: center.x + index * 36, y: center.y + index * 36 }));
+                commitHumanNodeMutation(imported.map((node) => node.id), (current) => [...current, ...imported]);
+                setSelectedNodeIds(new Set(imported.map((node) => node.id)));
+                setSelectedConnectionId(null);
+            }
+
+            const hydrated = await hydrateCanvasImages(nodesRef.current, projectId);
+            nodesRef.current = hydrated;
+            setNodes(hydrated);
+            message.success(summarizeLocalMediaOutcomes(outcomes));
+        },
+        [commitHumanNodeMutation, message, projectId, screenToCanvas, size.height, size.width],
+    );
+
     const handleLocalMediaSelection = useCallback(
         async (mode: LocalMediaReference["mode"]) => {
             setLocalMediaImportOpen(false);
             const target = uploadTargetRef.current;
             const hideLoading = message.loading(mode === "reference" ? "正在建立本机引用…" : "正在复制进项目…", 0);
             try {
-                const selected = await selectLocalMedia(mode);
-                if (!selected.length) return;
-                const targetNode = target?.nodeId ? nodesRef.current.find((node) => node.id === target.nodeId) : undefined;
-                if (targetNode && selected.length > 1) message.info("替换节点时仅使用所选的第一个文件");
-                const resolutions = targetNode ? selected.slice(0, 1) : selected;
-                if (targetNode && isPanoramaNodeType(targetNode.type) && !resolutions[0]?.reference.mimeType.startsWith("image/")) {
-                    message.warning("全景图节点仅支持图片参考");
-                    return;
-                }
-
-                if (targetNode) {
-                    const resolution = resolutions[0];
-                    const reference = resolution.reference;
-                    const mediaType = localMediaNodeType(reference.mimeType);
-                    const metadata = localMediaMetadata(resolution);
-                    const targetSize = localMediaNodeSize(reference, mediaType, targetNode);
-                    commitHumanNodeMutation([targetNode.id], (current) =>
-                        current.map((node) =>
-                            node.id === targetNode.id
-                                ? {
-                                      ...node,
-                                      type: isPanoramaNodeType(node.type) ? CanvasNodeType.Panorama : mediaType,
-                                      title: isPanoramaNodeType(node.type) ? node.title : reference.fileName,
-                                      position: { x: node.position.x + node.width / 2 - targetSize.width / 2, y: node.position.y + node.height / 2 - targetSize.height / 2 },
-                                      width: targetSize.width,
-                                      height: targetSize.height,
-                                      metadata: { ...node.metadata, ...metadata, errorDetails: undefined },
-                                  }
-                                : node,
-                        ),
-                    );
-                    setSelectedNodeIds(new Set([targetNode.id]));
-                    setSelectedConnectionId(null);
-                } else {
-                    const center = target?.position || screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
-                    const imported = resolutions.map((resolution, index) => buildLocalMediaNode(resolution, { x: center.x + index * 36, y: center.y + index * 36 }));
-                    commitHumanNodeMutation(imported.map((node) => node.id), (current) => [...current, ...imported]);
-                    setSelectedNodeIds(new Set(imported.map((node) => node.id)));
-                    setSelectedConnectionId(null);
-                }
-
-                const hydrated = await hydrateCanvasImages(nodesRef.current);
-                nodesRef.current = hydrated;
-                setNodes(hydrated);
-                message.success(mode === "reference" ? `已引用 ${resolutions.length} 个本机素材，未上传云端` : `已复制 ${resolutions.length} 个素材进项目，未上传云端`);
+                const outcomes = await selectLocalMedia(mode, projectId);
+                await applyLocalMediaOutcomes(outcomes, target);
             } catch (error) {
                 console.error("Add local media failed:", error);
                 message.error(error instanceof Error ? error.message : "本机素材添加失败");
@@ -3172,8 +3193,114 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                 uploadTargetRef.current = null;
             }
         },
-        [commitHumanNodeMutation, message, screenToCanvas, size.height, size.width],
+        [applyLocalMediaOutcomes, message, projectId],
     );
+
+    // Finder / 截图缩略图拖进窗口：Tauri 给真实路径，落点换算成画布坐标，收编策略在桌面端
+    const handleDroppedPaths = useCallback(
+        async (paths: string[], client: { x: number; y: number }) => {
+            const accepted = paths.filter((path) => LOCAL_MEDIA_DROP_EXTENSIONS.has((path.split(".").pop() || "").toLowerCase()));
+            if (!accepted.length) {
+                message.info("只支持拖入图片、视频或音频文件");
+                return;
+            }
+            const rect = containerRef.current?.getBoundingClientRect();
+            const inside = rect ? client.x >= rect.left && client.x <= rect.right && client.y >= rect.top && client.y <= rect.bottom : false;
+            const position = inside ? screenToCanvas(client.x, client.y) : screenToCanvas((rect?.left || 0) + size.width / 2, (rect?.top || 0) + size.height / 2);
+            const hideLoading = message.loading("正在接收拖入的本机素材…", 0);
+            try {
+                const outcomes = await importLocalMediaPaths(projectId, accepted, "reference");
+                await applyLocalMediaOutcomes(outcomes, { position });
+            } catch (error) {
+                console.error("Drop local media failed:", error);
+                message.error(error instanceof Error ? error.message : "拖入的素材未能添加");
+            } finally {
+                hideLoading();
+            }
+        },
+        [applyLocalMediaOutcomes, message, projectId, screenToCanvas, size.height, size.width],
+    );
+
+    useEffect(() => {
+        handleDroppedPathsRef.current = (paths, client) => void handleDroppedPaths(paths, client);
+    }, [handleDroppedPaths]);
+
+    useEffect(() => {
+        if (!desktopRuntime) return;
+        let disposed = false;
+        let unlisten: (() => void) | undefined;
+        void import("@tauri-apps/api/webview")
+            .then(({ getCurrentWebview }) =>
+                getCurrentWebview().onDragDropEvent((event) => {
+                    if (event.payload.type !== "drop") return;
+                    // 事件位置是物理像素，换算成 CSS 像素后才能和 getBoundingClientRect 对齐
+                    const scale = window.devicePixelRatio || 1;
+                    handleDroppedPathsRef.current(event.payload.paths, { x: event.payload.position.x / scale, y: event.payload.position.y / scale });
+                }),
+            )
+            .then((stop) => {
+                if (disposed) stop();
+                else unlisten = stop;
+            })
+            .catch((error) => console.error("Failed to listen for native file drops", error));
+        return () => {
+            disposed = true;
+            unlisten?.();
+        };
+    }, [desktopRuntime]);
+
+    useEffect(() => {
+        if (!desktopRuntime) return;
+        let active = true;
+        getProjectMediaDirectory(projectId)
+            .then((directory) => {
+                if (active) setProjectMediaDirectory(directory);
+            })
+            .catch(() => {});
+        return () => {
+            active = false;
+        };
+    }, [desktopRuntime, localMediaImportOpen, projectId]);
+
+    const chooseProjectMediaDirectory = useCallback(async () => {
+        try {
+            const directory = await selectProjectMediaDirectory(projectId);
+            if (!directory) return;
+            setProjectMediaDirectory(directory);
+            message.success("已设置画布素材目录，临时文件会收进它的「画布素材」子目录");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "画布素材目录设置失败");
+        }
+    }, [message, projectId]);
+
+    // 加载时被自动找回（挪动/改名）的引用要写回工程，否则每次打开都要重新扫描
+    const persistRelocatedLocalMedia = useCallback(
+        (before: CanvasNodeData[], after: CanvasNodeData[]) => {
+            const beforeById = new Map(before.map((node) => [node.id, node]));
+            const relocated = after.filter((node) => {
+                const previous = beforeById.get(node.id)?.metadata?.localMedia;
+                const next = node.metadata?.localMedia;
+                return Boolean(previous && next && previous.assetId !== next.assetId && node.metadata?.localMediaRuntime?.status === "available");
+            });
+            if (!relocated.length) return;
+            const relocatedById = new Map(relocated.map((node) => [node.id, node]));
+            nodesRef.current = after;
+            commitHumanNodeMutation(relocatedById.keys(), (current) =>
+                current.map((node) => {
+                    const next = relocatedById.get(node.id);
+                    if (!next?.metadata?.localMedia) return node;
+                    const previousName = beforeById.get(node.id)?.metadata?.localMedia?.fileName;
+                    return { ...node, title: node.title === previousName ? next.metadata.localMedia.fileName : node.title, metadata: { ...node.metadata, ...next.metadata, errorDetails: undefined } };
+                }),
+            );
+            message.info(`已按内容找回 ${relocated.length} 个被移动或改名的本机素材`);
+        },
+        [commitHumanNodeMutation, message],
+    );
+
+    useEffect(() => {
+        persistRelocatedLocalMediaRef.current = persistRelocatedLocalMedia;
+    }, [persistRelocatedLocalMedia]);
 
     const handleRelinkLocalMedia = useCallback(
         async (node: CanvasNodeData) => {
@@ -3189,7 +3316,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                             : item,
                     ),
                 );
-                const hydrated = await hydrateCanvasImages(nodesRef.current);
+                const hydrated = await hydrateCanvasImages(nodesRef.current, projectId);
                 nodesRef.current = hydrated;
                 setNodes(hydrated);
                 message.success("素材已重新定位，内容摘要校验通过");
@@ -3377,10 +3504,9 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             }
             const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/") || item.type.startsWith("video/") || isAudioFile(item));
             if (!file) return;
-            if (desktopRuntime) {
-                message.info("桌面版请使用“添加本机素材”，以便建立受控引用，避免把整个文件复制进画布内存。");
-                return;
-            }
+            // 桌面版的文件拖放由 Tauri 原生拖放事件接管（onDragDropEvent 监听拿到真实路径，走受控引用），
+            // 浏览器层的 drop 不再处理文件，避免把整个文件复制进画布内存
+            if (desktopRuntime) return;
             const pos = screenToCanvas(event.clientX, event.clientY);
             void (isAudioFile(file) ? createAudioFileNode(file, pos) : file.type.startsWith("video/") ? createVideoFileNode(file, pos) : createImageFileNode(file, pos, true));
         },
@@ -5392,7 +5518,17 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     <div className="space-y-4 py-2 text-sm leading-6">
                         <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-blue-950 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-100">
                             <div className="font-medium">引用本机素材</div>
-                            <div className="opacity-75">只保存受控引用与内容摘要，播放时按需读取文件片段；不复制进浏览器，也不上传云端。</div>
+                            <div className="opacity-75">只保存受控引用与内容摘要，播放时按需读取文件片段；不复制进浏览器，也不上传云端。也可以直接把文件拖进画布。</div>
+                            <div className="opacity-75">截图、微信 / 下载 / 临时目录里的文件不做原地引用，会自动移进画布素材目录；项目目录里的文件挪动或改名后按内容自动找回。</div>
+                        </div>
+                        <div className="rounded-xl border p-3">
+                            <div className="flex items-center justify-between gap-3">
+                                <div className="font-medium">画布素材目录</div>
+                                <Button size="small" onClick={() => void chooseProjectMediaDirectory()}>
+                                    {projectMediaDirectory ? "更换目录" : "选择目录"}
+                                </Button>
+                            </div>
+                            <div className="break-all opacity-65">{projectMediaDirectory || "未设置：临时文件会先收进应用内素材库，建议选这张画布对应的项目目录"}</div>
                         </div>
                         <div className="rounded-xl border p-3">
                             <div className="font-medium">复制进项目</div>
@@ -6083,6 +6219,20 @@ function localMediaMetadata(resolution: LocalMediaResolution): CanvasNodeMetadat
     };
 }
 
+function summarizeLocalMediaOutcomes(outcomes: LocalMediaImportOutcome[]) {
+    const referenced = outcomes.filter((outcome) => outcome.action === "referenced").length;
+    const collected = outcomes.filter((outcome) => outcome.action === "moved" && outcome.destination === "project_directory").length;
+    const parked = outcomes.filter((outcome) => outcome.destination === "managed_root" && outcome.temporarySource).length;
+    const copied = outcomes.filter((outcome) => outcome.action === "copied" && !outcome.temporarySource).length;
+    const parts = [
+        referenced ? `已引用 ${referenced} 个本机素材` : "",
+        collected ? `${collected} 个临时文件已移进「画布素材」` : "",
+        parked ? `${parked} 个临时文件已收进应用素材库（未设置画布素材目录）` : "",
+        copied ? `已复制 ${copied} 个素材进项目` : "",
+    ].filter(Boolean);
+    return `${parts.join("；") || `已添加 ${outcomes.length} 个素材`}，未上传云端`;
+}
+
 function localMediaNodeSize(reference: LocalMediaReference, type: CanvasNodeType, existing?: CanvasNodeData) {
     if (type === CanvasNodeType.Audio) return NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
     if (type === CanvasNodeType.Video) return fitNodeSize(reference.width || 1280, reference.height || 720, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
@@ -6194,13 +6344,14 @@ async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
     return references.every(Boolean) ? (references as ReferenceImage[]) : null;
 }
 
-async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
+async function hydrateCanvasImages(nodes: CanvasNodeData[], projectId?: string) {
     return Promise.all(
         nodes.map(async (node) => {
             const content = node.metadata?.content;
             if (node.metadata?.localMedia && isDesktopRuntime()) {
                 try {
-                    const resolution = await resolveLocalMediaReference(node.metadata.localMedia);
+                    // 带上工程 id：文件被挪动/改名时桌面端会在画布素材目录里按内容摘要自动找回
+                    const resolution = await resolveLocalMediaReference(node.metadata.localMedia, projectId);
                     if (resolution.status === "available" && resolution.playbackUrl) {
                         return { ...node, metadata: { ...node.metadata, ...localMediaMetadata(resolution) } };
                     }

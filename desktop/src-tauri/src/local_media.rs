@@ -36,6 +36,25 @@ const ROOT_REGISTRY_VERSION: u8 = 1;
 const EXPORT_ENVELOPE_VERSION: u8 = 1;
 const EXPORT_ENVELOPE_MAGIC: &[u8; 4] = b"ICX5";
 const MANAGED_ROOT_ID: &str = "project-media";
+const PROJECT_MEDIA_SUBDIRECTORY: &str = "画布素材";
+const RELOCATE_MAX_DEPTH: usize = 8;
+const RELOCATE_MAX_ENTRIES: usize = 50_000;
+const MAX_IMPORT_PATHS: usize = 64;
+const TEMPORARY_SYSTEM_PREFIXES: [&str; 4] =
+    ["/private/var/folders", "/var/folders", "/private/tmp", "/tmp"];
+const TEMPORARY_HOME_SUBDIRECTORIES: [&str; 3] = ["Library", "Downloads", ".Trash"];
+const DURABLE_HOME_LIBRARY_SUBDIRECTORIES: [&str; 2] =
+    ["Library/Mobile Documents", "Library/CloudStorage"];
+const SCREENSHOT_NAME_PREFIXES: [&str; 8] = [
+    "截屏",
+    "屏幕快照",
+    "屏幕录制",
+    "screenshot",
+    "screen shot",
+    "screen recording",
+    "cleanshot",
+    "simulator screenshot",
+];
 const MAX_LOCAL_MEDIA_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 20_000;
 const MAX_ARCHIVE_UNCOMPRESSED_BYTES: u64 = 2 * 1024 * 1024 * 1024 * 1024;
@@ -74,6 +93,31 @@ pub(crate) struct LocalMediaResolution {
     pub status: &'static str,
     pub playback_url: Option<String>,
     pub reason: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LocalMediaImportAction {
+    Referenced,
+    Moved,
+    Copied,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LocalMediaImportDestination {
+    InPlace,
+    ProjectDirectory,
+    ManagedRoot,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LocalMediaImportOutcome {
+    pub resolution: LocalMediaResolution,
+    pub action: LocalMediaImportAction,
+    pub destination: LocalMediaImportDestination,
+    pub temporary_source: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -124,6 +168,8 @@ struct DesktopExportLocalFile {
 struct RootRegistry {
     version: u8,
     roots: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    project_media_dirs: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -271,17 +317,236 @@ impl LocalMediaManager {
     }
 
     pub(crate) fn resolve_reference(&self, reference: LocalMediaReference) -> LocalMediaResolution {
+        self.resolve_reference_for_project(None, reference)
+    }
+
+    /// Resolves a reference; when the file is no longer at its recorded path, looks for the
+    /// same content (size + SHA-256) inside the project media directory and the reference root,
+    /// and relinks it in place so moved or renamed files come back without a manual relink.
+    pub(crate) fn resolve_reference_for_project(
+        &self,
+        project_id: Option<&str>,
+        reference: LocalMediaReference,
+    ) -> LocalMediaResolution {
         match self.resolve_and_verify(&reference) {
             Ok(path) => match self.register_verified_reference(reference.clone(), path) {
                 Ok(result) => result,
                 Err(_) => missing_resolution(reference, "unavailable"),
             },
-            Err(LocalMediaResolveError::Missing) => missing_resolution(reference, "missing"),
+            Err(LocalMediaResolveError::Missing) => {
+                match self.relocate_missing_reference(project_id, &reference) {
+                    Some(relocated) => relocated,
+                    None => missing_resolution(reference, "missing"),
+                }
+            }
             Err(LocalMediaResolveError::DigestMismatch) => {
-                missing_resolution(reference, "digest_mismatch")
+                match self.relocate_missing_reference(project_id, &reference) {
+                    Some(relocated) => relocated,
+                    None => missing_resolution(reference, "digest_mismatch"),
+                }
             }
             Err(LocalMediaResolveError::Denied) => missing_resolution(reference, "denied"),
         }
+    }
+
+    fn relocate_missing_reference(
+        &self,
+        project_id: Option<&str>,
+        reference: &LocalMediaReference,
+    ) -> Option<LocalMediaResolution> {
+        validate_reference_shape(reference).ok()?;
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(directory) = project_id.and_then(|id| self.project_media_directory(id)) {
+            candidates.push(directory);
+        }
+        {
+            let registry = self.roots.lock().unwrap();
+            if let Some(root) = registry.roots.get(&reference.root_id) {
+                candidates.push(PathBuf::from(root));
+            }
+        }
+        let extension = Path::new(&reference.relative_path)
+            .extension()
+            .or_else(|| Path::new(&reference.file_name).extension())
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())?;
+        let mut visited = 0usize;
+        let mut searched: Vec<PathBuf> = Vec::new();
+        for directory in candidates {
+            let Ok(directory) = directory.canonicalize() else {
+                continue;
+            };
+            if !directory.is_dir() || searched.iter().any(|done| directory.starts_with(done)) {
+                continue;
+            }
+            if let Some(found) = find_file_by_digest(
+                &directory,
+                reference.bytes,
+                &reference.sha256,
+                &extension,
+                RELOCATE_MAX_DEPTH,
+                &mut visited,
+            ) {
+                let relinked = self
+                    .relinked_reference(reference.clone(), &found, &reference.sha256)
+                    .ok()?;
+                return self.register_verified_reference(relinked, found).ok();
+            }
+            searched.push(directory);
+        }
+        None
+    }
+
+    pub(crate) fn project_media_directory(&self, project_id: &str) -> Option<PathBuf> {
+        validate_project_id(project_id).ok()?;
+        let registry = self.roots.lock().unwrap();
+        registry
+            .project_media_dirs
+            .get(project_id)
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+    }
+
+    pub(crate) fn set_project_media_directory(
+        &self,
+        project_id: &str,
+        directory: &Path,
+    ) -> Result<String, String> {
+        validate_project_id(project_id)?;
+        let canonical = directory
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve the project media directory: {error}"))?;
+        if !canonical.is_dir() {
+            return Err("the project media directory must be a directory".to_owned());
+        }
+        let app_data = self
+            .app_data_directory
+            .canonicalize()
+            .unwrap_or_else(|_| self.app_data_directory.clone());
+        if canonical.starts_with(&app_data) {
+            return Err(
+                "the project media directory cannot live inside the application data directory"
+                    .to_owned(),
+            );
+        }
+        let value = path_to_private_string(&canonical)?;
+        let mut registry = self.roots.lock().unwrap();
+        registry
+            .project_media_dirs
+            .insert(project_id.to_owned(), value.clone());
+        save_root_registry(&self.roots_path, &registry)?;
+        Ok(value)
+    }
+
+    /// Imports one local file with the desktop collection policy:
+    /// - `ProjectCopy` keeps the explicit content-addressed copy inside the managed root;
+    /// - durable files (project folders, user libraries) are referenced in place;
+    /// - temporary sources (system temp, other apps' caches, Downloads, Trash, screenshots) are
+    ///   moved into `<project media directory>/画布素材/` keeping their file name, or moved into
+    ///   the managed root when the project has no media directory yet.
+    pub(crate) fn import_path(
+        &self,
+        project_id: Option<&str>,
+        path: &Path,
+        requested: LocalMediaMode,
+    ) -> Result<LocalMediaImportOutcome, String> {
+        let selected = validate_selected_file(path)?;
+        let temporary = self.is_temporary_source(&selected);
+        self.import_path_with_policy(project_id, &selected, requested, temporary)
+    }
+
+    fn import_path_with_policy(
+        &self,
+        project_id: Option<&str>,
+        path: &Path,
+        requested: LocalMediaMode,
+        temporary: bool,
+    ) -> Result<LocalMediaImportOutcome, String> {
+        let selected = validate_selected_file(path)?;
+        if requested == LocalMediaMode::ProjectCopy {
+            let resolution = self.register_selected_path(&selected, LocalMediaMode::ProjectCopy)?;
+            return Ok(LocalMediaImportOutcome {
+                resolution,
+                action: LocalMediaImportAction::Copied,
+                destination: LocalMediaImportDestination::ManagedRoot,
+                temporary_source: temporary,
+            });
+        }
+        if !temporary {
+            let resolution = self.register_selected_path(&selected, LocalMediaMode::Reference)?;
+            return Ok(LocalMediaImportOutcome {
+                resolution,
+                action: LocalMediaImportAction::Referenced,
+                destination: LocalMediaImportDestination::InPlace,
+                temporary_source: false,
+            });
+        }
+        match project_id.and_then(|id| self.project_media_directory(id)) {
+            Some(directory) => {
+                let (target, moved) = collect_into_project_directory(&directory, &selected)?;
+                let resolution = self.register_selected_path(&target, LocalMediaMode::Reference)?;
+                Ok(LocalMediaImportOutcome {
+                    resolution,
+                    action: if moved {
+                        LocalMediaImportAction::Moved
+                    } else {
+                        LocalMediaImportAction::Referenced
+                    },
+                    destination: LocalMediaImportDestination::ProjectDirectory,
+                    temporary_source: true,
+                })
+            }
+            None => {
+                let resolution =
+                    self.register_selected_path(&selected, LocalMediaMode::ProjectCopy)?;
+                let removed = std::fs::remove_file(&selected).is_ok();
+                Ok(LocalMediaImportOutcome {
+                    resolution,
+                    action: if removed {
+                        LocalMediaImportAction::Moved
+                    } else {
+                        LocalMediaImportAction::Copied
+                    },
+                    destination: LocalMediaImportDestination::ManagedRoot,
+                    temporary_source: true,
+                })
+            }
+        }
+    }
+
+    fn is_temporary_source(&self, path: &Path) -> bool {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        is_temporary_source_with_home(path, &self.app_data_directory, home.as_deref())
+    }
+
+    fn relinked_reference(
+        &self,
+        reference: LocalMediaReference,
+        selected: &Path,
+        sha256: &str,
+    ) -> Result<LocalMediaReference, String> {
+        let metadata = selected
+            .metadata()
+            .map_err(|error| format!("cannot inspect relinked media: {error}"))?;
+        ensure_media_size(metadata.len())?;
+        let parent = selected
+            .parent()
+            .ok_or_else(|| "the relinked media has no parent directory".to_owned())?;
+        let root_id = self.register_user_root(parent)?;
+        let relative_path = selected
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "the relinked media name is not valid UTF-8".to_owned())?
+            .to_owned();
+        let mut next = reference;
+        next.root_id = root_id;
+        next.relative_path = relative_path.clone();
+        next.asset_id = reference_asset_id(&next.root_id, &next.relative_path, sha256);
+        next.storage_key = format!("local-ref:{}", next.asset_id);
+        next.file_name = relative_path;
+        next.bytes = metadata.len();
+        next.mode = LocalMediaMode::Reference;
+        Ok(next)
     }
 
     pub(crate) fn relink_reference(
@@ -301,27 +566,7 @@ impl LocalMediaManager {
                 "重新定位的文件与原素材 SHA-256 不一致；请使用“替换视频”明确更换素材".to_owned(),
             );
         }
-        let parent = selected
-            .parent()
-            .ok_or_else(|| "the relinked media has no parent directory".to_owned())?;
-        let root_id = self.register_user_root(parent)?;
-        let relative_path = selected
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| "the relinked media name is not valid UTF-8".to_owned())?
-            .to_owned();
-        let mut next = reference;
-        next.root_id = root_id;
-        next.relative_path = relative_path;
-        next.asset_id = reference_asset_id(&next.root_id, &next.relative_path, &sha256);
-        next.storage_key = format!("local-ref:{}", next.asset_id);
-        next.file_name = selected
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("media")
-            .to_owned();
-        next.bytes = metadata.len();
-        next.mode = LocalMediaMode::Reference;
+        let next = self.relinked_reference(reference, &selected, &sha256)?;
         self.register_verified_reference(next, selected)
     }
 
@@ -1112,6 +1357,203 @@ fn validate_reference_shape(reference: &LocalMediaReference) -> Result<(), Strin
     Ok(())
 }
 
+fn validate_project_id(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 200
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err("canvas project identifier is invalid".to_owned());
+    }
+    Ok(())
+}
+
+/// A source is "temporary" when it lives somewhere the user does not curate (system temp,
+/// other applications' private data and caches, Downloads, Trash) or when its name marks it as a
+/// screenshot/recording that macOS dropped on the Desktop. iCloud Drive and cloud-storage mounts
+/// under ~/Library are durable user folders and are never treated as temporary.
+fn is_temporary_source_with_home(path: &Path, app_data_directory: &Path, home: Option<&Path>) -> bool {
+    let app_data = app_data_directory
+        .canonicalize()
+        .unwrap_or_else(|_| app_data_directory.to_path_buf());
+    if path.starts_with(&app_data) || path.starts_with(app_data_directory) {
+        return false;
+    }
+    if TEMPORARY_SYSTEM_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+    {
+        return true;
+    }
+    if let Some(home) = home {
+        if DURABLE_HOME_LIBRARY_SUBDIRECTORIES
+            .iter()
+            .any(|sub| path.starts_with(home.join(sub)))
+        {
+            return false;
+        }
+        if TEMPORARY_HOME_SUBDIRECTORIES
+            .iter()
+            .any(|sub| path.starts_with(home.join(sub)))
+        {
+            return true;
+        }
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_lowercase())
+        .unwrap_or_default();
+    SCREENSHOT_NAME_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+/// Moves a temporary source into `<directory>/画布素材/` keeping its file name. Returns the
+/// final path and whether a move happened. Same content already present in that folder is reused
+/// (and the redundant temporary source removed); a name clash with different content gets a
+/// numeric suffix. Sources already inside the project directory stay where they are.
+fn collect_into_project_directory(directory: &Path, source: &Path) -> Result<(PathBuf, bool), String> {
+    let directory = directory
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve the project media directory: {error}"))?;
+    if source.starts_with(&directory) {
+        return Ok((source.to_path_buf(), false));
+    }
+    let metadata = source
+        .metadata()
+        .map_err(|error| format!("cannot inspect the temporary media: {error}"))?;
+    let sha256 = sha256_file(source)?;
+    let folder = directory.join(PROJECT_MEDIA_SUBDIRECTORY);
+    std::fs::create_dir_all(&folder)
+        .map_err(|error| format!("cannot create the project media folder: {error}"))?;
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let mut visited = 0usize;
+    if let Some(existing) =
+        find_file_by_digest(&folder, metadata.len(), &sha256, &extension, 1, &mut visited)
+    {
+        let _ = std::fs::remove_file(source);
+        return Ok((existing, true));
+    }
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "the temporary media name is not valid UTF-8".to_owned())?;
+    let target = unique_collection_target(&folder, file_name)?;
+    move_file_verified(source, &target, &sha256)?;
+    Ok((target, true))
+}
+
+fn unique_collection_target(folder: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let candidate = folder.join(file_name);
+    if !candidate.exists() {
+        return Ok(candidate);
+    }
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("media");
+    let extension = path.extension().and_then(|value| value.to_str());
+    for index in 2..10_000u32 {
+        let name = match extension {
+            Some(extension) => format!("{stem}-{index}.{extension}"),
+            None => format!("{stem}-{index}"),
+        };
+        let candidate = folder.join(name);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("cannot find a free file name in the project media folder".to_owned())
+}
+
+fn move_file_verified(source: &Path, target: &Path, expected_sha256: &str) -> Result<(), String> {
+    if target.exists() {
+        return Err("project media target already exists".to_owned());
+    }
+    if std::fs::rename(source, target).is_ok() {
+        return Ok(());
+    }
+    copy_verified_file(source, target, expected_sha256)?;
+    std::fs::remove_file(source)
+        .map_err(|error| format!("copied the media but cannot remove the temporary source: {error}"))
+}
+
+/// Bounded recursive search for a regular file with the given size, extension and SHA-256.
+/// Hidden entries, symlinks and staging files are skipped; size and extension are checked before
+/// hashing so large trees stay cheap.
+fn find_file_by_digest(
+    directory: &Path,
+    bytes: u64,
+    sha256: &str,
+    extension: &str,
+    max_depth: usize,
+    visited: &mut usize,
+) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(directory).ok()?;
+    let mut subdirectories = Vec::new();
+    for entry in entries.flatten() {
+        *visited += 1;
+        if *visited > RELOCATE_MAX_ENTRIES {
+            return None;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            if max_depth > 1 {
+                subdirectories.push(path);
+            }
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let matches_extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case(extension))
+            .unwrap_or(extension.is_empty());
+        if !matches_extension {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.len() != bytes {
+            continue;
+        }
+        if sha256_file(&path).ok().as_deref() == Some(sha256) {
+            return path.canonicalize().ok();
+        }
+    }
+    for subdirectory in subdirectories {
+        if let Some(found) =
+            find_file_by_digest(&subdirectory, bytes, sha256, extension, max_depth - 1, visited)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn validate_root_id(value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > 80
@@ -1391,6 +1833,7 @@ fn load_root_registry(path: &Path) -> Result<RootRegistry, String> {
         return Ok(RootRegistry {
             version: ROOT_REGISTRY_VERSION,
             roots: HashMap::new(),
+            project_media_dirs: HashMap::new(),
         });
     }
     let file = File::open(path)
@@ -1402,6 +1845,9 @@ fn load_root_registry(path: &Path) -> Result<RootRegistry, String> {
     }
     for root_id in registry.roots.keys() {
         validate_root_id(root_id)?;
+    }
+    for project_id in registry.project_media_dirs.keys() {
+        validate_project_id(project_id)?;
     }
     Ok(registry)
 }
@@ -1631,7 +2077,8 @@ pub(crate) async fn select_local_media(
     app: AppHandle,
     manager: TauriState<'_, Arc<LocalMediaManager>>,
     mode: LocalMediaMode,
-) -> Result<Vec<LocalMediaResolution>, String> {
+    project_id: Option<String>,
+) -> Result<Vec<LocalMediaImportOutcome>, String> {
     let selected = app
         .dialog()
         .file()
@@ -1655,26 +2102,101 @@ pub(crate) async fn select_local_media(
             FilePath::Url(_) => Err("URL media selections are not supported".to_owned()),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let manager = manager.inner().clone();
+    import_paths_blocking(manager.inner().clone(), project_id, paths, mode).await
+}
+
+/// Imports files the window received through the native drag-and-drop event (real paths, no
+/// browser upload); shares the collection policy with the file picker.
+#[tauri::command]
+pub(crate) async fn import_local_media_paths(
+    manager: TauriState<'_, Arc<LocalMediaManager>>,
+    project_id: Option<String>,
+    paths: Vec<String>,
+    mode: LocalMediaMode,
+) -> Result<Vec<LocalMediaImportOutcome>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    if paths.len() > MAX_IMPORT_PATHS {
+        return Err(format!("at most {MAX_IMPORT_PATHS} files can be imported at once"));
+    }
+    let paths = paths.into_iter().map(PathBuf::from).collect();
+    import_paths_blocking(manager.inner().clone(), project_id, paths, mode).await
+}
+
+async fn import_paths_blocking(
+    manager: Arc<LocalMediaManager>,
+    project_id: Option<String>,
+    paths: Vec<PathBuf>,
+    mode: LocalMediaMode,
+) -> Result<Vec<LocalMediaImportOutcome>, String> {
+    if let Some(project_id) = project_id.as_deref() {
+        validate_project_id(project_id)?;
+    }
     tauri::async_runtime::spawn_blocking(move || {
         paths
             .iter()
-            .map(|path| manager.register_selected_path(path, mode))
+            .map(|path| manager.import_path(project_id.as_deref(), path, mode))
             .collect()
     })
     .await
-    .map_err(|_| "local media selection could not complete".to_owned())?
+    .map_err(|_| "local media import could not complete".to_owned())?
+}
+
+#[tauri::command]
+pub(crate) fn project_media_directory(
+    manager: TauriState<'_, Arc<LocalMediaManager>>,
+    project_id: String,
+) -> Result<Option<String>, String> {
+    validate_project_id(&project_id)?;
+    Ok(manager
+        .project_media_directory(&project_id)
+        .map(|path| path.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+pub(crate) async fn select_project_media_directory(
+    app: AppHandle,
+    manager: TauriState<'_, Arc<LocalMediaManager>>,
+    project_id: String,
+) -> Result<Option<String>, String> {
+    validate_project_id(&project_id)?;
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("选择这张画布的素材目录（临时文件会被收进这里的「画布素材」）")
+        .blocking_pick_folder();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = match selected {
+        FilePath::Path(path) => path,
+        FilePath::Url(_) => return Err("URL directories are not supported".to_owned()),
+    };
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.set_project_media_directory(&project_id, &path)
+    })
+    .await
+    .map_err(|_| "project media directory selection could not complete".to_owned())?
+    .map(Some)
 }
 
 #[tauri::command]
 pub(crate) async fn resolve_local_media_reference(
     manager: TauriState<'_, Arc<LocalMediaManager>>,
     reference: LocalMediaReference,
+    project_id: Option<String>,
 ) -> Result<LocalMediaResolution, String> {
+    if let Some(project_id) = project_id.as_deref() {
+        validate_project_id(project_id)?;
+    }
     let manager = manager.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.resolve_reference(reference))
-        .await
-        .map_err(|_| "local media resolution could not complete".to_owned())
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.resolve_reference_for_project(project_id.as_deref(), reference)
+    })
+    .await
+    .map_err(|_| "local media resolution could not complete".to_owned())
 }
 
 #[tauri::command]
@@ -1758,6 +2280,7 @@ mod tests {
                     managed.to_str().unwrap().to_owned(),
                 ),
             ]),
+            project_media_dirs: HashMap::new(),
         };
         save_root_registry(&roots_path, &roots).unwrap();
         Arc::new(LocalMediaManager {
@@ -1981,6 +2504,154 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn temporary_sources_are_detected_by_location_or_screenshot_name() {
+        let home = Path::new("/Users/tester");
+        let app_data =
+            Path::new("/Users/tester/Library/Application Support/com.chenyuxiaojin.infinitecanvas");
+        let temp = |value: &str| is_temporary_source_with_home(Path::new(value), app_data, Some(home));
+        assert!(temp("/private/var/folders/ab/T/TemporaryItems/截屏.png"));
+        assert!(temp("/Users/tester/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/x/temp/RWTemp/2026-09/a.jpg"));
+        assert!(temp("/Users/tester/Downloads/photo.jpg"));
+        assert!(temp("/Users/tester/.Trash/old.png"));
+        assert!(temp("/Users/tester/Desktop/截屏2026-09-02 19.20.11.png"));
+        assert!(temp("/Users/tester/Desktop/Screenshot 2026-09-02 at 19.20.11.png"));
+        assert!(temp("/Users/tester/Desktop/CleanShot 2026-09-02.png"));
+        assert!(!temp("/Users/tester/Library/Application Support/com.chenyuxiaojin.infinitecanvas/agent-media/verified/agent-image-abc.png"));
+        assert!(!temp("/Users/tester/Library/Mobile Documents/com~apple~CloudDocs/素材/a.png"));
+        assert!(!temp("/Users/tester/Library/CloudStorage/Dropbox/a.png"));
+        assert!(!temp("/Users/tester/项目/视频制作台/AI编导/案例2/02-关键帧/定妆/S01.png"));
+        assert!(!temp("/Users/tester/Desktop/定妆照.png"));
+    }
+
+    #[test]
+    fn temporary_media_is_moved_into_the_project_media_folder_and_deduplicated() {
+        let root = TempDir::new().unwrap();
+        let manager = test_manager(&root);
+        let workspace = TempDir::new().unwrap();
+        let project_dir = workspace.path().join("案例");
+        let inbox = workspace.path().join("inbox");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::create_dir_all(&inbox).unwrap();
+        manager
+            .set_project_media_directory("case-test", &project_dir)
+            .unwrap();
+        let folder = project_dir.join(PROJECT_MEDIA_SUBDIRECTORY);
+
+        let shot = inbox.join("截屏2026-09-02 19.20.11.png");
+        std::fs::write(&shot, b"shot-a").unwrap();
+        let moved = manager
+            .import_path_with_policy(Some("case-test"), &shot, LocalMediaMode::Reference, true)
+            .unwrap();
+        assert_eq!(moved.action, LocalMediaImportAction::Moved);
+        assert_eq!(moved.destination, LocalMediaImportDestination::ProjectDirectory);
+        assert!(moved.temporary_source);
+        assert!(!shot.exists());
+        assert!(folder.join("截屏2026-09-02 19.20.11.png").is_file());
+        assert_eq!(moved.resolution.status, "available");
+        assert_eq!(moved.resolution.reference.mode, LocalMediaMode::Reference);
+        assert_eq!(moved.resolution.reference.file_name, "截屏2026-09-02 19.20.11.png");
+        assert_eq!(moved.resolution.reference.relative_path, "截屏2026-09-02 19.20.11.png");
+
+        let duplicate = inbox.join("copy.png");
+        std::fs::write(&duplicate, b"shot-a").unwrap();
+        let reused = manager
+            .import_path_with_policy(Some("case-test"), &duplicate, LocalMediaMode::Reference, true)
+            .unwrap();
+        assert!(!duplicate.exists());
+        assert_eq!(reused.resolution.reference.sha256, moved.resolution.reference.sha256);
+        assert_eq!(reused.resolution.reference.file_name, "截屏2026-09-02 19.20.11.png");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+
+        let clash = inbox.join("截屏2026-09-02 19.20.11.png");
+        std::fs::write(&clash, b"shot-b").unwrap();
+        let suffixed = manager
+            .import_path_with_policy(Some("case-test"), &clash, LocalMediaMode::Reference, true)
+            .unwrap();
+        assert!(folder.join("截屏2026-09-02 19.20.11-2.png").is_file());
+        assert_eq!(suffixed.resolution.reference.file_name, "截屏2026-09-02 19.20.11-2.png");
+
+        let durable = workspace.path().join("素材").join("定妆.png");
+        std::fs::create_dir_all(durable.parent().unwrap()).unwrap();
+        std::fs::write(&durable, b"durable").unwrap();
+        let referenced = manager
+            .import_path_with_policy(Some("case-test"), &durable, LocalMediaMode::Reference, false)
+            .unwrap();
+        assert_eq!(referenced.action, LocalMediaImportAction::Referenced);
+        assert_eq!(referenced.destination, LocalMediaImportDestination::InPlace);
+        assert!(durable.is_file());
+
+        let stray = inbox.join("stray.png");
+        std::fs::write(&stray, b"stray").unwrap();
+        let managed = manager
+            .import_path_with_policy(None, &stray, LocalMediaMode::Reference, true)
+            .unwrap();
+        assert_eq!(managed.action, LocalMediaImportAction::Moved);
+        assert_eq!(managed.destination, LocalMediaImportDestination::ManagedRoot);
+        assert!(!stray.exists());
+        assert_eq!(managed.resolution.reference.root_id, MANAGED_ROOT_ID);
+
+        let explicit = workspace.path().join("素材").join("copy-me.png");
+        std::fs::write(&explicit, b"explicit").unwrap();
+        let copied = manager
+            .import_path_with_policy(Some("case-test"), &explicit, LocalMediaMode::ProjectCopy, false)
+            .unwrap();
+        assert_eq!(copied.action, LocalMediaImportAction::Copied);
+        assert!(explicit.is_file());
+
+        let registry = load_root_registry(&manager.roots_path).unwrap();
+        assert_eq!(
+            registry.project_media_dirs.get("case-test").map(String::as_str),
+            project_dir.canonicalize().unwrap().to_str()
+        );
+    }
+
+    #[test]
+    fn missing_references_are_relocated_by_digest_inside_the_project_directory() {
+        let root = TempDir::new().unwrap();
+        let manager = test_manager(&root);
+        let workspace = TempDir::new().unwrap();
+        let project_dir = workspace.path().join("案例");
+        std::fs::create_dir_all(project_dir.join("02-关键帧")).unwrap();
+        manager
+            .set_project_media_directory("case-test", &project_dir)
+            .unwrap();
+        let original = project_dir.join("02-关键帧").join("S01.png");
+        std::fs::write(&original, b"frame-one").unwrap();
+        let referenced = manager
+            .register_selected_path(&original, LocalMediaMode::Reference)
+            .unwrap();
+
+        let moved_dir = project_dir.join("03-生成").join("选定");
+        std::fs::create_dir_all(&moved_dir).unwrap();
+        std::fs::write(moved_dir.join("S01.png"), b"decoy-different-content").unwrap();
+        let moved = moved_dir.join("S01-final.png");
+        std::fs::rename(&original, &moved).unwrap();
+
+        let relocated =
+            manager.resolve_reference_for_project(Some("case-test"), referenced.reference.clone());
+        assert_eq!(relocated.status, "available");
+        assert!(relocated.playback_url.is_some());
+        assert_ne!(relocated.reference.asset_id, referenced.reference.asset_id);
+        assert_eq!(relocated.reference.file_name, "S01-final.png");
+        assert_eq!(relocated.reference.sha256, referenced.reference.sha256);
+        assert_eq!(relocated.reference.mode, LocalMediaMode::Reference);
+
+        let direct =
+            manager.resolve_reference_for_project(Some("case-test"), relocated.reference.clone());
+        assert_eq!(direct.status, "available");
+        assert_eq!(direct.reference, relocated.reference);
+
+        let without_project = manager.resolve_reference(referenced.reference.clone());
+        assert_eq!(without_project.status, "missing");
+
+        std::fs::remove_file(&moved).unwrap();
+        let gone =
+            manager.resolve_reference_for_project(Some("case-test"), relocated.reference.clone());
+        assert_eq!(gone.status, "missing");
+        assert_eq!(gone.reason, Some("missing"));
     }
 
     #[test]
