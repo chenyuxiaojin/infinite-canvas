@@ -349,6 +349,7 @@ pub fn run() {
             agent_bridge::save_desktop_canvas_project,
             agent_bridge::delete_desktop_canvas_projects,
             agent_bridge::desktop_canvas_project_revision,
+            agent_bridge::desktop_canvas_project_updated_at,
             save_canvas_export,
         ])
         .setup(|app| {

@@ -6,7 +6,7 @@ export type CanvasAgentBatchRuntime = {
     id: string;
     summary: string;
     startedAt: string;
-    auditOffset: number;
+    existingRequestIds: string[];
     errors: string[];
     hadConflict: boolean;
 };
@@ -51,7 +51,7 @@ function beginBatch(input: { status: CanvasCollaborationStatus; operationState: 
             id: input.batchId,
             summary: input.summary.trim().slice(0, 160) || "Agent 修改画布",
             startedAt,
-            auditOffset: input.operationState.audit.length,
+            existingRequestIds: input.operationState.audit.map((entry) => entry.batch.requestId),
             errors: [],
             hadConflict: false,
         } satisfies CanvasAgentBatchRuntime,
@@ -89,7 +89,8 @@ function noteActionResult(input: { status: CanvasCollaborationStatus; runtime: C
 }
 
 function finishBatch(input: { status: CanvasCollaborationStatus; runtime: CanvasAgentBatchRuntime; operationState: CanvasOperationState; fatalError?: string; now?: string }): CanvasCollaborationStatus {
-    const entries = input.operationState.audit.slice(input.runtime.auditOffset).filter((entry) => entry.batch.actor === "agent");
+    const existingRequestIds = new Set(input.runtime.existingRequestIds);
+    const entries = input.operationState.audit.filter((entry) => entry.batch.actor === "agent" && !existingRequestIds.has(entry.batch.requestId));
     const errors = [...input.runtime.errors];
     if (input.fatalError && !errors.includes(input.fatalError)) errors.push(input.fatalError);
     const conflict = input.runtime.hadConflict || entries.some(isConflict);
@@ -106,8 +107,9 @@ function finishBatch(input: { status: CanvasCollaborationStatus; runtime: Canvas
 
 function toView(operationState: CanvasOperationState, status: CanvasCollaborationStatus, nodes: CanvasNodeData[]): CanvasCollaborationState {
     const titleById = new Map(nodes.map((node) => [node.id, node.title || "未命名节点"]));
+    const processedAtByRequest = new Map(operationState.audit.map((entry) => [entry.batch.requestId, entry.result.processedAt]));
     const undoneAtByRequest = new Map(
-        operationState.audit.flatMap((entry) => entry.undoneByRequestId ? [[entry.batch.requestId, operationState.requests[entry.undoneByRequestId]?.result.processedAt || entry.result.processedAt] as const] : []),
+        operationState.audit.flatMap((entry) => entry.undoneByRequestId ? [[entry.batch.requestId, processedAtByRequest.get(entry.undoneByRequestId) || entry.result.processedAt] as const] : []),
     );
     const batches = operationState.audit
         .filter((entry) => entry.batch.actor === "agent")

@@ -164,6 +164,10 @@ export function getDesktopCanvasProjectRevision(projectId: string) {
     return invoke<number>("desktop_canvas_project_revision", { projectId });
 }
 
+export function getDesktopCanvasProjectUpdatedAt(projectId: string) {
+    return invoke<string>("desktop_canvas_project_updated_at", { projectId });
+}
+
 export function saveCanvasExport(bytes: ArrayBuffer) {
     return invoke<{ saved: boolean; file_name?: string; bytes: number }>("save_canvas_export", bytes);
 }

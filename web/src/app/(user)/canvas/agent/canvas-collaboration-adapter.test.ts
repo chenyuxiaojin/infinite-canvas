@@ -98,5 +98,37 @@ describe("canvasCollaborationAdapter", () => {
         expect(status).toMatchObject({ state: "success", affectedNodeIds: ["node-1"] });
         expect(agent.project.operationState.revision).toBe(1);
     });
-});
 
+    test("审计达到上限后仍能识别本轮新增的 Agent 操作", () => {
+        let crowded = project();
+        for (let index = 0; index < 100; index += 1) {
+            crowded = applyCanvasOperationBatch(
+                crowded,
+                batch("agent", `old-agent-${index}`, index, [{ type: "node.update", nodeId: "node-1", patch: { title: `旧操作 ${index}` } }]),
+                { now: () => T1 },
+            ).project;
+        }
+        const started = canvasCollaborationAdapter.beginBatch({
+            status: canvasCollaborationAdapter.createStatus(T0),
+            operationState: crowded.operationState,
+            batchId: "latest-run",
+            summary: "继续改写",
+            now: T1,
+        });
+        const latest = applyCanvasOperationBatch(
+            crowded,
+            batch("agent", "latest-agent", 100, [{ type: "node.update", nodeId: "node-1", patch: { title: "最新操作" } }]),
+            { now: () => T2 },
+        );
+        const status = canvasCollaborationAdapter.finishBatch({
+            status: started.status,
+            runtime: started.runtime,
+            operationState: latest.project.operationState,
+            now: T2,
+        });
+
+        expect(latest.project.operationState.audit).toHaveLength(100);
+        expect(latest.project.operationState.history.prunedAuditEntries).toBe(1);
+        expect(status).toMatchObject({ state: "success", affectedNodeIds: ["node-1"] });
+    });
+});

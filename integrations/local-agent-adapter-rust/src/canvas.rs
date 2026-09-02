@@ -357,6 +357,19 @@ impl CanonicalCanvasAdapter {
         .collect()
     }
 
+    pub fn project_updated_at(&self, project_id: &str) -> Result<String, BridgeError> {
+        validate_identifier("project_id", project_id, 64)?;
+        self.connect()?
+            .query_row(
+                "SELECT updated_at FROM canvas_projects
+                 WHERE user_id = ?1 AND id = ?2 AND deleted_at = ''",
+                params![DESKTOP_LOCAL_USER_ID, project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| BridgeError::not_found("The canvas project was not found."))
+    }
+
     pub fn save_human_project(&self, project: Value) -> Result<Value, BridgeError> {
         let metadata = project_metadata(&project)?;
         let incoming_revision = project_revision(&project)?;
@@ -1458,5 +1471,36 @@ mod tests {
             .save_human_project(project(2, "2026-01-01T12:00:00Z"))
             .unwrap();
         assert_eq!(adapter.get_project("project-1").unwrap().revision, 2);
+    }
+
+    #[test]
+    fn desktop_poll_reads_updated_at_without_decoding_project_json() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("canvas.db");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE canvas_projects (
+                    user_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    project_data TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (user_id, id)
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO canvas_projects (user_id, id, project_data, created_at, updated_at, deleted_at)
+                 VALUES (?1, ?2, 'not-json', ?3, ?4, '')",
+                params![DESKTOP_LOCAL_USER_ID, "project-1", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"],
+            )
+            .unwrap();
+        drop(connection);
+
+        let adapter = CanonicalCanvasAdapter::open(database, Arc::new(UnusedProtocol)).unwrap();
+        assert_eq!(adapter.project_updated_at("project-1").unwrap(), "2026-01-02T00:00:00Z");
     }
 }

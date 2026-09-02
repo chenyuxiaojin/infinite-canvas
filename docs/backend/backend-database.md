@@ -276,8 +276,8 @@ S3/R2 与 WebDAV 共用的媒体文件索引表，不保存画布、素材列表
 
 桌面本机身份使用固定 `user_id = desktop-local`。Tauri WebView 与本机
 Agent Bridge 都读写这些行；Agent 不建立第二份画布项目表或 revision 表。
-`project_data.operationState` 是 revision、人工锁、任务、request 幂等索引和
-审计历史的唯一持久化位置。
+`project_data.operationState` 是 revision、人工锁、任务、近期 Agent request 幂等
+索引、限量审计历史和历史裁剪计数的唯一持久化位置。
 
 ### settings
 

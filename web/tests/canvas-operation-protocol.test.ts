@@ -74,6 +74,20 @@ describe("人与 Agent 共用画布操作协议", () => {
         expect(agent.project.operationState.audit.map((entry) => entry.batch.actor)).toEqual(["human", "agent"]);
     });
 
+    test("UI 节点更新只记录真正变化的字段", () => {
+        const prompt = "长提示词".repeat(5000);
+        const initial = project([{ ...node("n1"), metadata: { content: "正文", prompt, fontSize: 18 } }]);
+        const moved = [{ ...initial.nodes[0], position: { x: 320, y: 180 } }];
+        const edited = [{ ...initial.nodes[0], metadata: { ...initial.nodes[0].metadata, content: "新正文" } }];
+
+        expect(buildCanvasStructureOperations(initial, moved, [])).toEqual([
+            { type: "node.update", nodeId: "n1", patch: { position: { x: 320, y: 180 } } },
+        ]);
+        expect(buildCanvasStructureOperations(initial, edited, [])).toEqual([
+            { type: "node.update", nodeId: "n1", patch: { metadata: { content: "新正文" } } },
+        ]);
+    });
+
     test("重复 request id 返回原回执且不重复执行", () => {
         const request = batch("agent", "same-request", 0, [{ type: "node.create", node: node("n1") }]);
         const first = applyCanvasOperationBatch(project(), request, { now: () => TIME });
@@ -114,6 +128,51 @@ describe("人与 Agent 共用画布操作协议", () => {
         expect(retry.result.error?.code).toBe("stale_revision");
         expect(retry.result.duplicate).toBe(true);
         expect(retry.project.operationState.audit).toHaveLength(2);
+    });
+
+    test("旧工程加载时压缩人工历史并保留最近 Agent 幂等记录", () => {
+        const source = project([node("n1")]);
+        const audit = Array.from({ length: 2400 }, (_, index) => {
+            const actor: CanvasOperationActor = index % 200 === 0 ? "agent" : "human";
+            const request = batch(actor, `history-${index}`, index, [
+                { type: "node.update", nodeId: "n1", patch: { position: { x: index, y: 0 } } },
+            ]);
+            return {
+                batch: request,
+                result: {
+                    ok: true,
+                    status: "applied" as const,
+                    duplicate: false,
+                    actor,
+                    requestId: request.requestId,
+                    projectId: request.projectId,
+                    baseRevision: index,
+                    previousRevision: index,
+                    revision: index + 1,
+                    processedAt: TIME,
+                    operationResults: [{ type: "node.update" as const, nodeId: "n1" }],
+                },
+            };
+        });
+        source.operationState.revision = 2400;
+        source.operationState.audit = audit;
+        source.operationState.requests = Object.fromEntries(
+            audit.map((entry) => [entry.batch.requestId, { fingerprint: "legacy-full-batch", result: entry.result }]),
+        );
+
+        const migrated = migrateCanvasProject(JSON.parse(JSON.stringify(source)));
+        const reloaded = migrateCanvasProject(JSON.parse(JSON.stringify(migrated)));
+
+        expect(migrated.operationState.revision).toBe(2400);
+        expect(migrated.operationState.audit.filter((entry) => entry.batch.actor === "human")).toHaveLength(20);
+        expect(migrated.operationState.audit.filter((entry) => entry.batch.actor === "agent")).toHaveLength(12);
+        expect(Object.keys(migrated.operationState.requests)).toHaveLength(12);
+        expect(migrated.operationState.history).toEqual({
+            prunedAuditEntries: 2368,
+            prunedRequestEntries: 2388,
+            latestPrunedRevision: 2380,
+        });
+        expect(reloaded.operationState).toEqual(migrated.operationState);
     });
 
     test("人工可精确撤销 Agent 批次并保留审计链", () => {

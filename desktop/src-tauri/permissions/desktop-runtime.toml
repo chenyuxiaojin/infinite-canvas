@@ -19,5 +19,6 @@ commands.allow = [
   "save_desktop_canvas_project",
   "delete_desktop_canvas_projects",
   "desktop_canvas_project_revision",
+  "desktop_canvas_project_updated_at",
   "save_canvas_export",
 ]

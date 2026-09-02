@@ -104,3 +104,14 @@ pub(crate) fn desktop_canvas_project_revision(
         .map(|document| document.revision)
         .map_err(|error| error.to_string())
 }
+
+#[tauri::command]
+pub(crate) fn desktop_canvas_project_updated_at(
+    bridge: State<'_, DesktopAgentBridge>,
+    project_id: String,
+) -> Result<String, String> {
+    bridge
+        .canvas
+        .project_updated_at(&project_id)
+        .map_err(|error| error.to_string())
+}

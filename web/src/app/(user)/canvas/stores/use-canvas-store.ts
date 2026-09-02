@@ -6,7 +6,7 @@ import { localForageStorage } from "@/lib/localforage-storage";
 import { listCanvasProjects, saveCanvasProject, syncCanvasProjects } from "@/services/api/canvas-tasks";
 import { fetchUserConfig } from "@/services/api/user-config";
 import { useUserStore } from "@/stores/use-user-store";
-import { isDesktopRuntime, listDesktopCanvasProjects, saveDesktopCanvasProject } from "@/services/desktop-runtime";
+import { getDesktopCanvasProjectUpdatedAt, isDesktopRuntime, listDesktopCanvasProjects, saveDesktopCanvasProject } from "@/services/desktop-runtime";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAgentConfig, CanvasAssistantSession, CanvasConnection, CanvasNodeData, CanvasPendingAgentRequest, ViewportTransform } from "../types";
 import {
@@ -61,7 +61,7 @@ type CanvasStore = {
     deleteProjects: (ids: string[]) => void;
     updateProject: (id: string, patch: Partial<Pick<CanvasProject, "nodes" | "connections" | "chatSessions" | "activeChatId" | "agentConfig" | "autoTitlePending" | "backgroundMode" | "showImageInfo" | "viewport" | "sidePanel" | "agentPanel" | "pendingAgentRequest">>) => void;
     applyOperationBatch: (batch: CanvasOperationBatch) => CanvasOperationOutcome<CanvasProject> | null;
-    refreshFromDesktop: () => Promise<void>;
+    refreshFromDesktop: (projectId?: string) => Promise<void>;
     syncWithRemote: (token: string, syncEnabled: boolean) => Promise<void>;
     setSyncEnabled: (enabled: boolean) => void;
 };
@@ -73,6 +73,7 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let queuedPersistState: PersistedCanvasState | null = null;
 let accountCanvasSyncEnabled = false;
 const projectSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const desktopProjectSavesInFlight = new Map<string, number>();
 
 function waitForUserStoreHydration() {
     if (useUserStore.persist.hasHydrated()) return Promise.resolve();
@@ -102,6 +103,7 @@ function queueProjectSave(project: CanvasProject) {
         setTimeout(() => {
             projectSaveTimers.delete(project.id);
             if (desktop) {
+                desktopProjectSavesInFlight.set(project.id, (desktopProjectSavesInFlight.get(project.id) || 0) + 1);
                 void saveDesktopCanvasProject<CanvasProject>(project)
                     .then((saved) => {
                         adoptAuthoritativeDesktopProject(saved);
@@ -115,6 +117,11 @@ function queueProjectSave(project: CanvasProject) {
                             desktopPersistenceStatus: "error",
                             desktopPersistenceError: error instanceof Error ? error.message : String(error),
                         });
+                    })
+                    .finally(() => {
+                        const remaining = (desktopProjectSavesInFlight.get(project.id) || 1) - 1;
+                        if (remaining > 0) desktopProjectSavesInFlight.set(project.id, remaining);
+                        else desktopProjectSavesInFlight.delete(project.id);
                     });
                 return;
             }
@@ -469,9 +476,22 @@ export const useCanvasStore = create<CanvasStore>()(
                 queueProjectSave(outcome.project);
                 return outcome;
             },
-            refreshFromDesktop: async () => {
+            refreshFromDesktop: async (projectId) => {
                 if (!isDesktopRuntime()) return;
                 try {
+                    const current = projectId ? get().projects.find((project) => project.id === projectId) : undefined;
+                    if (current) {
+                        if (projectSaveTimers.has(projectId) || desktopProjectSavesInFlight.has(projectId)) return;
+                        const desktopUpdatedAt = await getDesktopCanvasProjectUpdatedAt(projectId);
+                        const latest = get().projects.find((project) => project.id === projectId);
+                        if (latest && latest.updatedAt === desktopUpdatedAt) {
+                            const status = get();
+                            if (status.desktopPersistenceStatus !== "database" || status.desktopPersistenceError) {
+                                set({ desktopPersistenceStatus: "database", desktopPersistenceError: null });
+                            }
+                            return;
+                        }
+                    }
                     const desktopProjects = await listDesktopCanvasProjects<CanvasProject>();
                     set((state) => {
                         const currentById = new Map(state.projects.map((project) => [project.id, project]));

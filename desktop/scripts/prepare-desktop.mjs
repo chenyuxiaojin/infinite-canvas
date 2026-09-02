@@ -2,7 +2,9 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,6 +58,15 @@ for (const requiredPath of [standaloneDir, staticDir, publicDir]) {
 rmSync(webResourceDir, { recursive: true, force: true });
 mkdirSync(webResourceDir, { recursive: true });
 cpSync(standaloneDir, webResourceDir, { recursive: true });
+
+// macOS 上 Node 设置 process.title 会经 LaunchServices 把进程注册成 App，
+// next-server 启动时改标题导致 Dock 出现永远蹦跳的 exec 图标；注入守卫让标题只读。
+const stagedServerJs = join(webResourceDir, "server.js");
+const titleGuard = 'Object.defineProperty(process, "title", { get: () => "next-server", set: () => {}, configurable: true });\n';
+const serverJsSource = readFileSync(stagedServerJs, "utf8");
+if (!serverJsSource.startsWith(titleGuard)) {
+  writeFileSync(stagedServerJs, titleGuard + serverJsSource);
+}
 cpSync(publicDir, join(webResourceDir, "public"), { recursive: true });
 mkdirSync(join(webResourceDir, ".next"), { recursive: true });
 cpSync(staticDir, join(webResourceDir, ".next", "static"), { recursive: true });

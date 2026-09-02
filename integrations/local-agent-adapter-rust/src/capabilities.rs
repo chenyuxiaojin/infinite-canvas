@@ -204,7 +204,8 @@ pub fn catalog() -> Value {
                 "cancel_desktop_task",
                 "desktop_canvas_projects",
                 "save_desktop_canvas_project",
-                "delete_desktop_canvas_projects"
+                "delete_desktop_canvas_projects",
+                "desktop_canvas_project_updated_at"
             ],
             "desktop_runtime": [
                 "ffmpeg_probe",

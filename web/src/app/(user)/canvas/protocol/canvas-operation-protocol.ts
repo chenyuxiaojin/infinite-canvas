@@ -2,6 +2,9 @@ import type { CanvasConnection, CanvasNodeData, CanvasNodeMetadata, Position } f
 
 export const CANVAS_OPERATION_PROTOCOL_VERSION = 1 as const;
 
+const HUMAN_AUDIT_LIMIT = 20;
+const AUTOMATION_AUDIT_LIMIT = 100;
+
 export type CanvasOperationActor = "human" | "agent" | "system";
 
 export type CanvasProtocolTaskStatus = "pending_approval" | "queued" | "running" | "cancel_requested" | "cancelled" | "succeeded" | "failed";
@@ -128,6 +131,12 @@ export type CanvasProcessedRequest = {
     result: CanvasOperationBatchResult;
 };
 
+export type CanvasOperationHistory = {
+    prunedAuditEntries: number;
+    prunedRequestEntries: number;
+    latestPrunedRevision: number;
+};
+
 export type CanvasOperationState = {
     version: typeof CANVAS_OPERATION_PROTOCOL_VERSION;
     revision: number;
@@ -135,6 +144,7 @@ export type CanvasOperationState = {
     tasks: Record<string, CanvasProtocolTask>;
     requests: Record<string, CanvasProcessedRequest>;
     audit: CanvasOperationAuditEntry[];
+    history: CanvasOperationHistory;
 };
 
 export type CanvasProtocolProject = {
@@ -169,6 +179,7 @@ export function createCanvasOperationState(project: Pick<CanvasProtocolProject, 
         tasks: migrateEmbeddedTasks(project.nodes),
         requests: {},
         audit: [],
+        history: { prunedAuditEntries: 0, prunedRequestEntries: 0, latestPrunedRevision: 0 },
     };
 }
 
@@ -184,8 +195,9 @@ export function migrateCanvasProject<TProject extends CanvasProtocolProject>(pro
     const fallbackTasks = Object.fromEntries(
         Object.entries(fallback.tasks).filter(([taskId]) => !managedRuntimeTaskIds.has(taskId)),
     );
-    const requests = isRecord(source?.requests) ? (source.requests as Record<string, CanvasProcessedRequest>) : fallback.requests;
-    const audit = Array.isArray(source?.audit) ? (source.audit as CanvasOperationAuditEntry[]) : fallback.audit;
+    const sourceRequests = isRecord(source?.requests) ? (source.requests as Record<string, CanvasProcessedRequest>) : fallback.requests;
+    const sourceAudit = Array.isArray(source?.audit) ? (source.audit as CanvasOperationAuditEntry[]) : fallback.audit;
+    const compactedHistory = compactOperationHistory(sourceAudit, sourceRequests, source?.history);
 
     return {
         ...project,
@@ -195,8 +207,9 @@ export function migrateCanvasProject<TProject extends CanvasProtocolProject>(pro
             revision: nonNegativeInteger(source?.revision) ?? 0,
             locks,
             tasks: { ...fallbackTasks, ...tasks },
-            requests,
-            audit,
+            requests: compactedHistory.requests,
+            audit: compactedHistory.audit,
+            history: compactedHistory.history,
         },
     };
 }
@@ -216,17 +229,14 @@ export function rebindCanvasProjectIdentity<TProject extends CanvasProtocolProje
         entry.result.projectId = projectId;
         return entry;
     });
-    project.operationState.requests = Object.fromEntries(
-        project.operationState.audit
-            .filter((entry) => validId(entry.batch.requestId))
-            .map((entry) => [
-                entry.batch.requestId,
-                {
-                    fingerprint: fingerprintBatch(entry.batch),
-                    result: clone(entry.result),
-                },
-            ]),
+    const compactedHistory = compactOperationHistory(
+        project.operationState.audit,
+        project.operationState.requests,
+        project.operationState.history,
     );
+    project.operationState.audit = compactedHistory.audit;
+    project.operationState.requests = compactedHistory.requests;
+    project.operationState.history = compactedHistory.history;
     return project;
 }
 
@@ -255,17 +265,12 @@ export function buildCanvasStructureOperations(current: Pick<CanvasProtocolProje
             return;
         }
         if (stableStringify(previous) === stableStringify(node)) return;
+        const patch = buildNodeUpdatePatch(previous, node);
+        if (!Object.keys(patch).length) return;
         operations.push({
             type: "node.update",
             nodeId: node.id,
-            patch: {
-                type: node.type,
-                title: node.title,
-                position: clone(node.position),
-                width: node.width,
-                height: node.height,
-                metadata: clone(node.metadata || {}),
-            },
+            patch,
         });
     });
     nextConnections.forEach((connection) => {
@@ -275,6 +280,74 @@ export function buildCanvasStructureOperations(current: Pick<CanvasProtocolProje
         }
     });
     return operations;
+}
+
+function buildNodeUpdatePatch(previous: CanvasNodeData, node: CanvasNodeData): CanvasNodeUpdatePatch {
+    const patch: CanvasNodeUpdatePatch = {};
+    if (previous.type !== node.type) patch.type = node.type;
+    if (previous.title !== node.title) patch.title = node.title;
+    if (stableStringify(previous.position) !== stableStringify(node.position)) patch.position = clone(node.position);
+    if (previous.width !== node.width) patch.width = node.width;
+    if (previous.height !== node.height) patch.height = node.height;
+
+    const previousMetadata = previous.metadata || {};
+    const metadataEntries = Object.entries(node.metadata || {}).filter(
+        ([key, value]) => stableStringify(previousMetadata[key as keyof CanvasNodeMetadata]) !== stableStringify(value),
+    );
+    if (metadataEntries.length) {
+        patch.metadata = Object.fromEntries(metadataEntries.map(([key, value]) => [key, clone(value)])) as CanvasNodeMetadata;
+    }
+    return patch;
+}
+
+function compactOperationHistory(
+    audit: CanvasOperationAuditEntry[],
+    sourceRequests: Record<string, CanvasProcessedRequest>,
+    sourceHistory: unknown,
+) {
+    let humanSlots = HUMAN_AUDIT_LIMIT;
+    let automationSlots = AUTOMATION_AUDIT_LIMIT;
+    const retainedIndexes = new Set<number>();
+    for (let index = audit.length - 1; index >= 0; index -= 1) {
+        if (audit[index].batch.actor === "human") {
+            if (humanSlots <= 0) continue;
+            humanSlots -= 1;
+        } else {
+            if (automationSlots <= 0) continue;
+            automationSlots -= 1;
+        }
+        retainedIndexes.add(index);
+    }
+
+    const retainedAudit = audit.filter((_, index) => retainedIndexes.has(index));
+    const prunedAudit = audit.filter((_, index) => !retainedIndexes.has(index));
+    const requests = Object.fromEntries(
+        retainedAudit
+            .filter((entry) => (entry.batch.actor === "agent" || entry.batch.actor === "system") && validId(entry.batch.requestId))
+            .map((entry) => [
+                entry.batch.requestId.trim(),
+                { fingerprint: fingerprintBatch(entry.batch), result: clone(entry.result) },
+            ]),
+    );
+    const previous = isRecord(sourceHistory) ? sourceHistory : {};
+    const latestPrunedRevision = prunedAudit.reduce(
+        (revision, entry) => Math.max(revision, nonNegativeInteger(entry.result.revision) ?? 0),
+        0,
+    );
+    const history: CanvasOperationHistory = {
+        prunedAuditEntries: (nonNegativeInteger(previous.prunedAuditEntries) ?? 0) + prunedAudit.length,
+        prunedRequestEntries: (nonNegativeInteger(previous.prunedRequestEntries) ?? 0)
+            + Object.keys(sourceRequests).filter((requestId) => !requests[requestId]).length,
+        latestPrunedRevision: Math.max(nonNegativeInteger(previous.latestPrunedRevision) ?? 0, latestPrunedRevision),
+    };
+    return { audit: retainedAudit, requests, history };
+}
+
+function compactCanvasOperationHistory(state: CanvasOperationState) {
+    const compacted = compactOperationHistory(state.audit, state.requests, state.history);
+    state.audit = compacted.audit;
+    state.requests = compacted.requests;
+    state.history = compacted.history;
 }
 
 export function applyCanvasOperationBatch<TProject extends CanvasProtocolProject>(sourceProject: TProject, batch: CanvasOperationBatch, options: ApplyOptions = {}): CanvasOperationOutcome<TProject> {
@@ -299,9 +372,9 @@ export function applyCanvasOperationBatch<TProject extends CanvasProtocolProject
     }
 
     const envelopeError = validateBatchEnvelope(project, batch);
-    if (envelopeError) return recordRejection(project, batch, fingerprint, processedAt, envelopeError);
+    if (envelopeError) return recordRejection(project, batch, processedAt, envelopeError);
     if (batch.baseRevision !== state.revision) {
-        return recordRejection(project, batch, fingerprint, processedAt, {
+        return recordRejection(project, batch, processedAt, {
             code: "stale_revision",
             message: `画布 revision 已从 ${batch.baseRevision} 变为 ${state.revision}`,
             currentRevision: state.revision,
@@ -326,7 +399,7 @@ export function applyCanvasOperationBatch<TProject extends CanvasProtocolProject
     } catch (error) {
         const operationError = error instanceof OperationFailure ? error.error : { code: "invalid_batch" as const, message: error instanceof Error ? error.message : "画布批次执行失败" };
         const cleanProject = clone(migrateCanvasProject(sourceProject));
-        return recordRejection(cleanProject, batch, fingerprint, processedAt, operationError);
+        return recordRejection(cleanProject, batch, processedAt, operationError);
     }
 
     state.revision = previousRevision + 1;
@@ -350,7 +423,7 @@ export function applyCanvasOperationBatch<TProject extends CanvasProtocolProject
         ...(batch.actor === "agent" ? { undoSnapshot } : {}),
     };
     state.audit.push(entry);
-    state.requests[requestId] = { fingerprint, result: clone(result) };
+    compactCanvasOperationHistory(state);
     return { project, result };
 }
 
@@ -571,16 +644,13 @@ function validateBatchEnvelope(project: CanvasProtocolProject, batch: CanvasOper
 function recordRejection<TProject extends CanvasProtocolProject>(
     project: TProject & { operationState: CanvasOperationState },
     batch: CanvasOperationBatch,
-    fingerprint: string,
     processedAt: string,
     error: CanvasOperationError,
 ): CanvasOperationOutcome<TProject> {
     const result = rejectedResult(batch, project.operationState.revision, processedAt, error);
     project.updatedAt = processedAt;
     project.operationState.audit.push({ batch: clone(batch), result: clone(result) });
-    if (validId(batch.requestId)) {
-        project.operationState.requests[batch.requestId.trim()] = { fingerprint, result: clone(result) };
-    }
+    compactCanvasOperationHistory(project.operationState);
     return { project, result };
 }
 
@@ -748,7 +818,7 @@ function embeddedStatus(status?: CanvasNodeMetadata["status"]): CanvasProtocolTa
     return "queued";
 }
 
-function canonicalizeStoredNode(node: CanvasNodeData): CanvasNodeData {
+export function canonicalizeStoredNode(node: CanvasNodeData): CanvasNodeData {
     const storageKey = node.metadata?.storageKey;
     const content = node.metadata?.content;
     const runtimeOnly = node.metadata?.localMediaRuntime;

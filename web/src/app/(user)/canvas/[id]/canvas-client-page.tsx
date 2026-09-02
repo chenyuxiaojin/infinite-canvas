@@ -106,6 +106,7 @@ import { DEFAULT_CANVAS_AGENT_PANEL, DEFAULT_CANVAS_SIDE_PANEL, useCanvasStore, 
 import {
     CANVAS_OPERATION_PROTOCOL_VERSION,
     buildCanvasStructureOperations,
+    canonicalizeStoredNode,
     type CanvasOperation,
     type CanvasOperationOutcome,
     type CanvasOperationState,
@@ -178,6 +179,8 @@ const VIDEO_NODE_MAX_HEIGHT = 420;
 const CONNECTION_HANDLE_HIT_RADIUS = 40;
 const CONNECTION_NODE_HIT_PADDING = 32;
 const NODE_STATUS_LOADING = "loading" as const;
+// 稳定空数组：避免每次渲染用 `|| []` 生成新身份打穿 CanvasNode 的 React.memo
+const EMPTY_MENTION_REFERENCES: never[] = [];
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
 const AGENT_PRIMARY_SCRIPT_NODE_SIZE = { width: 550, height: 600 };
@@ -724,7 +727,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         let active = true;
         const refresh = () => {
             if (!active) return;
-            void refreshFromDesktop().catch((error) => {
+            void refreshFromDesktop(projectId).catch((error) => {
                 console.error("Failed to refresh the shared desktop canvas", error);
             });
         };
@@ -734,7 +737,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             active = false;
             window.clearInterval(timer);
         };
-    }, [desktopRuntime, hydrated, refreshFromDesktop]);
+    }, [desktopRuntime, hydrated, projectId, refreshFromDesktop]);
 
     useEffect(() => {
         if (!projectLoaded || !currentProject) return;
@@ -987,8 +990,31 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
             const nextNodes = updater(nodesRef.current);
             updateProject(projectId, { nodes: nextNodes, connections: connectionsRef.current });
             const committedNodes = useCanvasStore.getState().openProject(projectId)?.nodes || nextNodes;
-            nodesRef.current = committedNodes;
-            setNodes(committedNodes);
+            // 身份保持合并：提交管道会 canonicalize 节点（克隆对象、把 local-ref 媒体的
+            // content 重置回 storageKey 并剥离 localMediaRuntime）。直接回灌会让图片节点的
+            // src 瞬间失效（黑闪一帧），并让全部节点换新身份触发整画布重渲染。
+            // 值未变的节点沿用提交前的对象；内容真变但媒体解析结果仍有效的，保留运行时字段。
+            const nextById = new Map(nextNodes.map((node) => [node.id, node]));
+            const mergedNodes = committedNodes.map((committed) => {
+                const prev = nextById.get(committed.id);
+                if (!prev || prev === committed) return committed;
+                if (JSON.stringify(canonicalizeStoredNode(prev)) === JSON.stringify(committed)) return prev;
+                const prevMeta = prev.metadata;
+                const committedMeta = committed.metadata;
+                if (
+                    prevMeta?.localMediaRuntime &&
+                    typeof committedMeta?.storageKey === "string" &&
+                    committedMeta.storageKey === prevMeta.storageKey &&
+                    committedMeta.content === committedMeta.storageKey &&
+                    typeof prevMeta.content === "string" &&
+                    prevMeta.content !== prevMeta.storageKey
+                ) {
+                    return { ...committed, metadata: { ...committedMeta, content: prevMeta.content, localMediaRuntime: prevMeta.localMediaRuntime } };
+                }
+                return committed;
+            });
+            nodesRef.current = mergedNodes;
+            setNodes(mergedNodes);
         },
         [projectId, updateProject],
     );
@@ -1855,6 +1881,22 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         setIsNodeDragging(true);
     }, []);
 
+    // 以下回调必须保持稳定身份：它们作为 props 传给每个 CanvasNode，内联写法会打穿 React.memo，
+    // 导致拖动/打字时全部节点（含 4K 图片）逐帧重渲染（WKWebView 下表现为闪屏/黑闪）
+    const handleNodeHoverStart = useCallback((nodeId: string) => {
+        if (nodeDraggingRef.current) return;
+        setHoveredNodeId(nodeId);
+    }, []);
+    const handleNodeHoverEnd = useCallback((nodeId: string) => {
+        setHoveredNodeId((current) => (current === nodeId ? null : current));
+    }, []);
+    const handleNodeViewImage = useCallback((node: CanvasNodeData) => setPreviewNodeId(node.id), []);
+    const handleNodeContextMenu = useCallback((event: ReactMouseEvent, id: string) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId: id });
+    }, []);
+
     const finishNodeDrag = useCallback(
         (clientX?: number, clientY?: number) => {
             if (rafRef.current) {
@@ -1924,21 +1966,16 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     dragRef.current.hasMoved = true;
                 }
 
-                const movedIds = new Set(initialPositions.map((item) => item.id));
-                const previewNodes = nodesRef.current.map((node) => {
-                    const initial = initialPositions.find((item) => item.id === node.id);
-                    return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
-                });
-                setDropTargetGroupId(findGroupDropTarget(movedIds, previewNodes)?.id || null);
-
+                // mousemove 可达 120Hz：布局预览与落组判定全部合并进同一帧 rAF，一帧只算一次
                 if (rafRef.current) cancelAnimationFrame(rafRef.current);
                 rafRef.current = requestAnimationFrame(() => {
-                    setNodes((prev) =>
-                        prev.map((node) => {
-                            const initial = initialPositions.find((item) => item.id === node.id);
-                            return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
-                        }),
-                    );
+                    const movedIds = new Set(initialPositions.map((item) => item.id));
+                    const previewNodes = nodesRef.current.map((node) => {
+                        const initial = initialPositions.find((item) => item.id === node.id);
+                        return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
+                    });
+                    setDropTargetGroupId(findGroupDropTarget(movedIds, previewNodes)?.id || null);
+                    setNodes(previewNodes);
                     rafRef.current = null;
                 });
                 return;
@@ -4708,6 +4745,9 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         [effectiveConfig, message, openConfigDialog, projectId],
     );
 
+    // 稳定身份包装：同上，作为 CanvasNode prop 不能用内联箭头函数
+    const handleNodeRetry = useCallback((node: CanvasNodeData) => void handleRetryNode(node), [handleRetryNode]);
+
     const generateImageFromTextNode = useCallback(
         (node: CanvasNodeData) => {
             const prompt = (node.metadata?.content || node.metadata?.prompt || "").trim();
@@ -5041,14 +5081,14 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                             isLocked={Boolean(currentProject?.operationState.locks[node.id])}
                             isDimmed={Boolean(spotlightGroupId && node.metadata?.groupId !== spotlightGroupId && node.id !== spotlightGroupId)}
                             lastAgentChangedAt={currentProject ? canvasCollaborationAdapter.lastAgentChangedAt(currentProject.operationState, node.id) : undefined}
-                            mentionReferences={mentionReferencesByNodeId.get(node.id) || []}
+                            mentionReferences={node.type === CanvasNodeType.Text ? mentionReferencesByNodeId.get(node.id) || EMPTY_MENTION_REFERENCES : EMPTY_MENTION_REFERENCES}
                             now={
                                 (node.metadata?.status === NODE_STATUS_LOADING && !node.metadata.content && (node.type === CanvasNodeType.Video || isCanvasImageNodeType(node.type) || node.type === CanvasNodeType.Audio)) ||
                                 (currentProject && canvasCollaborationAdapter.lastAgentChangedAt(currentProject.operationState, node.id))
                                     ? canvasNow
                                     : undefined
                             }
-                            renderPanel={(panelNode) =>
+                            renderPanel={dialogNodeId !== node.id ? undefined : (panelNode) =>
                                 panelNode.type === CanvasNodeType.Config ? (
                                     <CanvasConfigComposer
                                         value={panelNode.metadata?.composerContent ?? panelNode.metadata?.prompt ?? ""}
@@ -5076,7 +5116,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                                     />
                                 )
                             }
-                            renderNodeContent={(contentNode) =>
+                            renderNodeContent={node.type !== CanvasNodeType.Config && node.type !== CanvasNodeType.Director ? undefined : (contentNode) =>
                                 contentNode.type === CanvasNodeType.Director ? (
                                     <CanvasDirectorNodePanel onOpen={() => setOpenDirectorNodeId(contentNode.id)} />
                                 ) : (
@@ -5096,13 +5136,8 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                                 )
                             }
                             onMouseDown={handleNodeMouseDown}
-                            onHoverStart={(nodeId) => {
-                                if (nodeDraggingRef.current) return;
-                                setHoveredNodeId(nodeId);
-                            }}
-                            onHoverEnd={(nodeId) => {
-                                setHoveredNodeId((current) => (current === nodeId ? null : current));
-                            }}
+                            onHoverStart={handleNodeHoverStart}
+                            onHoverEnd={handleNodeHoverEnd}
                             onConnectStart={handleConnectStart}
                             onResize={handleNodeResize}
                             onResizeCommit={handleNodeResizeCommit}
@@ -5113,15 +5148,11 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                             onToggleLock={toggleNodeLock}
                             onToggleBatch={toggleBatchExpanded}
                             onSetBatchPrimary={setBatchPrimary}
-                            onRetry={(node) => void handleRetryNode(node)}
+                            onRetry={handleNodeRetry}
                             onGenerateImage={generateImageFromTextNode}
-                            onViewImage={(node) => setPreviewNodeId(node.id)}
+                            onViewImage={handleNodeViewImage}
                             onSelectReference={selectNodeReference}
-                            onContextMenu={(event, id) => {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId: id });
-                            }}
+                            onContextMenu={handleNodeContextMenu}
                         />
                     ))}
 
