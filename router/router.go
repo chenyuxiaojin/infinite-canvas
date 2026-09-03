@@ -116,6 +116,12 @@ func New() *gin.Engine {
 	v1.POST("/user-data/assets", gin.WrapF(handler.SaveUserAssetData))
 	api.GET("/proxy-image", gin.WrapF(handler.ProxyImage))
 	api.GET("/prompts", middleware.OptionalAuth, gin.WrapF(handler.Prompts))
+	api.GET("/prompt-categories", gin.WrapF(handler.PromptCategories))
+	api.POST("/prompt-categories", gin.WrapF(handler.SavePromptCategory))
+	api.DELETE("/prompt-categories/:category", func(c *gin.Context) {
+		handler.DeletePromptCategoryHandler(c.Writer, c.Request, c.Param("category"))
+	})
+	api.POST("/prompts/sync", gin.WrapF(handler.SyncPrompts))
 	api.GET("/assets", middleware.OptionalAuth, gin.WrapF(handler.Assets))
 	api.POST("/admin/login", gin.WrapF(handler.AdminLogin))
 

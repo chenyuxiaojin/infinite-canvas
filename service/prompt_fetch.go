@@ -3,8 +3,10 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,13 +17,13 @@ import (
 )
 
 const (
-	gptImage2RawBase             = "https://raw.githubusercontent.com/tigerowo/awesome-gpt-image-2-prompts/main"
-	awesomeGptImageRawBase       = "https://raw.githubusercontent.com/ZeroLu/awesome-gpt-image/main"
-	awesomeGpt4oImagePromptsBase = "https://raw.githubusercontent.com/ImgEdify/Awesome-GPT4o-Image-Prompts/main"
-	youMindGptImage2RawBase      = "https://raw.githubusercontent.com/YouMind-OpenLab/awesome-gpt-image-2/main"
-	youMindNanoBananaProRawBase  = "https://raw.githubusercontent.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts/main"
+	gptImage2RawBase              = "https://raw.githubusercontent.com/tigerowo/awesome-gpt-image-2-prompts/main"
+	awesomeGptImageRawBase        = "https://raw.githubusercontent.com/ZeroLu/awesome-gpt-image/main"
+	awesomeGpt4oImagePromptsBase  = "https://raw.githubusercontent.com/ImgEdify/Awesome-GPT4o-Image-Prompts/main"
+	youMindGptImage2RawBase       = "https://raw.githubusercontent.com/YouMind-OpenLab/awesome-gpt-image-2/main"
+	youMindNanoBananaProRawBase   = "https://raw.githubusercontent.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts/main"
 	xianyuAwesomeGptImage2RawBase = "https://raw.githubusercontent.com/xianyu110/awesome-gptimage2/main"
-	davidWuGptImage2RawBase      = "https://raw.githubusercontent.com/davidwuw0811-boop/awesome-gpt-image2-prompts/main"
+	davidWuGptImage2RawBase       = "https://raw.githubusercontent.com/davidwuw0811-boop/awesome-gpt-image2-prompts/main"
 )
 
 var gptImage2CaseFiles = []string{"README.md", "cases/ad-creative.md", "cases/character.md", "cases/comparison.md", "cases/ecommerce.md", "cases/portrait.md", "cases/poster.md", "cases/ui.md"}
@@ -54,6 +56,7 @@ type xianyuLatestPrompt struct {
 	ImageURLs       []string `json:"image_urls"`
 	PrimaryImageURL string   `json:"primary_image_url"`
 }
+
 type davidWuGptImage2Prompt struct {
 	ID         int    `json:"id"`
 	TitleEN    string `json:"title_en"`
@@ -73,7 +76,7 @@ func SyncPromptCategory(category string) ([]model.PromptCategory, error) {
 		if item.Category != category {
 			continue
 		}
-		items, err := buildPromptCategory(item.Category)
+		items, err := buildPromptCategoryItem(item)
 		if err != nil {
 			return nil, err
 		}
@@ -83,6 +86,138 @@ func SyncPromptCategory(category string) ([]model.PromptCategory, error) {
 		return repository.ListPromptCategories()
 	}
 	return nil, errors.New("未知提示词分类")
+}
+
+func buildPromptCategoryItem(item model.PromptCategory) ([]model.Prompt, error) {
+	// 本地 Markdown 文件
+	if item.SourceType == "local_markdown" || (item.PathOrURL != "" && strings.HasPrefix(item.PathOrURL, "/")) {
+		return parseMarkdownFileToPrompts(item.PathOrURL, item.Category)
+	}
+	// 自定义网络 URL
+	if item.SourceType == "custom_url" || (item.PathOrURL != "" && (strings.HasPrefix(item.PathOrURL, "http://") || strings.HasPrefix(item.PathOrURL, "https://"))) {
+		return parseURLToPrompts(item.PathOrURL, item.Category)
+	}
+	// 既有内置硬编码源
+	return buildPromptCategory(item.Category)
+}
+
+func parseMarkdownFileToPrompts(filePath, category string) ([]model.Prompt, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("读取本地提示词文件失败 (%s): %w", filePath, err)
+	}
+	return parseMarkdownTextToPrompts(string(data), category, filePath)
+}
+
+func parseURLToPrompts(targetURL, category string) ([]model.Prompt, error) {
+	client := http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(targetURL)
+	if err != nil {
+		return nil, fmt.Errorf("拉取远端提示词 URL 失败 (%s): %w", targetURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("拉取远端提示词 HTTP 状态异常: %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return parseMarkdownTextToPrompts(string(body), category, targetURL)
+}
+
+func parseMarkdownTextToPrompts(text, category, sourceRef string) ([]model.Prompt, error) {
+	lines := strings.Split(text, "\n")
+	var prompts []model.Prompt
+	now := time.Now().Format(time.RFC3339)
+
+	var currentTitle string
+	var currentLines []string
+	var inCodeBlock bool
+	var codeBlockLines []string
+
+	flushSection := func() {
+		if currentTitle == "" {
+			return
+		}
+		promptContent := ""
+		if len(codeBlockLines) > 0 {
+			promptContent = strings.TrimSpace(strings.Join(codeBlockLines, "\n"))
+		} else if len(currentLines) > 0 {
+			promptContent = strings.TrimSpace(strings.Join(currentLines, "\n"))
+		}
+		if len(promptContent) > 10 {
+			titleClean := regexp.MustCompile(`\[(.*?)\]\(.*?\)`).ReplaceAllString(currentTitle, "$1")
+			titleClean = strings.TrimSpace(strings.TrimLeft(titleClean, "#*- 0123456789.:："))
+			if titleClean == "" {
+				titleClean = fmt.Sprintf("提示词 %d", len(prompts)+1)
+			}
+
+			// 智能提取标签
+			tags := []string{"视频创作"}
+			lowerContent := strings.ToLower(promptContent + " " + currentTitle)
+			if strings.Contains(lowerContent, "shot") || strings.Contains(lowerContent, "lens") || strings.Contains(lowerContent, "镜头") || strings.Contains(lowerContent, "机位") {
+				tags = append(tags, "运镜机位")
+			}
+			if strings.Contains(lowerContent, "close-up") || strings.Contains(lowerContent, "特写") || strings.Contains(lowerContent, "wide") || strings.Contains(lowerContent, "全景") {
+				tags = append(tags, "景别设计")
+			}
+			if strings.Contains(lowerContent, "lighting") || strings.Contains(lowerContent, "光影") || strings.Contains(lowerContent, "neon") {
+				tags = append(tags, "光影视效")
+			}
+			if strings.Contains(lowerContent, "seedance") {
+				tags = append(tags, "Seedance")
+			}
+			if strings.Contains(lowerContent, "minimax") || strings.Contains(lowerContent, "h3") {
+				tags = append(tags, "MiniMax-H3")
+			}
+
+			preview := promptContent
+			if len(preview) > 120 {
+				preview = preview[:120] + "..."
+			}
+
+			prompts = append(prompts, model.Prompt{
+				ID:        fmt.Sprintf("%s-%d", category, len(prompts)+1),
+				Title:     titleClean,
+				Prompt:    promptContent,
+				Tags:      tags,
+				Category:  category,
+				GithubURL: sourceRef,
+				Preview:   preview,
+				CreatedAt: now,
+				UpdatedAt: now,
+			})
+		}
+		currentTitle = ""
+		currentLines = nil
+		codeBlockLines = nil
+	}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			continue
+		}
+		if inCodeBlock {
+			codeBlockLines = append(codeBlockLines, line)
+			continue
+		}
+
+		if (strings.HasPrefix(trimmed, "## ") || strings.HasPrefix(trimmed, "### ")) && !inCodeBlock {
+			flushSection()
+			currentTitle = strings.TrimPrefix(strings.TrimPrefix(trimmed, "### "), "## ")
+			continue
+		}
+
+		if currentTitle != "" && trimmed != "" && !strings.HasPrefix(trimmed, "---") {
+			currentLines = append(currentLines, line)
+		}
+	}
+	flushSection()
+
+	return prompts, nil
 }
 
 func buildPromptCategory(category string) ([]model.Prompt, error) {

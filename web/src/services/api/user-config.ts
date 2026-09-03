@@ -25,8 +25,16 @@ export type StorageCapacityResult = {
     providerName: string;
 };
 
+const userConfigRequests = new Map<string, Promise<UserConfigPayload>>();
+
 export async function fetchUserConfig(token: string) {
-    return apiGet<UserConfigPayload>("/api/v1/user-config", undefined, token);
+    const existing = userConfigRequests.get(token);
+    if (existing) return existing;
+    const request = apiGet<UserConfigPayload>("/api/v1/user-config", undefined, token).finally(() => {
+        if (userConfigRequests.get(token) === request) userConfigRequests.delete(token);
+    });
+    userConfigRequests.set(token, request);
+    return request;
 }
 
 export async function syncUserModelConfig(token: string, config: AiConfig) {

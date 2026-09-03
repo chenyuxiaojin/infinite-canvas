@@ -5,6 +5,15 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
+## 画布运行时性能
+
+- 平移/缩放改为直接改世界层 DOM，停手后再回写 React；滚轮已合并到 rAF。
+- 拖节点期间只改被拖节点和连线的 transform/path，松手才 `setNodes`。
+- 节点 `memo` 的回调和面板改为稳定引用；缩小到 0.2 以下不再解码原图/原视频。
+- 打开画布不再一次性 hydrate 全部媒体，只加载视口内节点；视频 `preload="none"`，同时只允许一条在播。
+- 画布 persist 按项目分片写入 IndexedDB，视口/侧栏改动不改 `updatedAt`、不触发云端全量 PUT。
+- 桌面 Go/Node sidecar 改为并行启动；切到后台标签会停任务轮询；助手面板改为动态加载；`ProConfigProvider` 只留在管理后台。
+
 ## macOS Tauri 2 桌面壳
 
 - 新增 Apple Silicon macOS 桌面构建，复用现有 Next.js standalone 和 Go API，不改写 React 画布。

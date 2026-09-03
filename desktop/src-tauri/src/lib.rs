@@ -13,6 +13,7 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 mod runtime;
+mod terminal;
 
 use runtime::DesktopRuntime;
 
@@ -244,8 +245,6 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
             ("STORAGE_DRIVER", "sqlite"),
         ],
     )?;
-    wait_for_port(API_PORT)?;
-
     spawn_sidecar(
         app.handle(),
         "node",
@@ -258,6 +257,7 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
             ("PORT", &WEB_PORT.to_string()),
         ],
     )?;
+    wait_for_port(API_PORT)?;
     wait_for_port(WEB_PORT)?;
 
     WebviewWindowBuilder::new(
@@ -281,6 +281,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(Sidecars::default())
+        .manage(terminal::TerminalManager::default())
         .invoke_handler(tauri::generate_handler![
             runtime::probe_desktop_runtime,
             runtime::generate_desktop_test_clip,
@@ -289,6 +290,10 @@ pub fn run() {
             runtime::desktop_task_media,
             runtime::cancel_desktop_task,
             save_canvas_export,
+            terminal::pty_spawn,
+            terminal::pty_write,
+            terminal::pty_resize,
+            terminal::pty_terminate,
         ])
         .setup(|app| {
             if let Err(error) = start_desktop(app) {

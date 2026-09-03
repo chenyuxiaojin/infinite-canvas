@@ -28,6 +28,10 @@ type PromptCategory struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	GithubURL   string `json:"githubUrl"`
+	SourceType  string `json:"sourceType"` // "remote_github", "local_markdown", "custom_url"
+	PathOrURL   string `json:"pathOrUrl"`  // URL or absolute/relative file path
 	Remote      bool   `json:"remote"`
+	Enabled     bool   `json:"enabled" gorm:"default:true"`
 	UpdatedAt   string `json:"updatedAt"`
 }
+

@@ -15,6 +15,7 @@ import type { CanvasResourceReference } from "../utils/canvas-resource-reference
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
+const EMPTY_MENTION_REFERENCES: CanvasResourceReference[] = [];
 const CanvasPanoramaViewer = dynamic(() => import("./canvas-panorama-viewer"), { ssr: false, loading: () => null });
 
 type CanvasNodeProps = {
@@ -30,6 +31,7 @@ type CanvasNodeProps = {
     showPanel: boolean;
     showImageInfo: boolean;
     mentionReferences?: CanvasResourceReference[];
+    mediaLite?: boolean;
     now?: number;
     renderPanel?: (node: CanvasNodeData) => ReactNode;
     renderNodeContent?: (node: CanvasNodeData) => ReactNode;
@@ -69,6 +71,7 @@ type NodeContentRendererProps = {
     batchOpening: boolean;
     batchRecovering: boolean;
     now?: number;
+    mediaLite?: boolean;
     renderNodeContent?: (node: CanvasNodeData) => ReactNode;
     onContentChange: (nodeId: string, content: string) => void;
     onStopEditing: () => void;
@@ -93,7 +96,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     editRequestNonce = 0,
     showPanel,
     showImageInfo,
-    mentionReferences = [],
+    mentionReferences = EMPTY_MENTION_REFERENCES,
+    mediaLite = false,
     now,
     renderPanel,
     renderNodeContent,
@@ -358,6 +362,7 @@ export const CanvasNode = React.memo(function CanvasNode({
             ) : null}
 
             <div
+                data-node-frame
                 className={`relative h-full w-full overflow-visible border ${isGroup ? "rounded-xl" : "rounded-3xl border-2"}`}
                 style={{
                     background: isGroup ? theme.node.panel : hasImageContent || hasVideoContent ? "transparent" : theme.node.fill,
@@ -406,6 +411,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                             node={data}
                             theme={theme}
                             isSelected={isSelected}
+                            mediaLite={mediaLite}
                             now={now}
                             isEditingContent={isEditingContent}
                             textareaRef={textareaRef}
@@ -640,6 +646,7 @@ function ImageNodeContent(props: NodeContentRendererProps) {
             batchRecovering={props.batchRecovering}
             onToggleBatch={props.onToggleBatch}
             onSetBatchPrimary={props.onSetBatchPrimary}
+            mediaLite={props.mediaLite}
         />
     );
 }
@@ -659,7 +666,8 @@ function PanoramaNodeContent(props: NodeContentRendererProps) {
             batchRecovering={props.batchRecovering}
             onToggleBatch={props.onToggleBatch}
             onSetBatchPrimary={props.onSetBatchPrimary}
-            media={<CanvasPanoramaViewer src={src} alt={props.node.title} proxyGeneratedPanorama={proxyGeneratedPanorama} expandOnDoubleClick={!props.isBatchRoot} onMoveStart={props.onMoveStart} onOpen={props.onViewImage ? () => props.onViewImage?.(props.node) : undefined} />}
+            mediaLite={props.mediaLite}
+            media={props.mediaLite ? undefined : <CanvasPanoramaViewer src={src} alt={props.node.title} proxyGeneratedPanorama={proxyGeneratedPanorama} expandOnDoubleClick={!props.isBatchRoot} onMoveStart={props.onMoveStart} onOpen={props.onViewImage ? () => props.onViewImage?.(props.node) : undefined} />}
         />
     );
 }
@@ -682,7 +690,9 @@ function EmptyImageContent({ node, theme, isBatchRoot, batchCount, batchExpanded
     return content;
 }
 
-function VideoNodeContent({ node, theme, isSelected, onViewImage }: NodeContentRendererProps) {
+let activeCanvasVideo: HTMLVideoElement | null = null;
+
+function VideoNodeContent({ node, theme, isSelected, mediaLite, onViewImage }: NodeContentRendererProps) {
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [mediaDurationMs, setMediaDurationMs] = useState(0);
@@ -703,6 +713,13 @@ function VideoNodeContent({ node, theme, isSelected, onViewImage }: NodeContentR
                 <span className="text-sm">空视频节点</span>
             </div>
         );
+    if (mediaLite) {
+        return (
+            <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-[18px] bg-black" data-canvas-no-zoom>
+                <Video className="size-7 opacity-50" />
+            </div>
+        );
+    }
     const controlStyle = { background: theme.toolbar.panel, color: theme.toolbar.item };
     const controlClassName = "absolute bottom-2 z-20 flex size-7 items-center justify-center rounded-md opacity-70 backdrop-blur transition-opacity hover:opacity-100";
     const keepVideoFocus = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -712,7 +729,25 @@ function VideoNodeContent({ node, theme, isSelected, onViewImage }: NodeContentR
     };
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[18px] bg-black" data-canvas-no-zoom>
-            <video ref={videoRef} src={node.metadata.content} tabIndex={-1} playsInline className="h-full w-full object-contain outline-none" onLoadedMetadata={(event) => setMediaDurationMs(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration * 1000 : 0)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} onKeyDown={(event) => { if (isSelected && event.code === "Space") { event.preventDefault(); event.stopPropagation(); togglePlayback(); } }} />
+            <video
+                ref={videoRef}
+                src={node.metadata.content}
+                tabIndex={-1}
+                playsInline
+                preload="none"
+                className="h-full w-full object-contain outline-none"
+                onLoadedMetadata={(event) => setMediaDurationMs(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration * 1000 : 0)}
+                onPlay={(event) => {
+                    if (activeCanvasVideo && activeCanvasVideo !== event.currentTarget) activeCanvasVideo.pause();
+                    activeCanvasVideo = event.currentTarget;
+                    setIsPlaying(true);
+                }}
+                onPause={(event) => {
+                    if (activeCanvasVideo === event.currentTarget) activeCanvasVideo = null;
+                    setIsPlaying(false);
+                }}
+                onKeyDown={(event) => { if (isSelected && event.code === "Space") { event.preventDefault(); event.stopPropagation(); togglePlayback(); } }}
+            />
             {mediaDurationMs > 0 ? <span className="pointer-events-none absolute left-2 top-2 z-20 flex h-7 items-center justify-center rounded-md px-2 text-[11px] font-medium opacity-70 backdrop-blur" style={controlStyle}>{new Date(mediaDurationMs).toISOString().slice(mediaDurationMs >= 3_600_000 ? 11 : 14, 19)}</span> : null}
             <button type="button" title={isPlaying ? "暂停" : "播放"} aria-label={isPlaying ? "暂停" : "播放"} className={`${controlClassName} left-2`} style={controlStyle} onClick={(event) => { event.stopPropagation(); togglePlayback(); }} onMouseDown={keepVideoFocus} onDoubleClick={(event) => event.stopPropagation()}>
                 {isPlaying ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
@@ -753,6 +788,7 @@ function ImageContent({
     onToggleBatch,
     onSetBatchPrimary,
     media,
+    mediaLite,
 }: {
     node: CanvasNodeData;
     isBatchRoot: boolean;
@@ -763,6 +799,7 @@ function ImageContent({
     onToggleBatch?: () => void;
     onSetBatchPrimary?: () => void;
     media?: ReactNode;
+    mediaLite?: boolean;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const isBatchChild = Boolean(node.metadata?.batchRootId);
@@ -770,14 +807,20 @@ function ImageContent({
     return (
         <BatchFrame batchCount={isBatchRoot ? batchCount : 0} batchExpanded={batchExpanded} batchOpening={batchOpening} batchRecovering={batchRecovering} onToggleBatch={onToggleBatch}>
             <div className="h-full w-full overflow-hidden rounded-3xl">
-                {media ?? (
+                {mediaLite ? (
+                    <div className="h-full w-full" style={{ background: theme.node.panel }} />
+                ) : (
+                    media ?? (
                     <img
                         src={node.metadata!.content!}
                         alt={node.title}
                         draggable={false}
+                        decoding="async"
+                        loading="lazy"
                         onDragStart={(event) => event.preventDefault()}
                         className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
                     />
+                    )
                 )}
             </div>
             {isBatchRoot ? (

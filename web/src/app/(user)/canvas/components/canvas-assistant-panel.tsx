@@ -8,6 +8,7 @@ import {
     Plus,
     RotateCcw,
     Sparkles,
+    Terminal as TerminalIcon,
     Trash2,
     Video,
     X,
@@ -17,6 +18,8 @@ import { motion } from "motion/react";
 import { nanoid } from "nanoid";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+import { CanvasTerminalDrawer } from "./canvas-terminal-drawer";
 
 import { ImageGenerationPending } from "@/components/image-generation-pending";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -64,6 +67,8 @@ type CanvasAssistantPanelProps = {
     onCollapse: () => void;
     initialRequest?: { prompt: string; references: CanvasAssistantReference[] } | null;
     onInitialRequestConsumed?: () => void;
+    projectId?: string;
+    projectTitle?: string;
 };
 
 type PendingDeleteConfirmation = {
@@ -91,6 +96,8 @@ export function CanvasAssistantPanel({
     onCollapse,
     initialRequest,
     onInitialRequestConsumed,
+    projectId,
+    projectTitle,
 }: CanvasAssistantPanelProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const effectiveConfig = useEffectiveConfig();
@@ -101,7 +108,7 @@ export function CanvasAssistantPanel({
     const pendingDeleteRef = useRef<PendingDeleteConfirmation | null>(null);
     const messageListRef = useRef<HTMLDivElement>(null);
     const consumedReferenceNodeClickVersionRef = useRef(0);
-    const [view, setView] = useState<"chat" | "history">("chat");
+    const [view, setView] = useState<"chat" | "terminal" | "history">("chat");
     const [prompt, setPrompt] = useState("");
     const [isRunning, setIsRunning] = useState(false);
     const [checkedChatIds, setCheckedChatIds] = useState<string[]>([]);
@@ -380,10 +387,30 @@ export function CanvasAssistantPanel({
                 style={{ width, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
             >
                 <button type="button" className="absolute inset-y-0 left-0 z-40 w-4 -translate-x-1/2 cursor-col-resize" onMouseDown={startResize} aria-label="调整右侧面板宽度" />
-                <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: theme.node.stroke }}>
-                    <div className="flex items-center gap-2 text-sm font-medium">
-                        <Bot className="size-4" />
-                        {view === "history" ? "历史记录" : "创作 Agent"}
+                <div className="flex items-center justify-between border-b px-3 py-2.5" style={{ borderColor: theme.node.stroke }}>
+                    <div className="flex items-center gap-1 rounded-lg bg-stone-900/60 p-0.5 ring-1 ring-stone-800">
+                        <button
+                            type="button"
+                            onClick={() => setView("chat")}
+                            className={cn(
+                                "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition cursor-pointer",
+                                view === "chat" ? "bg-stone-800 text-white shadow-sm" : "text-stone-400 hover:text-stone-200"
+                            )}
+                        >
+                            <Bot className="size-3.5" />
+                            <span>创作 Agent</span>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setView("terminal")}
+                            className={cn(
+                                "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition cursor-pointer",
+                                view === "terminal" ? "bg-stone-800 text-emerald-400 shadow-sm" : "text-stone-400 hover:text-stone-200"
+                            )}
+                        >
+                            <TerminalIcon className="size-3.5" />
+                            <span>TUI 终端</span>
+                        </button>
                     </div>
                     <div className="flex items-center gap-1">
                         {view === "history" ? (
@@ -399,51 +426,63 @@ export function CanvasAssistantPanel({
                         <Tooltip title={view === "history" ? "返回对话" : "历史记录"}>
                             <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" style={iconButtonStyle} icon={<History className="size-4" />} onClick={() => setView(view === "history" ? "chat" : "history")} />
                         </Tooltip>
-                        <Tooltip title="新对话">
-                            <Button
-                                type="text"
-                                shape="circle"
-                                className="!h-8 !w-8 !min-w-8"
-                                style={iconButtonStyle}
-                                icon={<Plus className="size-4" />}
-                                disabled={!hasMessages}
-                                onClick={() => {
-                                    startChatSession();
-                                    setView("chat");
-                                }}
-                            />
-                        </Tooltip>
-                        <Tooltip title="收起对话">
+                        {view === "chat" && (
+                            <Tooltip title="新对话">
+                                <Button
+                                    type="text"
+                                    shape="circle"
+                                    className="!h-8 !w-8 !min-w-8"
+                                    style={iconButtonStyle}
+                                    icon={<Plus className="size-4" />}
+                                    disabled={!hasMessages}
+                                    onClick={() => {
+                                        startChatSession();
+                                        setView("chat");
+                                    }}
+                                />
+                            </Tooltip>
+                        )}
+                        <Tooltip title="收起面板">
                             <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" style={iconButtonStyle} icon={<PanelRightClose className="size-4" />} onClick={collapse} />
                         </Tooltip>
                     </div>
                 </div>
 
-                <div ref={messageListRef} className="thin-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
-                    {view === "history" ? (
-                        <AssistantHistory
-                            sessions={historySessions}
-                            activeSession={activeSession}
-                            checkedIds={checkedChatIds.filter((id) => historySessions.some((session) => session.id === id))}
-                            onToggleChecked={(id, checked) => setCheckedChatIds((previous) => (checked ? [...new Set([...previous, id])] : previous.filter((item) => item !== id)))}
-                            onOpen={(id) => {
-                                commitSessions(sessionsRef.current, id);
-                                setView("chat");
-                            }}
-                            onDelete={(id) => setDeleteChatIds([id])}
+                {view === "terminal" ? (
+                    <div className="min-h-0 flex-1 overflow-hidden">
+                        <CanvasTerminalDrawer
+                            projectId={projectId}
+                            projectTitle={projectTitle}
+                            selectedNodes={nodes.filter((n) => selectedNodeIds.has(n.id))}
                         />
-                    ) : messages.length ? (
-                        <AssistantMessages messages={messages} onRetry={retryMessage} />
-                    ) : (
-                        <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-                            <div className="grid size-12 place-items-center rounded-2xl" style={{ background: theme.node.fill }}>
-                                <Sparkles className="size-5" />
+                    </div>
+                ) : (
+                    <div ref={messageListRef} className="thin-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
+                        {view === "history" ? (
+                            <AssistantHistory
+                                sessions={historySessions}
+                                activeSession={activeSession}
+                                checkedIds={checkedChatIds.filter((id) => historySessions.some((session) => session.id === id))}
+                                onToggleChecked={(id, checked) => setCheckedChatIds((previous) => (checked ? [...new Set([...previous, id])] : previous.filter((item) => item !== id)))}
+                                onOpen={(id) => {
+                                    commitSessions(sessionsRef.current, id);
+                                    setView("chat");
+                                }}
+                                onDelete={(id) => setDeleteChatIds([id])}
+                            />
+                        ) : messages.length ? (
+                            <AssistantMessages messages={messages} onRetry={retryMessage} />
+                        ) : (
+                            <div className="flex h-full flex-col items-center justify-center px-8 text-center">
+                                <div className="grid size-12 place-items-center rounded-2xl" style={{ background: theme.node.fill }}>
+                                    <Sparkles className="size-5" />
+                                </div>
+                                <div className="mt-4 text-base font-medium">从一个想法开始</div>
+                                <div className="mt-2 max-w-[260px] text-sm leading-6 opacity-55">描述故事、宣传片或现有素材，Agent 会与你沟通并直接操作当前画布</div>
                             </div>
-                            <div className="mt-4 text-base font-medium">从一个想法开始</div>
-                            <div className="mt-2 max-w-[260px] text-sm leading-6 opacity-55">描述故事、宣传片或现有素材，Agent 会与你沟通并直接操作当前画布</div>
-                        </div>
-                    )}
-                </div>
+                        )}
+                    </div>
+                )}
 
                 {view === "chat" ? (
                     <>

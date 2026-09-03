@@ -1,6 +1,7 @@
 "use client";
 
 import { AuditOutlined, FileTextOutlined, HomeOutlined, LogoutOutlined, PictureOutlined, SettingOutlined, TransactionOutlined, UserOutlined } from "@ant-design/icons";
+import { ProConfigProvider } from "@ant-design/pro-components";
 import { Button, Flex, Layout, Menu, Typography, theme } from "antd";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -9,6 +10,7 @@ import { useEffect } from "react";
 
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { adminLayoutStyle } from "@/lib/app-theme";
+import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore } from "@/stores/use-user-store";
 
 const adminMenus = [
@@ -22,6 +24,7 @@ const adminMenus = [
 
 export default function AdminLayout({ children }: { children: ReactNode }) {
     const { token: antToken } = theme.useToken();
+    const colorTheme = useThemeStore((state) => state.theme);
     const router = useRouter();
     const pathname = usePathname();
     const token = useUserStore((state) => state.token);
@@ -63,6 +66,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
     }
 
     return (
+        <ProConfigProvider dark={colorTheme === "dark"}>
         <Layout hasSider style={{ height: "100vh", overflow: "hidden", background: antToken.colorBgLayout }}>
             <Layout.Sider width={adminLayoutStyle.siderWidth} style={{ height: "100vh", overflow: "hidden", background: antToken.colorBgContainer, borderRight: `1px solid ${antToken.colorBorder}` }}>
                 <Flex align="center" gap={12} style={{ height: adminLayoutStyle.brandHeight, padding: "0 20px", borderBottom: `1px solid ${antToken.colorBorderSecondary}` }}>
@@ -108,5 +112,6 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
                 <Layout.Content style={{ minHeight: 0, overflow: "auto" }}>{children}</Layout.Content>
             </Layout>
         </Layout>
+        </ProConfigProvider>
     );
 }

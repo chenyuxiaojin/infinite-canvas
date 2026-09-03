@@ -1,4 +1,4 @@
-import { apiGet, compactApiParams } from "@/services/api/request";
+import { apiGet, apiPost, compactApiParams } from "@/services/api/request";
 
 export type Prompt = {
     id: string;
@@ -14,6 +14,18 @@ export type Prompt = {
 };
 
 export const ALL_PROMPTS_OPTION = "全部";
+
+export type PromptCategory = {
+    category: string;
+    name: string;
+    description: string;
+    githubUrl: string;
+    sourceType?: string;
+    pathOrUrl?: string;
+    remote: boolean;
+    enabled: boolean;
+    updatedAt: string;
+};
 
 export type PromptListResponse = {
     items: Prompt[];
@@ -35,7 +47,21 @@ export async function fetchPrompts({ keyword = "", tag = [], category = ALL_PROM
     );
 }
 
+export async function fetchPromptCategories() {
+    return apiGet<PromptCategory[]>("/api/prompt-categories");
+}
+
+export async function syncPrompts(category?: string) {
+    const url = category ? `/api/prompts/sync?category=${encodeURIComponent(category)}` : "/api/prompts/sync";
+    return apiPost<PromptCategory[]>(url);
+}
+
+export async function savePromptCategory(item: Partial<PromptCategory>) {
+    return apiPost<PromptCategory>("/api/prompt-categories", item);
+}
+
 export function formatPromptDate(value: string) {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? "" : new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
+

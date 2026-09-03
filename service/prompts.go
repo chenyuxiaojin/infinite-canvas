@@ -25,6 +25,15 @@ func ListPromptCategories() []model.PromptCategory {
 	return categories
 }
 
+func SavePromptCategory(cat model.PromptCategory) error {
+	cat.UpdatedAt = time.Now().Format(time.RFC3339)
+	return repository.SavePromptCategory(cat)
+}
+
+func DeletePromptCategory(category string) error {
+	return repository.DeletePromptCategory(category)
+}
+
 func SavePrompt(item model.Prompt) (model.Prompt, error) {
 	now := time.Now().Format(time.RFC3339)
 	if item.Category == "" {

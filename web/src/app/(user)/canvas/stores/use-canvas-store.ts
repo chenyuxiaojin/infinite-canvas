@@ -51,11 +51,17 @@ type CanvasStore = {
 
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
 const CANVAS_STORE_KEY = "infinite-canvas:canvas_store";
+const CANVAS_STORE_INDEX_KEY = "infinite-canvas:canvas_store:index";
+const CANVAS_PROJECT_PREFIX = "infinite-canvas:canvas_project:";
+const UI_ONLY_PROJECT_KEYS = new Set(["viewport", "sidePanel", "agentPanel"]);
 type PersistedCanvasState = Pick<CanvasStore, "projects">;
+type CanvasStoreIndex = { version: 1; ids: string[] };
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let queuedPersistState: PersistedCanvasState | null = null;
 let accountCanvasSyncEnabled = false;
 const projectSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const lastWrittenProjects = new Map<string, CanvasProject>();
+let canvasShardsReady = false;
 
 function waitForUserStoreHydration() {
     if (useUserStore.persist.hasHydrated()) return Promise.resolve();
@@ -146,18 +152,89 @@ async function reconcileCanvasProjects(
     return projects;
 }
 
+function isUiOnlyProjectPatch(patch: object) {
+    const keys = Object.keys(patch);
+    return keys.length > 0 && keys.every((key) => UI_ONLY_PROJECT_KEYS.has(key));
+}
+
+function rememberWrittenProjects(projects: CanvasProject[]) {
+    lastWrittenProjects.clear();
+    projects.forEach((project) => lastWrittenProjects.set(project.id, project));
+}
+
+function projectNeedsWrite(project: CanvasProject) {
+    const previous = lastWrittenProjects.get(project.id);
+    if (!previous) return true;
+    return (
+        previous !== project &&
+        (previous.updatedAt !== project.updatedAt ||
+            previous.title !== project.title ||
+            previous.nodes !== project.nodes ||
+            previous.connections !== project.connections ||
+            previous.chatSessions !== project.chatSessions ||
+            previous.activeChatId !== project.activeChatId ||
+            previous.agentConfig !== project.agentConfig ||
+            previous.autoTitlePending !== project.autoTitlePending ||
+            previous.backgroundMode !== project.backgroundMode ||
+            previous.showImageInfo !== project.showImageInfo ||
+            previous.pendingAgentRequest !== project.pendingAgentRequest)
+    );
+}
+
+async function loadLocalProjects(): Promise<CanvasProject[]> {
+    const indexValue = await localForageStorage.getItem(CANVAS_STORE_INDEX_KEY);
+    if (indexValue) {
+        const index = JSON.parse(indexValue) as CanvasStoreIndex;
+        if (index?.version === 1 && Array.isArray(index.ids)) {
+            const projects = (
+                await Promise.all(
+                    index.ids.map(async (id) => {
+                        const raw = await localForageStorage.getItem(CANVAS_PROJECT_PREFIX + id);
+                        return raw ? (JSON.parse(raw) as CanvasProject) : null;
+                    }),
+                )
+            ).filter((project): project is CanvasProject => Boolean(project));
+            if (projects.length) {
+                canvasShardsReady = true;
+                return projects;
+            }
+        }
+    }
+    canvasShardsReady = false;
+    const legacy = await localForageStorage.getItem(CANVAS_STORE_KEY);
+    if (!legacy) return [];
+    const parsed = JSON.parse(legacy) as StorageValue<CanvasStore>;
+    return (parsed.state as PersistedCanvasState)?.projects || [];
+}
+
+async function persistLocalProjects(projects: CanvasProject[]) {
+    const dirty = canvasShardsReady ? projects.filter(projectNeedsWrite) : projects;
+    const nextIds = new Set(projects.map((project) => project.id));
+    const removedIds = Array.from(lastWrittenProjects.keys()).filter((id) => !nextIds.has(id));
+    await Promise.all([
+        ...dirty.map((project) =>
+            localForageStorage.setItem(CANVAS_PROJECT_PREFIX + project.id, JSON.stringify(project)),
+        ),
+        ...removedIds.map((id) => localForageStorage.removeItem(CANVAS_PROJECT_PREFIX + id)),
+        localForageStorage.setItem(
+            CANVAS_STORE_INDEX_KEY,
+            JSON.stringify({ version: 1, ids: projects.map((project) => project.id) } satisfies CanvasStoreIndex),
+        ),
+    ]);
+    rememberWrittenProjects(projects);
+    canvasShardsReady = true;
+}
+
 const canvasStorage: PersistStorage<CanvasStore> = {
-    getItem: async (name) => {
+    getItem: async (_name) => {
         await waitForUserStoreHydration();
-        const localValue = await localForageStorage.getItem(name);
+        const localProjects = await loadLocalProjects();
         const token = useUserStore.getState().token;
-        const localParsed = localValue
-            ? (JSON.parse(localValue) as StorageValue<CanvasStore>)
-            : null;
-        const localProjects =
-            (localParsed?.state as PersistedCanvasState)?.projects || [];
-        const localHasData =
-            Array.isArray(localProjects) && localProjects.length > 0;
+        const localParsed = {
+            state: { projects: localProjects },
+            version: 0,
+        } as StorageValue<CanvasStore>;
+        const localHasData = localProjects.length > 0;
 
         if (token) {
             try {
@@ -181,10 +258,7 @@ const canvasStorage: PersistStorage<CanvasStore> = {
                         version: 0,
                     } as StorageValue<CanvasStore>;
                     queuedPersistState = nextState;
-                    await localForageStorage.setItem(
-                        name,
-                        JSON.stringify(parsed),
-                    );
+                    await persistLocalProjects(projects);
                     return parsed;
                 }
 
@@ -198,10 +272,7 @@ const canvasStorage: PersistStorage<CanvasStore> = {
                         version: 0,
                     } as StorageValue<CanvasStore>;
                     queuedPersistState = nextState;
-                    await localForageStorage.setItem(
-                        name,
-                        JSON.stringify(parsed),
-                    );
+                    await persistLocalProjects(remoteProjects);
                     return parsed;
                 }
             } catch (error) {
@@ -212,12 +283,13 @@ const canvasStorage: PersistStorage<CanvasStore> = {
             }
         }
 
-        if (!localParsed) return null;
+        if (!localProjects.length) return null;
         queuedPersistState = localParsed.state as PersistedCanvasState;
+        rememberWrittenProjects(localProjects);
         return localParsed;
     },
 
-    setItem: (name, value) => {
+    setItem: (_name, value) => {
         const nextState = value.state as PersistedCanvasState;
         if (
             queuedPersistState &&
@@ -229,7 +301,7 @@ const canvasStorage: PersistStorage<CanvasStore> = {
         if (saveTimer) clearTimeout(saveTimer);
         saveTimer = setTimeout(() => {
             saveTimer = null;
-            void localForageStorage.setItem(name, JSON.stringify(value));
+            void persistLocalProjects(nextState.projects || []);
         }, 400);
     },
     removeItem: (name) => localForageStorage.removeItem(name),
@@ -325,17 +397,18 @@ export const useCanvasStore = create<CanvasStore>()(
                     (item) => item.id === id,
                 );
                 if (!project) return;
+                const uiOnly = isUiOnlyProjectPatch(patch);
                 const nextProject = {
                     ...project,
                     ...patch,
-                    updatedAt: new Date().toISOString(),
+                    updatedAt: uiOnly ? project.updatedAt : new Date().toISOString(),
                 };
                 set((state) => ({
                     projects: state.projects.map((item) =>
                         item.id === id ? nextProject : item,
                     ),
                 }));
-                queueProjectSave(nextProject);
+                if (!uiOnly) queueProjectSave(nextProject);
             },
             syncWithRemote: async (token, syncEnabled) => {
                 accountCanvasSyncEnabled = syncEnabled;
@@ -357,10 +430,7 @@ export const useCanvasStore = create<CanvasStore>()(
                 const nextState = { projects };
                 queuedPersistState = nextState;
                 set(nextState);
-                await localForageStorage.setItem(
-                    CANVAS_STORE_KEY,
-                    JSON.stringify({ state: nextState, version: 0 }),
-                );
+                await persistLocalProjects(projects);
             },
             setSyncEnabled: (enabled) => {
                 accountCanvasSyncEnabled = enabled;

@@ -21,14 +21,20 @@ import (
 )
 
 var promptCategories = []model.PromptCategory{
-	{Category: "system", Name: "系统", Description: "系统提示词分类"},
-	{Category: "gpt-image-2-prompts", Name: "GPT Image 2 Prompts", Description: "TigerOWO 的 GPT Image 2 案例提示词分类", GithubURL: "https://github.com/tigerowo/awesome-gpt-image-2-prompts", Remote: true},
-	{Category: "awesome-gpt-image", Name: "Awesome GPT Image", Description: "ZeroLu 的中文 GPT Image 提示词分类", GithubURL: "https://github.com/ZeroLu/awesome-gpt-image", Remote: true},
-	{Category: "awesome-gpt4o-image-prompts", Name: "Awesome GPT4o Image Prompts", Description: "ImgEdify 的 GPT-4o 图像提示词分类", GithubURL: "https://github.com/ImgEdify/Awesome-GPT4o-Image-Prompts", Remote: true},
-	{Category: "xianyu-awesome-gptimage2", Name: "Xianyu Awesome GPT Image 2", Description: "xianyu110 的 GPT Image 2 提示词分类", GithubURL: "https://github.com/xianyu110/awesome-gptimage2", Remote: true},
-	{Category: "youmind-gpt-image-2", Name: "YouMind GPT Image 2", Description: "YouMind OpenLab 的 GPT Image 2 中文提示词分类", GithubURL: "https://github.com/YouMind-OpenLab/awesome-gpt-image-2", Remote: true},
-	{Category: "youmind-nano-banana-pro", Name: "YouMind Nano Banana Pro", Description: "YouMind OpenLab 的 Nano Banana Pro 中文提示词分类", GithubURL: "https://github.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts", Remote: true},
-	{Category: "davidwu-gpt-image2-prompts", Name: "awesome-gpt-image2-prompts", Description: "davidwuw0811-boop 整理的 GPT Image 2 提示词分类", GithubURL: "https://github.com/davidwuw0811-boop/awesome-gpt-image2-prompts", Remote: true},
+	{Category: "system", Name: "系统", Description: "系统提示词分类", Enabled: true},
+	// 影视与视频制作专属本地参考仓库源
+	{Category: "local-awesome-video-prompts", Name: "Awesome Video Prompts (精选影视视频提示词)", Description: "高质量镜头、运镜与影视级视频提示词", SourceType: "local_markdown", PathOrURL: "/Users/chenhuajin/项目/视频制作台/AI编导/参考仓库/awesome-video-prompts/README.md", Remote: false, Enabled: true},
+	{Category: "local-seedance-cinematography", Name: "Seedance 运镜与镜头设计", Description: "运镜机位、焦段景别与镜头语言提示词", SourceType: "local_markdown", PathOrURL: "/Users/chenhuajin/项目/视频制作台/AI编导/参考仓库/Seedance-ShotDesign-Skills/references/cinematography.md", Remote: false, Enabled: true},
+	{Category: "local-seedance-scenarios", Name: "Seedance 经典叙事场景库", Description: "各类题材经典分镜场景与画面描写", SourceType: "local_markdown", PathOrURL: "/Users/chenhuajin/项目/视频制作台/AI编导/参考仓库/Seedance-ShotDesign-Skills/references/scenarios.md", Remote: false, Enabled: true},
+	{Category: "local-minimax-h3", Name: "MiniMax H3 视频生成提示词", Description: "H3 官方模型推荐提示词与运镜规范", SourceType: "local_markdown", PathOrURL: "/Users/chenhuajin/项目/视频制作台/AI编导/参考仓库/MiniMax-H3/README.zh-CN.md", Remote: false, Enabled: true},
+	// 远程 GitHub 提示词源
+	{Category: "gpt-image-2-prompts", Name: "GPT Image 2 Prompts", Description: "TigerOWO 的 GPT Image 2 案例提示词分类", GithubURL: "https://github.com/tigerowo/awesome-gpt-image-2-prompts", SourceType: "remote_github", Remote: true, Enabled: true},
+	{Category: "awesome-gpt-image", Name: "Awesome GPT Image", Description: "ZeroLu 的中文 GPT Image 提示词分类", GithubURL: "https://github.com/ZeroLu/awesome-gpt-image", SourceType: "remote_github", Remote: true, Enabled: true},
+	{Category: "awesome-gpt4o-image-prompts", Name: "Awesome GPT4o Image Prompts", Description: "ImgEdify 的 GPT-4o 图像提示词分类", GithubURL: "https://github.com/ImgEdify/Awesome-GPT4o-Image-Prompts", SourceType: "remote_github", Remote: true, Enabled: true},
+	{Category: "xianyu-awesome-gptimage2", Name: "Xianyu Awesome GPT Image 2", Description: "xianyu110 的 GPT Image 2 提示词分类", GithubURL: "https://github.com/xianyu110/awesome-gptimage2", SourceType: "remote_github", Remote: true, Enabled: true},
+	{Category: "youmind-gpt-image-2", Name: "YouMind GPT Image 2", Description: "YouMind OpenLab 的 GPT Image 2 中文提示词分类", GithubURL: "https://github.com/YouMind-OpenLab/awesome-gpt-image-2", SourceType: "remote_github", Remote: true, Enabled: true},
+	{Category: "youmind-nano-banana-pro", Name: "YouMind Nano Banana Pro", Description: "YouMind OpenLab 的 Nano Banana Pro 中文提示词分类", GithubURL: "https://github.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts", SourceType: "remote_github", Remote: true, Enabled: true},
+	{Category: "davidwu-gpt-image2-prompts", Name: "awesome-gpt-image2-prompts", Description: "davidwuw0811-boop 整理的 GPT Image 2 提示词分类", GithubURL: "https://github.com/davidwuw0811-boop/awesome-gpt-image2-prompts", SourceType: "remote_github", Remote: true, Enabled: true},
 }
 
 var (
@@ -68,6 +74,7 @@ func DB() (*gorm.DB, error) {
 			&model.User{},
 			&model.CreditLog{},
 			&model.Prompt{},
+			&model.PromptCategory{},
 			&model.Asset{},
 			&model.Setting{},
 			&model.CreativeWorkflow{},

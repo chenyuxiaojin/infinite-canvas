@@ -7,16 +7,20 @@ import (
 	"gorm.io/gorm"
 )
 
-// PromptCategories 返回内置提示词分类的副本。
+// PromptCategories 返回内置与数据库中的提示词分类。
 func PromptCategories() []model.PromptCategory {
-	result := make([]model.PromptCategory, len(promptCategories))
-	copy(result, promptCategories)
-	return result
+	cats, err := ListPromptCategories()
+	if err != nil || len(cats) == 0 {
+		result := make([]model.PromptCategory, len(promptCategories))
+		copy(result, promptCategories)
+		return result
+	}
+	return cats
 }
 
-// PromptCategoryByCode 根据分类编码查找内置提示词分类。
+// PromptCategoryByCode 根据分类编码查找提示词分类。
 func PromptCategoryByCode(category string) (model.PromptCategory, bool) {
-	for _, item := range promptCategories {
+	for _, item := range PromptCategories() {
 		if item.Category == category {
 			return item, true
 		}
@@ -24,9 +28,51 @@ func PromptCategoryByCode(category string) (model.PromptCategory, bool) {
 	return model.PromptCategory{}, false
 }
 
-// ListPromptCategories 返回内置提示词分类。
+// ListPromptCategories 返回全部提示词分类（数据库优先，空时自动种子初始化）。
 func ListPromptCategories() ([]model.PromptCategory, error) {
-	return PromptCategories(), nil
+	db, err := DB()
+	if err != nil {
+		result := make([]model.PromptCategory, len(promptCategories))
+		copy(result, promptCategories)
+		return result, nil
+	}
+	var items []model.PromptCategory
+	if err := db.Order("updated_at desc, category asc").Find(&items).Error; err != nil || len(items) == 0 {
+		// 种子数据写入数据库
+		for _, cat := range promptCategories {
+			_ = db.Where("category = ?", cat.Category).FirstOrCreate(&cat).Error
+		}
+		_ = db.Order("updated_at desc, category asc").Find(&items)
+	}
+	if len(items) == 0 {
+		result := make([]model.PromptCategory, len(promptCategories))
+		copy(result, promptCategories)
+		return result, nil
+	}
+	return items, nil
+}
+
+// SavePromptCategory 保存或更新自定义提示词分类。
+func SavePromptCategory(cat model.PromptCategory) error {
+	db, err := DB()
+	if err != nil {
+		return err
+	}
+	return db.Save(&cat).Error
+}
+
+// DeletePromptCategory 删除自定义分类及其下提示词。
+func DeletePromptCategory(category string) error {
+	db, err := DB()
+	if err != nil {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("category = ?", category).Delete(&model.Prompt{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("category = ?", category).Delete(&model.PromptCategory{}).Error
+	})
 }
 
 // ListPrompts 按查询条件返回提示词分页列表。

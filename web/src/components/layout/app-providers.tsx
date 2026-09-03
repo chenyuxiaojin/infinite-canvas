@@ -2,7 +2,6 @@
 
 import type { ReactNode } from "react";
 import { useEffect } from "react";
-import { ProConfigProvider } from "@ant-design/pro-components";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
@@ -32,13 +31,11 @@ export function AppProviders({ children }: { children: ReactNode }) {
 
     return (
         <ConfigProvider locale={zhCN} theme={getAntThemeConfig(dark)}>
-            <ProConfigProvider dark={dark}>
-                <App>
-                    <QueryClientProvider client={queryClient}>
-                        <ClientRootInit>{children}</ClientRootInit>
-                    </QueryClientProvider>
-                </App>
-            </ProConfigProvider>
+            <App>
+                <QueryClientProvider client={queryClient}>
+                    <ClientRootInit>{children}</ClientRootInit>
+                </QueryClientProvider>
+            </App>
         </ConfigProvider>
     );
 }
