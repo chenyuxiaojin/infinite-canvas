@@ -69,6 +69,7 @@ type CanvasAssistantPanelProps = {
     onInitialRequestConsumed?: () => void;
     projectId?: string;
     projectTitle?: string;
+    initialView?: "chat" | "terminal";
 };
 
 type PendingDeleteConfirmation = {
@@ -98,6 +99,7 @@ export function CanvasAssistantPanel({
     onInitialRequestConsumed,
     projectId,
     projectTitle,
+    initialView = "chat",
 }: CanvasAssistantPanelProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const effectiveConfig = useEffectiveConfig();
@@ -108,7 +110,7 @@ export function CanvasAssistantPanel({
     const pendingDeleteRef = useRef<PendingDeleteConfirmation | null>(null);
     const messageListRef = useRef<HTMLDivElement>(null);
     const consumedReferenceNodeClickVersionRef = useRef(0);
-    const [view, setView] = useState<"chat" | "terminal" | "history">("chat");
+    const [view, setView] = useState<"chat" | "terminal" | "history">(initialView);
     const [prompt, setPrompt] = useState("");
     const [isRunning, setIsRunning] = useState(false);
     const [checkedChatIds, setCheckedChatIds] = useState<string[]>([]);
@@ -398,7 +400,7 @@ export function CanvasAssistantPanel({
                             )}
                         >
                             <Bot className="size-3.5" />
-                            <span>创作 Agent</span>
+                            <span>画布 Agent</span>
                         </button>
                         <button
                             type="button"
@@ -409,7 +411,7 @@ export function CanvasAssistantPanel({
                             )}
                         >
                             <TerminalIcon className="size-3.5" />
-                            <span>TUI 终端</span>
+                            <span>本地 AI</span>
                         </button>
                     </div>
                     <div className="flex items-center gap-1">

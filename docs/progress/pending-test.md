@@ -24,8 +24,10 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 桌面 WebView 改由 Tauri IPC 与 Agent 共用现有 SQLite
   `canvas_projects` 表，首次加载会合并原 IndexedDB 项目。
 - 自动化已覆盖 loopback、鉴权、撤销、白名单、路径 schema、幂等、JSON 和
-  CLI 退出码；仍需在总装后的签名 `.app` 中人工确认 CLI 打包位置、
-  首次项目合并和长时间并发编辑体验。
+  CLI 退出码；总装后的签名 `.app` 已确认 CLI 打包位置、首次项目合并和真实片子目录绑定。
+- 已完成 MCP STDIO 实测：四个工具可发现，`canvas_context` 读取案例2为 17 节点/10 连线，单节点 `canvas_read` 只返回该节点，`canvas_mutate` dry-run 后数据库数量不变。
+- 已完成右侧本地终端实测：案例2目录自动连接画布，选中节点会出现上下文标签并以安全粘贴方式进入输入区；Codex 能在侧栏启动并带入无限画布 MCP 配置。
+- 仍需后续长时间观察多人/多 Agent 连续编辑；Claude Code 新项目 MCP 的首次信任确认由用户在首次使用时完成。
 
 ## macOS Tauri 2 桌面壳
 

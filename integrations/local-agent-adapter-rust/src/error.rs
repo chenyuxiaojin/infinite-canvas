@@ -72,6 +72,10 @@ impl BridgeError {
         )
     }
 
+    pub fn no_project_binding(message: impl Into<String>) -> Self {
+        Self::new("NO_PROJECT_BINDING", StatusCode::NOT_FOUND, message)
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new("INTERNAL", StatusCode::INTERNAL_SERVER_ERROR, message)
     }

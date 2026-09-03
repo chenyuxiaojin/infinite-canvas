@@ -2,6 +2,10 @@
 
 ## Unreleased
 
++ [新增] 首页按片子工作流重构，提供继续创作、新建片子、全部画布、画布 Agent 和本地 AI 五个清晰入口
++ [新增] 画布右侧新增本地 AI 终端，可在当前片子目录启动 Codex / Claude，并把选中节点安全放入输入区
++ [新增] 新增项目目录绑定和 STDIO MCP，提供 `canvas_context`、`canvas_read`、`canvas_mutate`、`canvas_task` 四个受控工具
++ [修复] 桌面数据库内容优先于旧 WebView 缓存，单个已删除旧项目不再阻断整批画布同步
 + [新增] 新增 macOS 本机 Agent Bridge 与 `infinite-canvas` CLI，支持安装专属凭据、能力目录、同画布 revision/幂等操作和受限桌面任务
 + [新增] 画布可触发本地固定 FFmpeg 测试片，验证后回填视频节点并保留来源关系、幂等与重启恢复信息
 + [新增] Tauri 桌面画布导出使用 macOS 原生保存框，ZIP 以拒绝覆盖方式安全发布并保留浏览器下载能力

@@ -13,6 +13,7 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 mod agent_bridge;
+mod project_binding;
 mod runtime;
 mod terminal;
 
@@ -303,9 +304,14 @@ pub fn run() {
             runtime::desktop_task_media,
             runtime::cancel_desktop_task,
             agent_bridge::desktop_canvas_projects,
+            agent_bridge::desktop_canvas_project_ids,
+            agent_bridge::desktop_canvas_project,
             agent_bridge::save_desktop_canvas_project,
             agent_bridge::delete_desktop_canvas_projects,
             agent_bridge::desktop_canvas_project_revision,
+            project_binding::resolve_canvas_project_workspace,
+            project_binding::select_film_directory,
+            project_binding::bind_canvas_project_directory,
             save_canvas_export,
             terminal::pty_spawn,
             terminal::pty_write,

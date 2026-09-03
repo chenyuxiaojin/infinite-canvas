@@ -1,8 +1,9 @@
 use std::{
     fs,
+    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     os::unix::fs::PermissionsExt,
-    process::Command,
+    process::{Command, Stdio},
     sync::Arc,
 };
 
@@ -284,4 +285,69 @@ fn cli_emits_json_and_stable_exit_codes_without_token_arguments() {
     assert_eq!(usage.status.code(), Some(2));
     let json: Value = serde_json::from_slice(&usage.stdout).unwrap();
     assert_eq!(json["error"]["code"], "INVALID_REQUEST");
+}
+
+#[test]
+fn mcp_stdio_lists_tools_and_reads_the_bound_canvas() {
+    let fixture = Fixture::new();
+    let project_directory = fixture._root.path().join("film-one");
+    fs::create_dir_all(project_directory.join(".infinite-canvas")).unwrap();
+    fs::write(
+        project_directory.join(".infinite-canvas/project.json"),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "project_id": "project-1",
+            "project_title": "Shared canvas",
+            "project_directory": project_directory
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut child = Command::new(cargo_bin("infinite-canvas"))
+        .args([
+            "--endpoint",
+            &fixture.endpoint(),
+            "--credential-file",
+            fixture.credentials.path().to_str().unwrap(),
+            "mcp",
+            "serve",
+            "--project-dir",
+            project_directory.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            concat!(
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"canvas_context\",\"arguments\":{}}}\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let lines = String::from_utf8(output.stdout).unwrap();
+    let responses = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["binding"]["project_id"],
+        "project-1"
+    );
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["canvas"]["node_count"],
+        0
+    );
 }

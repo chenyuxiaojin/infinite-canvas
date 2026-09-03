@@ -7,7 +7,8 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
 use crate::{
-    read_credential_token, AgentOperationRequest, BridgeClient, BridgeError, TestClipRequest,
+    read_credential_token, serve_mcp_stdio, setup_project_binding, AgentOperationRequest,
+    BridgeClient, BridgeError, TestClipRequest,
 };
 
 #[derive(Debug, Parser)]
@@ -34,7 +35,41 @@ pub enum Command {
     Canvas(CanvasArgs),
     Tasks(TasksArgs),
     Runtime,
+    Agents(AgentsArgs),
+    Mcp(McpArgs),
     Credentials(CredentialsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentsArgs {
+    #[command(subcommand)]
+    pub command: AgentsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentsCommand {
+    Setup {
+        #[arg(long)]
+        project_dir: PathBuf,
+        #[arg(long)]
+        canvas_project_id: String,
+        #[arg(long, default_value = "")]
+        canvas_project_title: String,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct McpArgs {
+    #[command(subcommand)]
+    pub command: McpCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    Serve {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -117,7 +152,66 @@ pub enum ExitCode {
 
 pub fn run_cli(cli: Cli) -> ExitCode {
     let pretty = cli.pretty;
-    match execute(cli) {
+    let credential_path = match cli.credential_file {
+        Some(path) => Ok(path),
+        None => default_credential_path(),
+    };
+    let result = match cli.command {
+        Command::Mcp(args) => {
+            let credential_path = match credential_path {
+                Ok(path) => path,
+                Err(error) => return print_error_and_code(error, pretty),
+            };
+            let result = match args.command {
+                McpCommand::Serve { project_dir } => {
+                    serve_mcp_stdio(&cli.endpoint, &credential_path, project_dir.as_deref())
+                }
+            };
+            return match result {
+                Ok(()) => ExitCode::Success,
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        serde_json::to_string(&error.envelope())
+                            .unwrap_or_else(|_| "MCP server failed".to_owned())
+                    );
+                    exit_code(&error)
+                }
+            };
+        }
+        Command::Agents(args) => match args.command {
+            AgentsCommand::Setup {
+                project_dir,
+                canvas_project_id,
+                canvas_project_title,
+            } => {
+                let executable = std::env::current_exe().map_err(|_| {
+                    BridgeError::internal("The Infinite Canvas command path is unavailable.")
+                });
+                executable.and_then(|executable| {
+                    setup_project_binding(
+                        &project_dir,
+                        &canvas_project_id,
+                        &canvas_project_title,
+                        &executable,
+                    )
+                    .and_then(|binding| {
+                        serde_json::to_value(binding).map_err(|_| {
+                            BridgeError::internal("The project binding could not be encoded.")
+                        })
+                    })
+                })
+            }
+        },
+        command => {
+            let credential_path = match credential_path {
+                Ok(path) => path,
+                Err(error) => return print_error_and_code(error, pretty),
+            };
+            execute_bridge(&cli.endpoint, &credential_path, command)
+        }
+    };
+    match result {
         Ok(value) => {
             print_json(&value, pretty);
             ExitCode::Success
@@ -129,14 +223,14 @@ pub fn run_cli(cli: Cli) -> ExitCode {
     }
 }
 
-fn execute(cli: Cli) -> Result<Value, BridgeError> {
-    let credential_path = match cli.credential_file {
-        Some(path) => path,
-        None => default_credential_path()?,
-    };
-    let token = read_credential_token(&credential_path)?;
-    let client = BridgeClient::new(&cli.endpoint, token)?;
-    match cli.command {
+fn execute_bridge(
+    endpoint: &str,
+    credential_path: &Path,
+    command: Command,
+) -> Result<Value, BridgeError> {
+    let token = read_credential_token(credential_path)?;
+    let client = BridgeClient::new(endpoint, token)?;
+    match command {
         Command::Capabilities => client.get("/v1/capabilities"),
         Command::Projects(args) => match args.command {
             ProjectsCommand::List => client.get("/v1/projects"),
@@ -172,10 +266,18 @@ fn execute(cli: Cli) -> Result<Value, BridgeError> {
             }
         },
         Command::Runtime => client.get("/v1/runtime"),
+        Command::Agents(_) | Command::Mcp(_) => Err(BridgeError::internal(
+            "The local command was routed incorrectly.",
+        )),
         Command::Credentials(args) => match args.command {
             CredentialsCommand::Revoke => client.post("/v1/credentials/revoke", &json!({})),
         },
     }
+}
+
+fn print_error_and_code(error: BridgeError, pretty: bool) -> ExitCode {
+    print_json(&json!(error.envelope()), pretty);
+    exit_code(&error)
 }
 
 fn default_credential_path() -> Result<PathBuf, BridgeError> {
@@ -227,7 +329,7 @@ fn exit_code(error: &BridgeError) -> ExitCode {
         "UNAUTHORIZED" => ExitCode::Unauthorized,
         "REVISION_CONFLICT" | "REQUEST_ID_REUSED" | "NODE_EXISTS" | "CONNECTION_EXISTS"
         | "PROJECT_DELETED" => ExitCode::Conflict,
-        "NOT_FOUND" | "CAPABILITY_NOT_FOUND" => ExitCode::NotFound,
+        "NOT_FOUND" | "CAPABILITY_NOT_FOUND" | "NO_PROJECT_BINDING" => ExitCode::NotFound,
         "INVALID_REQUEST" => ExitCode::Usage,
         "RUNTIME_UNAVAILABLE" => ExitCode::Unavailable,
         "CAPABILITY_DENIED" | "METHOD_NOT_ALLOWED" => ExitCode::Rejected,

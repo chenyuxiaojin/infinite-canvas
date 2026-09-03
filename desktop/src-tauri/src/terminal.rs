@@ -74,9 +74,9 @@ pub fn pty_spawn(
         })
         .map_err(|e| format!("failed to open PTY: {e}"))?;
 
-    let shell = options.shell.unwrap_or_else(|| {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
-    });
+    let shell = options
+        .shell
+        .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string()));
 
     let mut cmd = CommandBuilder::new(&shell);
     if shell.ends_with("zsh") || shell.ends_with("bash") {
@@ -95,9 +95,9 @@ pub fn pty_spawn(
     cmd.env("LANG", "en_US.UTF-8");
 
     if let Ok(current_path) = std::env::var("PATH") {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/chenhuajin".to_owned());
         let enhanced_path = format!(
-            "/Users/chenhuajin/.local/bin:/opt/homebrew/bin:/usr/local/bin:{}",
-            current_path
+            "{home}/.local/bin:{home}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:{current_path}"
         );
         cmd.env("PATH", enhanced_path);
     }
@@ -211,10 +211,7 @@ pub fn pty_resize(
 }
 
 #[tauri::command]
-pub fn pty_terminate(
-    state: State<'_, TerminalManager>,
-    session_id: String,
-) -> Result<(), String> {
+pub fn pty_terminate(state: State<'_, TerminalManager>, session_id: String) -> Result<(), String> {
     let mut sessions = state.sessions.lock().unwrap();
     if let Some(mut session) = sessions.remove(&session_id) {
         let _ = session.child.kill();

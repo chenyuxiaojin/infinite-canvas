@@ -1,27 +1,22 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { App, Badge, Button, Card, Empty, Spin, Tag } from "antd";
+import { App, Button, Spin } from "antd";
 import {
-    Activity,
     ArrowRight,
+    Bot,
+    CheckCircle2,
+    ChevronRight,
     Clapperboard,
-    Cpu,
-    ExternalLink,
-    FileText,
     Film,
-    FolderKanban,
-    HardDrive,
-    Layers,
+    FolderOpen,
+    LayoutGrid,
     Plus,
-    RefreshCw,
-    Sparkles,
-    Video,
+    Terminal,
 } from "lucide-react";
 
-import { cn } from "@/lib/utils";
-import { fetchPrompts, type Prompt } from "@/services/api/prompts";
+import { bindCanvasProjectDirectory, selectFilmDirectory } from "@/services/desktop-terminal";
 import { isDesktopRuntime, probeDesktopRuntime, type DesktopRuntimeReport } from "@/services/desktop-runtime";
 import { useCanvasStore } from "./canvas/stores/use-canvas-store";
 
@@ -31,220 +26,182 @@ export default function IndexPage() {
     const hydrated = useCanvasStore((state) => state.hydrated);
     const projects = useCanvasStore((state) => state.projects);
     const createProject = useCanvasStore((state) => state.createProject);
-
+    const refreshFromDesktop = useCanvasStore((state) => state.refreshFromDesktop);
     const [runtimeReport, setRuntimeReport] = useState<DesktopRuntimeReport | null>(null);
-    const [reportLoading, setReportLoading] = useState(false);
-    const [featuredPrompts, setFeaturedPrompts] = useState<Prompt[]>([]);
+    const [creating, setCreating] = useState(false);
+    const [desktopSyncStatus, setDesktopSyncStatus] = useState<"idle" | "syncing" | "synced" | "failed">("idle");
+    const [desktopSyncError, setDesktopSyncError] = useState("");
 
     useEffect(() => {
-        if (isDesktopRuntime()) {
-            setReportLoading(true);
-            probeDesktopRuntime()
-                .then(setRuntimeReport)
-                .catch(() => {})
-                .finally(() => setReportLoading(false));
-        }
-
-        fetchPrompts({ pageSize: 6 })
-            .then((data) => setFeaturedPrompts(data.items || []))
-            .catch(() => {});
+        if (!isDesktopRuntime()) return;
+        probeDesktopRuntime().then(setRuntimeReport).catch(() => undefined);
     }, []);
 
-    const handleCreateProject = () => {
-        if (!hydrated) {
-            message.info("画布存储正在加载，请稍候...");
+    useEffect(() => {
+        if (!hydrated || !isDesktopRuntime()) return;
+        setDesktopSyncStatus("syncing");
+        void refreshFromDesktop()
+            .then(() => setDesktopSyncStatus("synced"))
+            .catch((error) => {
+                setDesktopSyncError(error instanceof Error ? error.message : String(error));
+                setDesktopSyncStatus("failed");
+            });
+    }, [hydrated, refreshFromDesktop]);
+
+    const orderedProjects = useMemo(
+        () => [...projects].sort((left, right) => Date.parse(right.updatedAt || "") - Date.parse(left.updatedAt || "")),
+        [projects],
+    );
+    const latestProject = orderedProjects.find((project) => /^案例\d/.test(project.title || "") && (project.nodes?.length || 0) > 0) || orderedProjects[0];
+
+    const openLatest = (panel?: "agent" | "terminal") => {
+        if (!latestProject) {
+            void handleCreateProject();
             return;
         }
-        const index = projects.length + 1;
-        const newId = createProject(`案例分镜工程 EP0${index}`);
-        router.push(`/canvas/${newId}`);
+        router.push(`/canvas/${latestProject.id}${panel ? `?panel=${panel}` : ""}`);
     };
 
-    const davinciConnector = runtimeReport?.connectors?.find((c) => c.provider === "davinci_resolve");
-    const eagleConnector = runtimeReport?.connectors?.find((c) => c.provider === "eagle");
-    const ffmpegStatus = runtimeReport?.ffmpeg?.status === "available";
+    const handleCreateProject = async () => {
+        if (!hydrated || creating) {
+            if (!hydrated) message.info("正在读取本地画布，请稍候");
+            return;
+        }
+        setCreating(true);
+        try {
+            let directory: string | null = null;
+            if (isDesktopRuntime()) {
+                directory = await selectFilmDirectory();
+                if (!directory) return;
+            }
+            const folderName = directory?.split("/").filter(Boolean).at(-1);
+            const title = folderName || `新片子 ${projects.length + 1}`;
+            const newId = createProject(title);
+            if (directory) {
+                try {
+                    await bindCanvasProjectDirectory(newId, title, directory);
+                } catch (error) {
+                    message.warning(error instanceof Error ? error.message : "画布已创建，但片子目录连接失败");
+                }
+            }
+            router.push(`/canvas/${newId}`);
+        } finally {
+            setCreating(false);
+        }
+    };
+
+    const ffmpegReady = runtimeReport?.ffmpeg?.status === "available";
+    const connectedTools = runtimeReport?.connectors?.filter((connector) => connector.status === "ready").length || 0;
 
     return (
-        <main className="h-full overflow-y-auto bg-stone-950 text-stone-100 px-6 py-8">
-            <div className="mx-auto max-w-7xl space-y-8">
-                {/* 顶部标题区 */}
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-stone-800/80 pb-6">
-                    <div>
-                        <div className="flex items-center gap-2.5">
-                            <span className="flex size-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/30">
-                                <Clapperboard className="size-5" />
-                            </span>
-                            <h1 className="text-2xl font-bold tracking-tight text-white">AI 编导 · 导演工程台</h1>
-                            <Tag color="cyan" className="m-0 text-xs">macOS 原生桌面版</Tag>
+        <main className="h-full overflow-y-auto bg-stone-50 text-stone-950 dark:bg-stone-950 dark:text-stone-100">
+            <div className="mx-auto max-w-7xl px-6 py-8 lg:py-10">
+                <section className="overflow-hidden rounded-3xl border border-stone-200 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900">
+                    <div className="grid gap-8 p-7 lg:grid-cols-[1.35fr_.65fr] lg:p-10">
+                        <div className="flex min-w-0 flex-col justify-center">
+                            <div className="mb-4 inline-flex w-fit items-center gap-2 rounded-full bg-stone-100 px-3 py-1.5 text-xs font-medium text-stone-600 dark:bg-stone-800 dark:text-stone-300">
+                                <Clapperboard className="size-3.5" />
+                                一部片子，一张画布，一个工作目录
+                            </div>
+                            <h1 className="max-w-2xl text-3xl font-semibold tracking-tight sm:text-4xl">
+                                {latestProject ? "继续把这部片子做完" : "从一部片子开始创作"}
+                            </h1>
+                            <p className="mt-3 max-w-xl text-sm leading-6 text-stone-500 dark:text-stone-400">
+                                进入画布后，选中图片、文字或视频，右侧 AI 会自动带上这些节点。也可以直接在同一个侧栏启动 Codex 或 Claude。
+                            </p>
+
+                            {latestProject ? (
+                                <div className="mt-7 rounded-2xl border border-stone-200 bg-stone-50 p-5 dark:border-stone-700 dark:bg-stone-950/50">
+                                    <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                                        <div className="min-w-0">
+                                            <div className="text-xs text-stone-500 dark:text-stone-400">最近编辑</div>
+                                            <div className="mt-1 truncate text-lg font-semibold">{latestProject.title || "未命名片子"}</div>
+                                            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
+                                                <span>{latestProject.nodes?.length || 0} 个节点</span>
+                                                <span>{latestProject.connections?.length || 0} 条连线</span>
+                                                <span>{new Date(latestProject.updatedAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                                            </div>
+                                        </div>
+                                        <Button type="primary" size="large" onClick={() => openLatest()} className="!h-11 !rounded-xl !px-5">
+                                            继续创作 <ArrowRight className="ml-1 size-4" />
+                                        </Button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <Button type="primary" size="large" loading={creating} onClick={() => void handleCreateProject()} className="mt-7 !h-12 w-fit !rounded-xl !px-6">
+                                    选择片子目录并新建画布
+                                </Button>
+                            )}
                         </div>
-                        <p className="mt-1.5 text-sm text-stone-400">
-                            以分镜首帧定死为核心的 AI 影视编导工作流 · 本地媒体零泄露 · 达芬奇与外部 Agent 实时联通
-                        </p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                        <Button
-                            type="primary"
-                            size="large"
-                            icon={<Plus className="size-4" />}
-                            className="bg-emerald-600 hover:bg-emerald-500 border-emerald-500 font-medium"
-                            onClick={handleCreateProject}
-                        >
-                            新建片子工程
-                        </Button>
-                        <Button
-                            size="large"
-                            icon={<FolderKanban className="size-4" />}
-                            onClick={() => router.push("/canvas")}
-                            className="border-stone-700 bg-stone-900 text-stone-200 hover:text-white"
-                        >
-                            全部画布矩阵
-                        </Button>
-                    </div>
-                </div>
 
-                {/* 软硬件与外设连通状态条 */}
-                <div className="rounded-xl border border-stone-800 bg-stone-900/60 p-4 shadow-sm backdrop-blur">
-                    <div className="flex flex-wrap items-center justify-between gap-4">
-                        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-stone-400">
-                            <Cpu className="size-4 text-emerald-400" />
-                            <span>本地工作台运行时状态</span>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-4 text-xs">
-                            <div className="flex items-center gap-2 rounded-md bg-stone-950 px-3 py-1.5 ring-1 ring-stone-800">
-                                <span className="size-2 rounded-full bg-emerald-400 animate-pulse" />
-                                <span className="text-stone-300">桌面运行时: 3100/3101</span>
-                            </div>
-
-                            <div className="flex items-center gap-2 rounded-md bg-stone-950 px-3 py-1.5 ring-1 ring-stone-800">
-                                <span className="size-2 rounded-full bg-cyan-400" />
-                                <span className="text-stone-300">Agent Bridge: 127.0.0.1:3102</span>
-                            </div>
-
-                            <div className="flex items-center gap-2 rounded-md bg-stone-950 px-3 py-1.5 ring-1 ring-stone-800">
-                                <span className={cn("size-2 rounded-full", ffmpegStatus ? "bg-emerald-400" : "bg-amber-400")} />
-                                <span className="text-stone-300">FFmpeg: {ffmpegStatus ? "已就绪" : "待探测"}</span>
-                            </div>
-
-                            <div className="flex items-center gap-2 rounded-md bg-stone-950 px-3 py-1.5 ring-1 ring-stone-800">
-                                <span className={cn("size-2 rounded-full", davinciConnector?.status === "ready" ? "bg-emerald-400" : "bg-stone-500")} />
-                                <span className="text-stone-300">
-                                    DaVinci Resolve: {davinciConnector?.status === "ready" ? "已连接" : "未启动"}
-                                </span>
-                            </div>
-
-                            <div className="flex items-center gap-2 rounded-md bg-stone-950 px-3 py-1.5 ring-1 ring-stone-800">
-                                <span className={cn("size-2 rounded-full", eagleConnector?.status === "ready" ? "bg-emerald-400" : "bg-stone-500")} />
-                                <span className="text-stone-300">
-                                    Eagle 素材库: {eagleConnector?.status === "ready" ? "已联通" : "未运行"}
-                                </span>
-                            </div>
+                        <div className="grid grid-cols-2 gap-3 self-stretch">
+                            <HomeAction icon={<Plus />} title="新建片子" description="选目录，建画布" onClick={() => void handleCreateProject()} loading={creating} />
+                            <HomeAction icon={<LayoutGrid />} title="全部画布" description={`${projects.length} 个本地项目`} onClick={() => router.push("/canvas")} />
+                            <HomeAction icon={<Bot />} title="画布 Agent" description="对话并操作节点" onClick={() => openLatest("agent")} />
+                            <HomeAction icon={<Terminal />} title="本地 AI" description="启动 Codex / Claude" onClick={() => openLatest("terminal")} />
                         </div>
                     </div>
-                </div>
+                </section>
 
-                {/* 活跃片子工程列表 */}
-                <section>
+                <section className="mt-9">
                     <div className="mb-4 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                            <Layers className="size-4 text-emerald-400" />
-                            <h2 className="text-base font-semibold text-white">活跃片子案例工程</h2>
-                            <span className="text-xs text-stone-500">（共 {projects.length} 个本地工程）</span>
+                        <div>
+                            <h2 className="text-lg font-semibold">你的片子</h2>
+                            <p className="mt-1 text-sm text-stone-500 dark:text-stone-400">点开就回到上次的画布位置和工作状态</p>
                         </div>
-                        <Button
-                            type="link"
-                            size="small"
-                            onClick={() => router.push("/canvas")}
-                            className="text-stone-400 hover:text-emerald-400 text-xs p-0 flex items-center gap-1"
-                        >
-                            查看全部 <ArrowRight className="size-3" />
-                        </Button>
+                        {projects.length > 6 ? (
+                            <Button type="text" onClick={() => router.push("/canvas")}>
+                                查看全部 <ChevronRight className="size-4" />
+                            </Button>
+                        ) : null}
                     </div>
 
-                    {projects.length === 0 ? (
-                        <div className="rounded-xl border border-dashed border-stone-800 py-12 text-center">
-                            <Film className="mx-auto size-10 text-stone-600 mb-3" />
-                            <h3 className="text-sm font-medium text-stone-300">暂无片子工程</h3>
-                            <p className="text-xs text-stone-500 mt-1 mb-4">创建你的第一个分镜工程，开始首帧定死与视频生成编排</p>
-                            <Button type="primary" onClick={handleCreateProject} className="bg-emerald-600 hover:bg-emerald-500">
-                                立即创建
-                            </Button>
+                    {!hydrated ? (
+                        <div className="grid h-40 place-items-center rounded-2xl border border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900"><Spin /></div>
+                    ) : orderedProjects.length ? (
+                        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                            {orderedProjects.slice(0, 6).map((project) => (
+                                <button
+                                    key={project.id}
+                                    type="button"
+                                    onClick={() => router.push(`/canvas/${project.id}`)}
+                                    className="group flex min-h-36 cursor-pointer flex-col rounded-2xl border border-stone-200 bg-white p-5 text-left transition hover:-translate-y-0.5 hover:border-stone-400 hover:shadow-md dark:border-stone-800 dark:bg-stone-900 dark:hover:border-stone-600"
+                                >
+                                    <div className="flex items-start justify-between gap-3">
+                                        <span className="grid size-10 place-items-center rounded-xl bg-stone-100 text-stone-700 dark:bg-stone-800 dark:text-stone-200"><Film className="size-5" /></span>
+                                        <span className="text-xs text-stone-400">{new Date(project.updatedAt).toLocaleDateString("zh-CN")}</span>
+                                    </div>
+                                    <div className="mt-4 truncate font-medium">{project.title || "未命名片子"}</div>
+                                    <div className="mt-auto flex items-center justify-between pt-3 text-xs text-stone-500 dark:text-stone-400">
+                                        <span>{project.nodes?.length || 0} 节点 · {project.connections?.length || 0} 连线</span>
+                                        <ArrowRight className="size-4 opacity-0 transition group-hover:translate-x-0.5 group-hover:opacity-100" />
+                                    </div>
+                                </button>
+                            ))}
                         </div>
                     ) : (
-                        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                            {projects.slice(0, 8).map((proj) => {
-                                const nodeCount = proj.nodes?.length || 0;
-                                const videoCount = proj.nodes?.filter((n) => n.type === "video").length || 0;
-                                const imageCount = proj.nodes?.filter((n) => n.type === "image").length || 0;
-
-                                return (
-                                    <div
-                                        key={proj.id}
-                                        onClick={() => router.push(`/canvas/${proj.id}`)}
-                                        className="group relative cursor-pointer rounded-xl border border-stone-800/80 bg-stone-900/50 p-5 transition-all hover:border-emerald-500/50 hover:bg-stone-900 hover:shadow-lg hover:shadow-emerald-950/20"
-                                    >
-                                        <div className="flex items-start justify-between">
-                                            <span className="flex size-9 items-center justify-center rounded-lg bg-stone-800 text-emerald-400 group-hover:bg-emerald-500/20">
-                                                <Film className="size-4" />
-                                            </span>
-                                            <span className="text-[11px] text-stone-500">
-                                                {new Date(proj.updatedAt || Date.now()).toLocaleDateString("zh-CN")}
-                                            </span>
-                                        </div>
-                                        <h3 className="mt-3 truncate text-sm font-semibold text-white group-hover:text-emerald-400">
-                                            {proj.title || "未命名工程"}
-                                        </h3>
-                                        <div className="mt-3 flex items-center gap-3 text-xs text-stone-400">
-                                            <span>{nodeCount} 节点</span>
-                                            <span>·</span>
-                                            <span>{imageCount} 张图片</span>
-                                            <span>·</span>
-                                            <span>{videoCount} 条视频</span>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
+                        <button type="button" onClick={() => void handleCreateProject()} className="flex h-40 w-full cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-stone-300 bg-white text-stone-500 transition hover:border-stone-500 hover:text-stone-800 dark:border-stone-700 dark:bg-stone-900 dark:hover:text-stone-200">
+                            <FolderOpen className="size-7" />
+                            <span className="mt-3 text-sm font-medium">选择一个片子目录</span>
+                        </button>
                     )}
                 </section>
 
-                {/* 灵感与提示词快速通道 */}
-                <section className="border-t border-stone-800/80 pt-6">
-                    <div className="mb-4 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                            <Sparkles className="size-4 text-emerald-400" />
-                            <h2 className="text-base font-semibold text-white">影视编导与运镜提示词库</h2>
-                            <Tag color="default" className="bg-stone-900 text-stone-400 border-stone-800 text-xs">
-                                已接入本地参考仓库与远端 URL
-                            </Tag>
+                <section className="mt-9 grid gap-4 border-t border-stone-200 pt-7 md:grid-cols-[1fr_auto] md:items-center dark:border-stone-800">
+                    <div className="flex items-start gap-3">
+                        <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"><CheckCircle2 className="size-4" /></span>
+                        <div>
+                            <div className="text-sm font-medium">选中节点后，右侧两个 AI 入口会共享这些内容</div>
+                            <div className="mt-1 text-xs leading-5 text-stone-500 dark:text-stone-400">画布 Agent 适合直接生成和修改节点；本地 AI 适合调用片子目录里的文件、脚本和完整工作流。</div>
                         </div>
-                        <Button
-                            type="link"
-                            size="small"
-                            onClick={() => router.push("/prompts")}
-                            className="text-stone-400 hover:text-emerald-400 text-xs p-0 flex items-center gap-1"
-                        >
-                            打开提示词中心 <ArrowRight className="size-3" />
-                        </Button>
                     </div>
-
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                        {featuredPrompts.map((item) => (
-                            <div
-                                key={item.id}
-                                onClick={() => router.push("/prompts")}
-                                className="cursor-pointer rounded-lg border border-stone-800/70 bg-stone-900/30 p-3.5 transition hover:border-stone-700 hover:bg-stone-900/60"
-                            >
-                                <div className="flex items-center justify-between gap-2">
-                                    <h4 className="truncate text-xs font-medium text-stone-200">{item.title}</h4>
-                                    <Tag className="m-0 border-0 bg-stone-800 text-[10px] text-stone-400">
-                                        {item.category}
-                                    </Tag>
-                                </div>
-                                <p className="mt-2 line-clamp-2 text-xs text-stone-400 leading-relaxed font-mono">
-                                    {item.prompt}
-                                </p>
-                            </div>
-                        ))}
+                    <div className="flex flex-wrap gap-2 text-xs text-stone-500 dark:text-stone-400">
+                        <span className="rounded-full bg-stone-100 px-3 py-1.5 dark:bg-stone-900">桌面服务 {runtimeReport ? "已连接" : "检测中"}</span>
+                        <span title={desktopSyncError} className="rounded-full bg-stone-100 px-3 py-1.5 dark:bg-stone-900">
+                            画布数据 {desktopSyncStatus === "synced" ? "已同步" : desktopSyncStatus === "failed" ? "读取失败" : "同步中"}
+                        </span>
+                        <span className="rounded-full bg-stone-100 px-3 py-1.5 dark:bg-stone-900">本地视频 {ffmpegReady ? "可用" : "待检测"}</span>
+                        <span className="rounded-full bg-stone-100 px-3 py-1.5 dark:bg-stone-900">外部工具 {connectedTools} 个在线</span>
                     </div>
                 </section>
             </div>
@@ -252,3 +209,17 @@ export default function IndexPage() {
     );
 }
 
+function HomeAction({ icon, title, description, onClick, loading = false }: { icon: ReactNode; title: string; description: string; onClick: () => void; loading?: boolean }) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            disabled={loading}
+            className="group flex min-h-32 cursor-pointer flex-col items-start rounded-2xl border border-stone-200 bg-stone-50 p-4 text-left transition hover:border-stone-400 hover:bg-stone-100 disabled:cursor-wait disabled:opacity-60 dark:border-stone-700 dark:bg-stone-800/60 dark:hover:border-stone-600 dark:hover:bg-stone-800"
+        >
+            <span className="grid size-9 place-items-center rounded-xl bg-white text-stone-700 shadow-sm [&>svg]:size-4 dark:bg-stone-900 dark:text-stone-200">{icon}</span>
+            <span className="mt-auto text-sm font-medium">{title}</span>
+            <span className="mt-1 text-xs text-stone-500 dark:text-stone-400">{description}</span>
+        </button>
+    );
+}

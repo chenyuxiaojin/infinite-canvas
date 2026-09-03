@@ -6,7 +6,7 @@ import { localForageStorage } from "@/lib/localforage-storage";
 import { listCanvasProjects, saveCanvasProject, syncCanvasProjects } from "@/services/api/canvas-tasks";
 import { fetchUserConfig } from "@/services/api/user-config";
 import { useUserStore } from "@/stores/use-user-store";
-import { isDesktopRuntime, listDesktopCanvasProjects, saveDesktopCanvasProject } from "@/services/desktop-runtime";
+import { isDesktopRuntime, loadDesktopCanvasProjects, saveDesktopCanvasProject } from "@/services/desktop-runtime";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAgentConfig, CanvasAssistantSession, CanvasConnection, CanvasNodeData, CanvasPendingAgentRequest, ViewportTransform } from "../types";
 
@@ -48,6 +48,7 @@ type CanvasStore = {
     updateProject: (id: string, patch: Partial<Pick<CanvasProject, "nodes" | "connections" | "chatSessions" | "activeChatId" | "agentConfig" | "autoTitlePending" | "backgroundMode" | "showImageInfo" | "viewport" | "sidePanel" | "agentPanel" | "pendingAgentRequest">>) => void;
     syncWithRemote: (token: string, syncEnabled: boolean) => Promise<void>;
     setSyncEnabled: (enabled: boolean) => void;
+    refreshFromDesktop: () => Promise<void>;
 };
 
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
@@ -232,7 +233,7 @@ async function persistLocalProjects(projects: CanvasProject[]) {
 }
 
 const canvasStorage: PersistStorage<CanvasStore> = {
-    getItem: async (_name) => {
+    getItem: async (name) => {
         await waitForUserStoreHydration();
         const localProjects = await loadLocalProjects();
         const token = useUserStore.getState().token;
@@ -244,20 +245,17 @@ const canvasStorage: PersistStorage<CanvasStore> = {
 
         if (isDesktopRuntime()) {
             try {
-                const desktopProjects = await listDesktopCanvasProjects<CanvasProject>();
+                const desktopProjects = await loadDesktopCanvasProjects<CanvasProject>();
                 const desktopById = new Map(
                     desktopProjects.map((project) => [project.id, project]),
                 );
-                const projects = mergeCanvasProjects(
+                const projects = mergeDesktopCanvasProjects(
                     desktopProjects,
                     localProjects,
                 );
-                await Promise.all(
+                await Promise.allSettled(
                     localProjects
-                        .filter((project) => {
-                            const desktop = desktopById.get(project.id);
-                            return !desktop || Date.parse(project.updatedAt || "") > Date.parse(desktop.updatedAt || "");
-                        })
+                        .filter((project) => !desktopById.has(project.id))
                         .map((project) => saveDesktopCanvasProject(project)),
                 );
                 if (projects.length > 0 || localParsed) {
@@ -477,6 +475,21 @@ export const useCanvasStore = create<CanvasStore>()(
             setSyncEnabled: (enabled) => {
                 accountCanvasSyncEnabled = enabled;
             },
+            refreshFromDesktop: async () => {
+                if (!isDesktopRuntime()) return;
+                const desktopProjects = await loadDesktopCanvasProjects<CanvasProject>();
+                const localProjects = get().projects;
+                const desktopById = new Map(desktopProjects.map((project) => [project.id, project]));
+                await Promise.allSettled(
+                    localProjects
+                        .filter((project) => !desktopById.has(project.id))
+                        .map((project) => saveDesktopCanvasProject(project)),
+                );
+                const projects = mergeDesktopCanvasProjects(desktopProjects, localProjects);
+                queuedPersistState = { projects };
+                set({ projects });
+                await persistLocalProjects(projects);
+            },
         }),
         {
             name: CANVAS_STORE_KEY,
@@ -511,5 +524,27 @@ export function mergeCanvasProjects(
         (a, b) =>
             Date.parse(b.updatedAt || "") -
             Date.parse(a.updatedAt || ""),
+    );
+}
+
+function mergeDesktopCanvasProjects(
+    desktopProjects: CanvasProject[],
+    localProjects: CanvasProject[],
+): CanvasProject[] {
+    const localById = new Map(localProjects.map((project) => [project.id, project]));
+    const projects = new Map(localProjects.map((project) => [project.id, project]));
+
+    desktopProjects.forEach((desktopProject) => {
+        const localProject = localById.get(desktopProject.id);
+        projects.set(desktopProject.id, {
+            ...desktopProject,
+            viewport: localProject?.viewport || desktopProject.viewport,
+            sidePanel: localProject?.sidePanel || desktopProject.sidePanel,
+            agentPanel: localProject?.agentPanel || desktopProject.agentPanel,
+        });
+    });
+
+    return Array.from(projects.values()).sort(
+        (a, b) => Date.parse(b.updatedAt || "") - Date.parse(a.updatedAt || ""),
     );
 }

@@ -6,7 +6,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { nanoid } from "nanoid";
 import { Button, Tag, Tooltip } from "antd";
-import { Copy, Folder, RefreshCw, Terminal as TerminalIcon, Trash2 } from "lucide-react";
+import { Bot, CircleAlert, CircleCheck, Copy, Folder, RefreshCw, Terminal as TerminalIcon, Trash2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import {
@@ -14,7 +14,7 @@ import {
     onPtyData,
     onPtyExit,
     resizePty,
-    resolveCaseProjectCwd,
+    resolveCanvasProjectWorkspace,
     spawnPty,
     terminatePty,
     writePty,
@@ -39,6 +39,8 @@ export function CanvasTerminalDrawer({
     const [cwd, setCwd] = useState<string>("");
     const [isSpawning, setIsSpawning] = useState(false);
     const [spawnError, setSpawnError] = useState<string | null>(null);
+    const [workspaceConfigured, setWorkspaceConfigured] = useState(false);
+    const [agentCommand, setAgentCommand] = useState<string | null>(null);
 
     const initTerminalSession = async () => {
         if (!containerRef.current || !isTerminalAvailable()) return;
@@ -52,8 +54,11 @@ export function CanvasTerminalDrawer({
             terminalRef.current = null;
         }
 
-        const resolvedCwd = resolveCaseProjectCwd(projectTitle, projectId);
+        const workspace = await resolveCanvasProjectWorkspace(projectId, projectTitle).catch(() => null);
+        const resolvedCwd = workspace?.projectDirectory || "/Users/chenhuajin/项目/视频制作台/AI编导";
         setCwd(resolvedCwd);
+        setWorkspaceConfigured(workspace?.configured === true);
+        setAgentCommand(workspace?.agentCommand || null);
 
         // 2. 初始化 Xterm 实例
         const term = new Terminal({
@@ -187,18 +192,50 @@ export function CanvasTerminalDrawer({
 
     const handleInjectSelectedNodes = () => {
         if (!selectedNodes.length || !terminalRef.current) return;
+        const asSingleLine = (value: string, limit: number) => value
+            .replace(/[\u0000-\u001f\u007f]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, limit);
         const descriptions = selectedNodes
             .map((n) => {
                 const meta = n.metadata as Record<string, unknown> | undefined;
                 const localMedia = meta?.localMedia as Record<string, unknown> | undefined;
-                if (n.type === "image" && typeof localMedia?.fileName === "string") {
-                    return `agent-media/verified/${localMedia.fileName}`;
-                }
-                return n.title || n.id;
+                const title = asSingleLine(n.title || "未命名", 160);
+                const content = typeof meta?.content === "string" ? meta.content : typeof meta?.prompt === "string" ? meta.prompt : "";
+                const relativePath = typeof localMedia?.relativePath === "string"
+                    ? asSingleLine(`${cwd}/agent-media/${localMedia.relativePath}`, 600)
+                    : "";
+                return [
+                    `节点「${title}」`,
+                    `类型 ${n.type}`,
+                    `ID ${n.id}`,
+                    content ? `内容 ${asSingleLine(content, 500)}` : "",
+                    relativePath ? `本地素材 ${relativePath}` : "",
+                ].filter(Boolean).join("，");
             })
-            .join(" ");
+            .join("；");
 
-        void writePty(sessionIdRef.current, ` ${descriptions} `);
+        const prompt = `请结合无限画布当前选中的 ${selectedNodes.length} 个节点继续处理：${descriptions} `;
+        void writePty(
+            sessionIdRef.current,
+            `\u001b[200~${prompt}\u001b[201~`,
+        );
+        terminalRef.current.focus();
+    };
+
+    const handleStartAgent = (command: "codex" | "claude") => {
+        if (!terminalRef.current) return;
+        const shellQuote = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`;
+        const launchCommand = command === "codex" && agentCommand
+            ? [
+                "codex",
+                "-c", shellQuote(`mcp_servers.infinite_canvas.command=${JSON.stringify(agentCommand)}`),
+                "-c", shellQuote('mcp_servers.infinite_canvas.args=["mcp","serve"]'),
+                "-c", shellQuote("mcp_servers.infinite_canvas.enabled=true"),
+            ].join(" ")
+            : command;
+        void writePty(sessionIdRef.current, `${launchCommand}\r`);
         terminalRef.current.focus();
     };
 
@@ -207,9 +244,10 @@ export function CanvasTerminalDrawer({
         terminalRef.current?.focus();
     };
 
-    const handleRestart = () => {
+    const handleRestart = async () => {
+        await terminatePty(sessionIdRef.current).catch(() => undefined);
         sessionIdRef.current = `term-${nanoid(8)}`;
-        void initTerminalSession();
+        await initTerminalSession();
     };
 
     if (!isTerminalAvailable()) {
@@ -227,8 +265,8 @@ export function CanvasTerminalDrawer({
 
     return (
         <div className="flex h-full flex-col bg-stone-950 text-stone-200">
-            {/* 顶部工作区与快速控制 */}
-            <div className="flex items-center justify-between border-b border-stone-800 bg-stone-900/70 px-3 py-2 text-xs">
+            <div className="border-b border-stone-800 bg-stone-900/70 px-3 py-2.5 text-xs">
+                <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 overflow-hidden">
                     <Folder className="size-3.5 text-emerald-400 shrink-0" />
                     <Tooltip title={cwd}>
@@ -236,7 +274,12 @@ export function CanvasTerminalDrawer({
                             {cwd ? cwd.split("/").slice(-2).join("/") : "定位中..."}
                         </span>
                     </Tooltip>
-                    <Tag color="emerald" className="m-0 text-[10px] py-0 px-1">Option A</Tag>
+                    <Tooltip title={workspaceConfigured ? "当前片子已连接画布，AI 可以读取和更新节点" : "终端可用，但这个目录尚未连接画布"}>
+                        <span className={cn("inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px]", workspaceConfigured ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300")}>
+                            {workspaceConfigured ? <CircleCheck className="size-3" /> : <CircleAlert className="size-3" />}
+                            {workspaceConfigured ? "画布已连接" : "未连接画布"}
+                        </span>
+                    </Tooltip>
                     {spawnError && (
                         <Tag color="error" className="m-0 text-[10px] py-0 px-1">启动异常</Tag>
                     )}
@@ -244,13 +287,14 @@ export function CanvasTerminalDrawer({
 
                 <div className="flex items-center gap-1">
                     {selectedNodes.length > 0 && (
-                        <Tooltip title={`将选中的 ${selectedNodes.length} 个节点插入终端`}>
+                        <Tooltip title={`把选中的 ${selectedNodes.length} 个节点放进 AI 输入框`}>
                             <Button
                                 size="small"
                                 type="text"
                                 className="text-stone-300 hover:text-emerald-400"
                                 icon={<Copy className="size-3.5" />}
                                 onClick={handleInjectSelectedNodes}
+                                aria-label="把选中节点放进 AI 输入框"
                             />
                         </Tooltip>
                     )}
@@ -269,10 +313,39 @@ export function CanvasTerminalDrawer({
                             type="text"
                             className="text-stone-400 hover:text-stone-200"
                             icon={<RefreshCw className={cn("size-3.5", isSpawning && "animate-spin")} />}
-                            onClick={handleRestart}
+                            onClick={() => void handleRestart()}
                         />
                     </Tooltip>
                 </div>
+                </div>
+
+                <div className="mt-2 flex items-center gap-2">
+                    <span className="shrink-0 text-[11px] text-stone-500">启动本地 AI</span>
+                    <Button size="small" icon={<Bot className="size-3.5" />} onClick={() => handleStartAgent("codex")}>
+                        Codex
+                    </Button>
+                    <Button size="small" icon={<Bot className="size-3.5" />} onClick={() => handleStartAgent("claude")}>
+                        Claude
+                    </Button>
+                    {selectedNodes.length > 0 ? (
+                        <Button size="small" type="primary" icon={<Copy className="size-3.5" />} onClick={handleInjectSelectedNodes} className="ml-auto bg-emerald-600">
+                            放入 {selectedNodes.length} 个节点
+                        </Button>
+                    ) : (
+                        <span className="ml-auto text-[11px] text-stone-500">先在左侧选节点，可直接带给 AI</span>
+                    )}
+                </div>
+
+                {selectedNodes.length > 0 ? (
+                    <div className="mt-2 flex gap-1 overflow-x-auto pb-0.5">
+                        {selectedNodes.slice(0, 6).map((node) => (
+                            <span key={node.id} className="max-w-40 shrink-0 truncate rounded-md bg-stone-800 px-2 py-1 text-[10px] text-stone-300">
+                                {node.title || "未命名节点"}
+                            </span>
+                        ))}
+                        {selectedNodes.length > 6 ? <span className="shrink-0 px-1 py-1 text-[10px] text-stone-500">+{selectedNodes.length - 6}</span> : null}
+                    </div>
+                ) : null}
             </div>
 
             {/* 终端字符流容器 */}

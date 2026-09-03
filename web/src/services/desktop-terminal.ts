@@ -19,6 +19,14 @@ export type PtySpawnOptions = {
     rows?: number;
 };
 
+export type CanvasProjectWorkspace = {
+    projectDirectory: string;
+    configured: boolean;
+    source: "saved_binding" | "matched_title" | "selected_folder" | "workflow_root";
+    configurationError?: string | null;
+    agentCommand?: string | null;
+};
+
 export function isTerminalAvailable() {
     return isTauri();
 }
@@ -49,6 +57,36 @@ export async function onPtyData(callback: (payload: PtyOutputPayload) => void): 
 
 export async function onPtyExit(callback: (payload: PtyExitPayload) => void): Promise<UnlistenFn> {
     return listen<PtyExitPayload>("pty_exit", (event) => callback(event.payload));
+}
+
+export async function resolveCanvasProjectWorkspace(projectId?: string, projectTitle?: string): Promise<CanvasProjectWorkspace> {
+    if (!isTauri() || !projectId) {
+        return {
+            projectDirectory: resolveCaseProjectCwd(projectTitle, projectId),
+            configured: false,
+            source: "workflow_root",
+        };
+    }
+    return invoke<CanvasProjectWorkspace>("resolve_canvas_project_workspace", {
+        projectId,
+        projectTitle: projectTitle || "未命名片子",
+    });
+}
+
+export async function selectFilmDirectory(): Promise<string | null> {
+    if (!isTauri()) return null;
+    return invoke<string | null>("select_film_directory");
+}
+
+export async function bindCanvasProjectDirectory(projectId: string, projectTitle: string, projectDirectory: string): Promise<CanvasProjectWorkspace> {
+    if (!isTauri()) {
+        return { projectDirectory, configured: false, source: "selected_folder" };
+    }
+    return invoke<CanvasProjectWorkspace>("bind_canvas_project_directory", {
+        projectId,
+        projectTitle,
+        projectDirectory,
+    });
 }
 
 /**

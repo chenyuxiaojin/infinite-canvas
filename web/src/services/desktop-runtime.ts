@@ -104,6 +104,13 @@ export function listDesktopCanvasProjects<T>() {
     return invoke<T[]>("desktop_canvas_projects");
 }
 
+export async function loadDesktopCanvasProjects<T>() {
+    const projectIds = await invoke<string[]>("desktop_canvas_project_ids");
+    return Promise.all(
+        projectIds.map((projectId) => invoke<T>("desktop_canvas_project", { projectId })),
+    );
+}
+
 export function saveDesktopCanvasProject<T>(project: T) {
     return invoke<T>("save_desktop_canvas_project", { project });
 }

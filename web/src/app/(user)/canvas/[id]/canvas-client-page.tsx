@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import dynamic from "next/dynamic";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ChevronLeft, ChevronRight, Download, Globe2, Home, ImageIcon, Images, Layers3, List, Maximize, Menu, Bot, Music2, PanelLeftClose, PanelLeftOpen, Pause, Play, Plus, Redo2, Settings2, Trash2, Undo2, Upload, Video, Volume2, VolumeX, X } from "lucide-react";
 import { saveAs } from "file-saver";
 
@@ -166,10 +166,19 @@ function createCanvasNode(type: CanvasNodeType, position: Position, metadata?: C
 export default function CanvasPage() {
     const params = useParams<{ id: string }>();
     const [mounted, setMounted] = useState(false);
+    const hydrated = useCanvasStore((state) => state.hydrated);
+    const refreshFromDesktop = useCanvasStore((state) => state.refreshFromDesktop);
 
     useEffect(() => {
-        setMounted(true);
-    }, []);
+        if (!hydrated) return;
+        let active = true;
+        const prepare = async () => {
+            if (isDesktopRuntime()) await refreshFromDesktop().catch(() => undefined);
+            if (active) setMounted(true);
+        };
+        void prepare();
+        return () => { active = false; };
+    }, [hydrated, refreshFromDesktop]);
 
     if (!mounted) return <CanvasRefreshShell />;
 
@@ -307,6 +316,7 @@ function NodeCreateMenu({
 function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const { message } = App.useApp();
     const router = useRouter();
+    const searchParams = useSearchParams();
     const containerRef = useRef<HTMLDivElement>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
     const assetInsertPositionRef = useRef<Position | null>(null);
@@ -408,6 +418,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
     const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
     const [agentPanel, setAgentPanel] = useState(DEFAULT_CANVAS_AGENT_PANEL);
     const [assistantMounted, setAssistantMounted] = useState(false);
+    const requestedAssistantView = searchParams.get("panel") === "terminal" ? "terminal" : searchParams.get("panel") === "agent" ? "chat" : undefined;
     const [titleEditing, setTitleEditing] = useState(false);
     const [titleDraft, setTitleDraft] = useState("");
     const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
@@ -538,6 +549,12 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
         };
         void restore();
     }, [hydrated, openProject, projectId, router]);
+
+    useEffect(() => {
+        if (!projectLoaded || !requestedAssistantView) return;
+        setAssistantMounted(true);
+        setAgentPanel((current) => ({ ...current, open: true }));
+    }, [projectLoaded, requestedAssistantView]);
 
     useEffect(() => {
         if (!projectLoaded || applyingHistoryRef.current || historyPausedRef.current) return;
@@ -4505,6 +4522,7 @@ function InfiniteCanvasPage({ projectId }: { projectId: string }) {
                     onInitialRequestConsumed={() => setInitialAgentRequest(null)}
                     projectId={projectId}
                     projectTitle={currentProject?.title}
+                    initialView={requestedAssistantView}
                 />
             ) : null}
         </main>

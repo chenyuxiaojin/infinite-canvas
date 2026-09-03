@@ -1,8 +1,10 @@
 # 无限画布多 Agent 项目级接入方案
 
-> 状态：待确认方案，不代表已经实施。
+> 状态：第一轮已于 2026-09-04 实施并完成本机验收。
 >
 > 2026-09-02 修订（小陈拍板）：加入目录原则（一个片子目录 = 一张画布，Agent 在片子目录启动）；第一轮只接 Claude Code + Codex，Grok / Gemini Antigravity 放第二轮；网页版下线拆到独立文档 `web-product-sunset-plan.md`；补入 Claude Code 项目级 MCP 的目录发现规则与 `CLAUDE_PROJECT_DIR` 事实。
+
+> 2026-09-04 实施结果：桌面 App 可自动匹配或手选片子目录，生成项目绑定并合并 Claude MCP；右侧可在同一节点上下文中切换画布 Agent 和本地终端；安装包内 CLI 已提供 `mcp serve`、四个极简工具和安全 dry-run。Codex 当前版本不会自动读取片子目录内的 `.codex/config.toml`，所以 App 的 Codex 启动按钮会显式注入这一个 MCP 配置。
 
 ## 一、结论
 
@@ -48,7 +50,7 @@
 - 既有协议要求 Agent 写入携带 `project_id`、`request_id`、`base_revision` 和 `actor: agent`。
 - 既有协作分支使用 `CanvasProject.operationState` 作为 revision、任务、请求记录、锁和审计的唯一事实来源。
 - 当前 App 未启动时，CLI 会明确返回 `RUNTIME_UNAVAILABLE`，不会假装执行成功。
-- 当前 CLI 没有 `mcp` 子命令，MCP 尚未实现，也尚未接入任何 Agent。
+- 当前 CLI 已有 `mcp serve`，并提供 `canvas_context`、`canvas_read`、`canvas_mutate`、`canvas_task` 四个工具。
 - Codex 官方支持项目级 `.codex/config.toml`，并允许在其中配置 MCP。
 - 本机 Claude Code 支持 `local`、`user`、`project` 三种 MCP 范围。
 - Claude Code 项目级 `.mcp.json` 只从启动目录（项目根）读取；官方文档没有向上级或子目录查找的表述（2026-09-02 核实，code.claude.com/docs/en/mcp）。
@@ -63,11 +65,12 @@
 - MCP 与 CLI 应共用同一个 Rust 客户端库，避免两套协议逐渐不一致。
 - 项目级加载比全局 MCP 更符合当前需求，因为无限画布只与视频、内容和视觉生产项目有关。
 
-### 【未知】实施前需要再次确认的部分
+### 【已核实】第一轮实施结果与限制
 
-- Codex 的 `.codex/config.toml` 是否同样只从启动目录读取（原文只引官方文档链接，未核实这一点）。第一轮开工前核。
-- `canvas_read` 按 revision 增量读取，现有 Bridge 是否已有"给出版本 N 之后的差异"接口。没有的话这不是包装，是新功能，要计入阶段 1 工作量。
-- MCP 服务进程从哪里取 Bridge 凭据（CLI 的 `--credential-file` 默认位置），方案要求绑定文件不存凭据，因此必须沿用 CLI 的默认凭据位置。
+- 本机 Codex 通过 `-C` 进入片子目录时不会自动读取片子目录内的 `.codex/config.toml`；侧栏启动时已通过 `-c` 显式注入无限画布 MCP，项目文件仍保留作后续兼容。
+- 当前 Bridge 没有按 revision 返回差异的接口；`canvas_read` 支持按节点 ID 读取并只返回所选节点之间的连线，整图读取需要显式不传节点 ID。
+- MCP 服务沿用安装专属的默认 Bridge 凭据文件，绑定文件和各 Agent 配置都不保存凭据。
+- Claude Code 能读取片子目录的 `.mcp.json`；首次使用新项目 MCP 时仍会要求用户确认信任。
 - 第二轮再核：Grok、Gemini Antigravity 当前安装版本升级后，项目配置格式是否变化；Antigravity 的项目插件是否会被当前工作区自动启用，还是需要首次手动确认。
 - 网页版相关未知项已移至 `web-product-sunset-plan.md`。
 
@@ -206,18 +209,18 @@ infinite-canvas agents setup --project 当前片子目录
 | 工具 | 用途 | 默认返回内容 |
 | --- | --- | --- |
 | `canvas_context` | 检查 App、绑定项目、能力和最新 revision | 紧凑状态摘要，含绑定来源文件路径 |
-| `canvas_read` | 按节点、选区或 revision 增量读取 | 需要的节点和差异，不返回整张大画布 |
+| `canvas_read` | 按节点读取，必要时读取整图 | 需要的节点及所选节点之间的连线 |
 | `canvas_mutate` | dry-run 或提交白名单画布操作 | 变更摘要、新 revision、冲突信息 |
 | `canvas_task` | 摄入媒体、请求生成、查询或取消任务 | 任务摘要、费用预估、人工批准状态 |
 
 ### 工具设计约束
 
 - 不提供 `canvas` 选择参数：一个片子目录只绑一张画布，服务端按 4.2 的顺序自动定位。
-- `canvas_context` 返回里带上绑定来源文件路径，方便小陈一眼确认 Agent 在对哪部片子说话。
+- `canvas_context` 返回绑定项目、片子目录、最新 revision、节点与连线数量，方便确认 Agent 在对哪部片子说话。
 - `canvas_mutate` 默认 `mode=dry_run`，显式指定后才能提交。
 - 服务端自动读取项目绑定，但实际写请求仍必须带最新 `base_revision`。
 - 写入必须保留原有 `request_id` 幂等机制。
-- `canvas_read` 默认增量读取，不把所有节点、媒体元数据和审计记录一次塞进上下文。
+- `canvas_read` 传入节点 ID 时只返回所选节点和它们之间的连线，避免默认塞入整张大画布。
 - `canvas_task` 可以请求付费任务，但只创建 `pending_approval`；MCP 不提供 approve 动作。
 - 工具说明要短，公共 MCP instructions 只保留安全边界和标准操作顺序。
 - 底层继续沿用白名单操作，不开放任意 JSON、任意文件路径或 Shell。

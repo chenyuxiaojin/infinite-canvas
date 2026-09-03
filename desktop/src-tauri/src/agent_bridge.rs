@@ -60,6 +60,29 @@ pub(crate) fn desktop_canvas_projects(
 }
 
 #[tauri::command]
+pub(crate) fn desktop_canvas_project_ids(
+    bridge: State<'_, DesktopAgentBridge>,
+) -> Result<Vec<String>, String> {
+    bridge
+        .canvas
+        .list_projects()
+        .map(|projects| projects.into_iter().map(|project| project.id).collect())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn desktop_canvas_project(
+    bridge: State<'_, DesktopAgentBridge>,
+    project_id: String,
+) -> Result<Value, String> {
+    bridge
+        .canvas
+        .get_project(&project_id)
+        .map(|document| document.project)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub(crate) fn save_desktop_canvas_project(
     bridge: State<'_, DesktopAgentBridge>,
     project: Value,
