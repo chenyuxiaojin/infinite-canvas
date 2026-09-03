@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "node scripts/dev-desktop.mjs",
     "stage": "node scripts/prepare-desktop.mjs",
+    "build:app": "tauri build --bundles app && rm -rf ~/Applications/无限画布.app && cp -R src-tauri/target/release/bundle/macos/无限画布.app ~/Applications/ && rm -rf src-tauri/target/release/bundle/macos/无限画布.app",
     "tauri": "tauri"
   },
   "devDependencies": {
