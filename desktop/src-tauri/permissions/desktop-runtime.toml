@@ -9,4 +9,9 @@ commands.allow = [
   "desktop_task_media",
   "cancel_desktop_task",
   "save_canvas_export",
+  "pty_spawn",
+  "pty_write",
+  "pty_resize",
+  "pty_terminate",
 ]
+

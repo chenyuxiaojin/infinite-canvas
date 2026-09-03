@@ -38,13 +38,15 @@ export function CanvasTerminalDrawer({
     const sessionIdRef = useRef<string>(`term-${nanoid(8)}`);
     const [cwd, setCwd] = useState<string>("");
     const [isSpawning, setIsSpawning] = useState(false);
-    const [isReady, setIsReady] = useState(false);
+    const [spawnError, setSpawnError] = useState<string | null>(null);
 
     const initTerminalSession = async () => {
         if (!containerRef.current || !isTerminalAvailable()) return;
 
         setIsSpawning(true);
-        // 清理已有终端实例
+        setSpawnError(null);
+
+        // 1. 清理已有终端实例
         if (terminalRef.current) {
             terminalRef.current.dispose();
             terminalRef.current = null;
@@ -53,6 +55,7 @@ export function CanvasTerminalDrawer({
         const resolvedCwd = resolveCaseProjectCwd(projectTitle, projectId);
         setCwd(resolvedCwd);
 
+        // 2. 初始化 Xterm 实例
         const term = new Terminal({
             theme: {
                 background: "#0c0a09", // stone-950
@@ -73,6 +76,7 @@ export function CanvasTerminalDrawer({
             cursorBlink: true,
             allowProposedApi: true,
             convertEol: true,
+            scrollback: 5000,
         });
 
         const fitAddon = new FitAddon();
@@ -80,29 +84,48 @@ export function CanvasTerminalDrawer({
 
         containerRef.current.innerHTML = "";
         term.open(containerRef.current);
-        fitAddon.fit();
+
+        // 等待下一帧让 DOM 布局尺寸生效再 fit
+        requestAnimationFrame(() => {
+            try {
+                fitAddon.fit();
+                term.focus();
+            } catch {}
+        });
 
         terminalRef.current = term;
         fitAddonRef.current = fitAddon;
 
         const sessionId = sessionIdRef.current;
 
-        // 启动本地系统 PTY (Option A 路径)
-        const success = await spawnPty({
-            session_id: sessionId,
-            cwd: resolvedCwd,
-            cols: term.cols,
-            rows: term.rows,
+        // 3. 监听键盘按键输入写入 PTY
+        term.onData((data) => {
+            void writePty(sessionId, data);
         });
 
-        if (success) {
-            setIsReady(true);
-            term.onData((data) => {
-                void writePty(sessionId, data);
-            });
-        }
+        // 4. 调用后端创建系统 PTY 进程
+        try {
+            const cols = term.cols > 0 ? term.cols : 80;
+            const rows = term.rows > 0 ? term.rows : 24;
 
-        setIsSpawning(false);
+            const ok = await spawnPty({
+                session_id: sessionId,
+                cwd: resolvedCwd,
+                cols,
+                rows,
+            });
+
+            if (!ok) {
+                throw new Error("PTY 返回失败");
+            }
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            console.error("PTY spawn error:", error);
+            setSpawnError(errorMsg);
+            term.writeln(`\r\n\x1b[31m[终端启动异常: ${errorMsg}]\x1b[0m\r\n`);
+        } finally {
+            setIsSpawning(false);
+        }
     };
 
     useEffect(() => {
@@ -110,40 +133,51 @@ export function CanvasTerminalDrawer({
         let unlistenExit: (() => void) | undefined;
 
         if (isTerminalAvailable()) {
-            void initTerminalSession();
+            // 关键：在 spawn 之前提前挂载数据监听器，防止初次启动的 shell prompt 被丢失
+            const setupListeners = async () => {
+                const fnData = await onPtyData((payload) => {
+                    if (payload.session_id === sessionIdRef.current && terminalRef.current) {
+                        terminalRef.current.write(payload.data);
+                    }
+                });
+                unlistenData = fnData;
 
-            void onPtyData((payload) => {
-                if (payload.session_id === sessionIdRef.current && terminalRef.current) {
-                    terminalRef.current.write(payload.data);
-                }
-            }).then((fn) => {
-                unlistenData = fn;
-            });
+                const fnExit = await onPtyExit((payload) => {
+                    if (payload.session_id === sessionIdRef.current && terminalRef.current) {
+                        terminalRef.current.writeln("\r\n\x1b[33m[Shell 进程已退出，点击右上角重启]\x1b[0m");
+                    }
+                });
+                unlistenExit = fnExit;
 
-            void onPtyExit((payload) => {
-                if (payload.session_id === sessionIdRef.current && terminalRef.current) {
-                    terminalRef.current.writeln("\r\n\x1b[33m[进程已退出，点击右上角重启]\x1b[0m");
-                }
-            }).then((fn) => {
-                unlistenExit = fn;
-            });
+                await initTerminalSession();
+            };
+
+            void setupListeners();
         }
 
-        const handleResize = () => {
+        // 监听外部调整抽屉大小
+        const resizeObserver = new ResizeObserver(() => {
             if (fitAddonRef.current && terminalRef.current && isTerminalAvailable()) {
-                fitAddonRef.current.fit();
-                void resizePty(sessionIdRef.current, terminalRef.current.cols, terminalRef.current.rows);
+                try {
+                    fitAddonRef.current.fit();
+                    const cols = terminalRef.current.cols > 0 ? terminalRef.current.cols : 80;
+                    const rows = terminalRef.current.rows > 0 ? terminalRef.current.rows : 24;
+                    void resizePty(sessionIdRef.current, cols, rows);
+                } catch {}
             }
-        };
+        });
 
-        window.addEventListener("resize", handleResize);
+        if (containerRef.current) {
+            resizeObserver.observe(containerRef.current);
+        }
 
         return () => {
-            window.removeEventListener("resize", handleResize);
+            resizeObserver.disconnect();
             unlistenData?.();
             unlistenExit?.();
             if (terminalRef.current) {
                 terminalRef.current.dispose();
+                terminalRef.current = null;
             }
             if (isTerminalAvailable()) {
                 void terminatePty(sessionIdRef.current);
@@ -165,10 +199,12 @@ export function CanvasTerminalDrawer({
             .join(" ");
 
         void writePty(sessionIdRef.current, ` ${descriptions} `);
+        terminalRef.current.focus();
     };
 
     const handleClear = () => {
         terminalRef.current?.clear();
+        terminalRef.current?.focus();
     };
 
     const handleRestart = () => {
@@ -201,6 +237,9 @@ export function CanvasTerminalDrawer({
                         </span>
                     </Tooltip>
                     <Tag color="emerald" className="m-0 text-[10px] py-0 px-1">Option A</Tag>
+                    {spawnError && (
+                        <Tag color="error" className="m-0 text-[10px] py-0 px-1">启动异常</Tag>
+                    )}
                 </div>
 
                 <div className="flex items-center gap-1">
@@ -237,7 +276,7 @@ export function CanvasTerminalDrawer({
             </div>
 
             {/* 终端字符流容器 */}
-            <div className="relative flex-1 overflow-hidden p-2">
+            <div className="relative flex-1 overflow-hidden p-2 min-h-0 bg-stone-950" onClick={() => terminalRef.current?.focus()}>
                 <div ref={containerRef} className="h-full w-full" />
             </div>
         </div>

@@ -6,7 +6,7 @@ use std::{
     thread,
 };
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -17,6 +17,7 @@ pub struct TerminalManager {
 struct TerminalSession {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
+    child: Box<dyn Child + Send + Sync>,
 }
 
 impl Default for TerminalManager {
@@ -54,8 +55,15 @@ pub fn pty_spawn(
     state: State<'_, TerminalManager>,
     options: PtySpawnOptions,
 ) -> Result<bool, String> {
-    let cols = options.cols.unwrap_or(80);
-    let rows = options.rows.unwrap_or(24);
+    let cols = match options.cols {
+        Some(c) if c > 0 => c,
+        _ => 80,
+    };
+    let rows = match options.rows {
+        Some(r) if r > 0 => r,
+        _ => 24,
+    };
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -73,6 +81,7 @@ pub fn pty_spawn(
     let mut cmd = CommandBuilder::new(&shell);
     if shell.ends_with("zsh") || shell.ends_with("bash") {
         cmd.arg("-l");
+        cmd.arg("-i");
     }
 
     if let Some(cwd) = options.cwd {
@@ -93,10 +102,13 @@ pub fn pty_spawn(
         cmd.env("PATH", enhanced_path);
     }
 
-    let _child = pair
+    let child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("failed to spawn shell: {e}"))?;
+
+    // Drop slave in parent process so read EOF works cleanly
+    drop(pair.slave);
 
     let mut reader = pair
         .master
@@ -119,24 +131,22 @@ pub fn pty_spawn(
                 Ok(0) => break,
                 Ok(n) => {
                     let text = String::from_utf8_lossy(&buffer[..n]).to_string();
-                    let _ = app_handle.emit(
-                        "pty_data",
-                        PtyOutputPayload {
-                            session_id: reader_session_id.clone(),
-                            data: text,
-                        },
-                    );
+                    let payload = PtyOutputPayload {
+                        session_id: reader_session_id.clone(),
+                        data: text,
+                    };
+                    let _ = app_handle.emit("pty_data", payload.clone());
+                    let _ = app_handle.emit_to("main", "pty_data", payload);
                 }
                 Err(_) => break,
             }
         }
-        let _ = app_handle.emit(
-            "pty_exit",
-            PtyExitPayload {
-                session_id: reader_session_id,
-                exit_code: None,
-            },
-        );
+        let exit_payload = PtyExitPayload {
+            session_id: reader_session_id.clone(),
+            exit_code: None,
+        };
+        let _ = app_handle.emit("pty_exit", exit_payload.clone());
+        let _ = app_handle.emit_to("main", "pty_exit", exit_payload);
     });
 
     let mut sessions = state.sessions.lock().unwrap();
@@ -145,6 +155,7 @@ pub fn pty_spawn(
         TerminalSession {
             writer,
             master: pair.master,
+            child,
         },
     );
 
@@ -180,6 +191,8 @@ pub fn pty_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    let cols = if cols > 0 { cols } else { 80 };
+    let rows = if rows > 0 { rows } else { 24 };
     let mut sessions = state.sessions.lock().unwrap();
     if let Some(session) = sessions.get_mut(&session_id) {
         session
@@ -203,6 +216,40 @@ pub fn pty_terminate(
     session_id: String,
 ) -> Result<(), String> {
     let mut sessions = state.sessions.lock().unwrap();
-    sessions.remove(&session_id);
+    if let Some(mut session) = sessions.remove(&session_id) {
+        let _ = session.child.kill();
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pty_spawn() {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("/bin/zsh");
+        cmd.arg("-l");
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        writer.write_all(b"echo HELLO_PTY\n").unwrap();
+        writer.flush().unwrap();
+        let mut buf = [0u8; 1024];
+        let n = reader.read(&mut buf).unwrap();
+        let out = String::from_utf8_lossy(&buf[..n]);
+        println!("PTY OUTPUT: {}", out);
+        assert!(n > 0);
+        let _ = child.kill();
+    }
 }
