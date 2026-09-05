@@ -8,7 +8,9 @@ import { ChevronRight, Image as ImageIcon, Maximize2, Music2, Pause, Play, Refre
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { hasCanvasImageSource } from "@/services/canvas-local-image";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
+import { useCanvasImageSource } from "../hooks/use-canvas-image-source";
 import { CanvasNodeType, type CanvasNodeData, type Position } from "../types";
 import { isCanvasImageNodeType } from "../utils/canvas-panorama";
 import type { CanvasResourceReference } from "../utils/canvas-resource-references";
@@ -130,9 +132,9 @@ export const CanvasNode = React.memo(function CanvasNode({
     const [isEditingTitle, setIsEditingTitle] = useState(false);
     const [titleDraft, setTitleDraft] = useState(data.title || "");
     const isGroup = data.type === CanvasNodeType.Group;
-    const hasImageContent = isCanvasImageNodeType(data.type) && Boolean(data.metadata?.content);
-    const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.content);
-    const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content);
+    const hasImageContent = isCanvasImageNodeType(data.type) && hasCanvasImageSource(data.metadata);
+    const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.content || data.metadata?.storageKey);
+    const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content || data.metadata?.storageKey);
     const isBatchRoot = isCanvasImageNodeType(data.type) && Boolean(data.metadata?.isBatchRoot) && batchCount > 1;
     const isBatchChild = isCanvasImageNodeType(data.type) && Boolean(data.metadata?.batchRootId);
     const isActive = isConnectionTarget || isSelected || isFocusRelated;
@@ -619,7 +621,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
 }
 
 function ImageNodeContent(props: NodeContentRendererProps) {
-    if (!props.node.metadata?.content && props.isBatchRoot) {
+    if (!hasCanvasImageSource(props.node.metadata) && props.isBatchRoot) {
         const content =
             props.node.metadata?.status === "loading" ? (
                 <LoadingContent node={props.node} theme={props.theme} now={props.now} />
@@ -634,7 +636,7 @@ function ImageNodeContent(props: NodeContentRendererProps) {
             </BatchFrame>
         );
     }
-    if (!props.node.metadata?.content) return <EmptyImageContent {...props} />;
+    if (!hasCanvasImageSource(props.node.metadata)) return <EmptyImageContent {...props} />;
 
     return (
         <ImageContent
@@ -652,8 +654,7 @@ function ImageNodeContent(props: NodeContentRendererProps) {
 }
 
 function PanoramaNodeContent(props: NodeContentRendererProps) {
-    const src = props.node.metadata?.content;
-    if (!src) return <ImageNodeContent {...props} />;
+    if (!hasCanvasImageSource(props.node.metadata)) return <ImageNodeContent {...props} />;
     const proxyGeneratedPanorama = Boolean(props.node.metadata?.imageTaskId || props.node.metadata?.imageTaskResultId) && !props.node.metadata?.storageKey;
 
     return (
@@ -667,7 +668,7 @@ function PanoramaNodeContent(props: NodeContentRendererProps) {
             onToggleBatch={props.onToggleBatch}
             onSetBatchPrimary={props.onSetBatchPrimary}
             mediaLite={props.mediaLite}
-            media={props.mediaLite ? undefined : <CanvasPanoramaViewer src={src} alt={props.node.title} proxyGeneratedPanorama={proxyGeneratedPanorama} expandOnDoubleClick={!props.isBatchRoot} onMoveStart={props.onMoveStart} onOpen={props.onViewImage ? () => props.onViewImage?.(props.node) : undefined} />}
+            media={(src) => <CanvasPanoramaViewer src={src} alt={props.node.title} proxyGeneratedPanorama={proxyGeneratedPanorama} expandOnDoubleClick={!props.isBatchRoot} onMoveStart={props.onMoveStart} onOpen={props.onViewImage ? () => props.onViewImage?.(props.node) : undefined} />}
         />
     );
 }
@@ -693,6 +694,7 @@ function EmptyImageContent({ node, theme, isBatchRoot, batchCount, batchExpanded
 let activeCanvasVideo: HTMLVideoElement | null = null;
 
 function VideoNodeContent({ node, theme, isSelected, mediaLite, onViewImage }: NodeContentRendererProps) {
+    const source = useCanvasImageSource(node.metadata, !mediaLite, false, false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [mediaDurationMs, setMediaDurationMs] = useState(0);
@@ -706,11 +708,11 @@ function VideoNodeContent({ node, theme, isSelected, mediaLite, onViewImage }: N
         if (isSelected) videoRef.current?.focus({ preventScroll: true });
         else if (document.activeElement === videoRef.current) videoRef.current?.blur();
     }, [isSelected, node.metadata?.content]);
-    if (!node.metadata?.content)
+    if (!source.src)
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
                 <Video className="size-7 opacity-35" />
-                <span className="text-sm">空视频节点</span>
+                <span className="text-sm">{source.error || (node.metadata?.storageKey ? "正在读取原视频" : "空视频节点")}</span>
             </div>
         );
     if (mediaLite) {
@@ -731,7 +733,7 @@ function VideoNodeContent({ node, theme, isSelected, mediaLite, onViewImage }: N
         <div className="relative h-full w-full overflow-hidden rounded-[18px] bg-black" data-canvas-no-zoom>
             <video
                 ref={videoRef}
-                src={node.metadata.content}
+                src={source.src}
                 tabIndex={-1}
                 playsInline
                 preload="none"
@@ -760,11 +762,12 @@ function VideoNodeContent({ node, theme, isSelected, mediaLite, onViewImage }: N
 }
 
 function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
-    if (!node.metadata?.content)
+    const source = useCanvasImageSource(node.metadata, true, false, false);
+    if (!source.src)
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-2" style={{ color: theme.node.placeholder }}>
                 <Music2 className="size-7 opacity-35" />
-                <span className="text-sm">空音频节点</span>
+                <span className="text-sm">{source.error || (node.metadata?.storageKey ? "正在读取原音频" : "空音频节点")}</span>
             </div>
         );
     return (
@@ -773,7 +776,7 @@ function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
                 <Music2 className="size-4 shrink-0" />
                 <span className="truncate">{node.title || "音频"}</span>
             </div>
-            <audio src={node.metadata.content} controls className="w-full" data-canvas-no-zoom />
+            <audio src={source.src} controls className="w-full" data-canvas-no-zoom />
         </div>
     );
 }
@@ -798,25 +801,33 @@ function ImageContent({
     batchRecovering: boolean;
     onToggleBatch?: () => void;
     onSetBatchPrimary?: () => void;
-    media?: ReactNode;
+    media?: (src: string) => ReactNode;
     mediaLite?: boolean;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const isBatchChild = Boolean(node.metadata?.batchRootId);
+    const source = useCanvasImageSource(node.metadata, !mediaLite, true);
+    const [failedSrc, setFailedSrc] = useState<string | null>(null);
+    const error = source.error || (source.src && failedSrc === source.src ? "原图无法解码" : "");
 
     return (
         <BatchFrame batchCount={isBatchRoot ? batchCount : 0} batchExpanded={batchExpanded} batchOpening={batchOpening} batchRecovering={batchRecovering} onToggleBatch={onToggleBatch}>
-            <div className="h-full w-full overflow-hidden rounded-3xl">
+            <div ref={source.ref} className="h-full w-full overflow-hidden rounded-3xl">
                 {mediaLite ? (
                     <div className="h-full w-full" style={{ background: theme.node.panel }} />
+                ) : !source.src || error ? (
+                    <div role="status" className="flex h-full w-full items-center justify-center px-4 text-center text-xs" style={{ background: theme.node.panel, color: theme.node.placeholder }}>
+                        {error || "正在读取原图…"}
+                    </div>
                 ) : (
-                    media ?? (
+                    media ? media(source.src) : (
                     <img
-                        src={node.metadata!.content!}
+                        src={source.src}
                         alt={node.title}
                         draggable={false}
                         decoding="async"
                         loading="lazy"
+                        onError={() => setFailedSrc(source.src || null)}
                         onDragStart={(event) => event.preventDefault()}
                         className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
                     />

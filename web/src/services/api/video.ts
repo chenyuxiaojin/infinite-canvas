@@ -1,3 +1,4 @@
+import { mediaPublicUrl } from "@/services/media-public-url";
 import axios from "axios";
 
 import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
@@ -7,8 +8,8 @@ import { isGeminiVeo31Model, normalizeGeminiVideoDuration, normalizeGeminiVideoR
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio } from "@/lib/seedance-video";
 import { isKIEGrokVideoModel, isKIEKlingV3Config, kieKlingOmniVariant } from "@/components/video-settings-panel";
 import { isAgnesVideoV25Model, isCogVideoX3Model, modelKey, normalizeCogVideoX3Duration, supportsVideoAudioGeneration } from "@/lib/video-model-capabilities";
-import { resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
-import { imageToDataUrl, resolveImageUrl } from "@/services/image-storage";
+import { readMediaOriginal, uploadMediaFile } from "@/services/file-storage";
+import { imageToDataUrl } from "@/services/image-storage";
 import { buildApiUrl, channelIdForActiveModel, channelProtocolForConfig, directAIProviderForConfig, localChannelForActiveModel, type AiConfig, type VideoElementReference } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
 import type { ReferenceImage } from "@/types/image";
@@ -212,7 +213,7 @@ async function cacheProtectedGrokVideo(config: AiConfig, model: string, task: Vi
     const taskId = task.task_id || task.id || task.video_id || "";
     const response = await fetch(`${aiApiUrl(config, `/videos/${encodeURIComponent(taskId)}/content`)}?model=${encodeURIComponent(model)}`, { headers: aiHeaders(config) });
     if (!response.ok) throw new VideoRequestError(`视频内容下载失败：${response.status}`, task);
-    const media = await uploadMediaFile(await response.blob(), "generated-video");
+    const media = await uploadMediaFile(await response.blob(), "generated-video", false);
     return { ...task, url: media.url, video_url: media.url, storageKey: media.storageKey };
 }
 
@@ -515,7 +516,7 @@ async function normalizeKIEKlingElementList(value: AiConfig["videoElementList"] 
 
 async function elementReferenceToInputUrl(reference: VideoElementReference) {
     if (reference.kind === "image") {
-        const resolvedUrl = await resolveImageUrl(reference.storageKey, "");
+        const resolvedUrl = await mediaPublicUrl(reference.storageKey);
         for (const url of [reference.url, resolvedUrl]) {
             const publicUrl = publicHttpUrl(url);
             if (publicUrl) return publicUrl;
@@ -523,8 +524,12 @@ async function elementReferenceToInputUrl(reference: VideoElementReference) {
         if (reference.dataUrl) return reference.dataUrl;
         return imageToDataUrl({ dataUrl: reference.dataUrl || reference.url || resolvedUrl, storageKey: reference.storageKey });
     }
-    const resolvedUrl = await resolveMediaUrl(reference.storageKey, reference.url || "");
-    return publicHttpUrl(resolvedUrl) || publicHttpUrl(reference.url) || resolvedUrl || reference.url || "";
+    const resolvedUrl = await mediaPublicUrl(reference.storageKey, reference.url || "");
+    const publicUrl = publicHttpUrl(resolvedUrl) || publicHttpUrl(reference.url);
+    if (publicUrl) return publicUrl;
+    // The owning workbench keeps the existing reference URL alive during the
+    // request. Do not invent a different provider payload format here.
+    return resolvedUrl || reference.url || "";
 }
 
 function normalizeKlingV26AspectRatio(value: string) {
@@ -544,7 +549,7 @@ async function imageReferenceToFile(image: ReferenceImage) {
 }
 
 async function imageReferenceToFormValue(image: ReferenceImage) {
-    const resolvedUrl = await resolveImageUrl(image.storageKey, "");
+    const resolvedUrl = await mediaPublicUrl(image.storageKey);
     for (const url of [image.url, resolvedUrl, image.dataUrl]) {
         const publicUrl = publicHttpUrl(url);
         if (publicUrl) return publicUrl;
@@ -553,22 +558,19 @@ async function imageReferenceToFormValue(image: ReferenceImage) {
 }
 
 async function mediaReferenceToFile(media: ReferenceVideo | ReferenceAudio) {
-    const url = await resolveMediaUrl(media.storageKey, media.url);
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`参考素材读取失败：${response.status}`);
-    const blob = await response.blob();
+    const blob = await readMediaOriginal(media.storageKey, media.url);
     return new File([blob], media.name || "reference", { type: media.type || blob.type || "application/octet-stream" });
 }
 
 async function mediaReferenceToFormValue(media: ReferenceVideo | ReferenceAudio) {
-    const resolvedUrl = await resolveMediaUrl(media.storageKey, media.url);
+    const resolvedUrl = await mediaPublicUrl(media.storageKey, media.url);
     const publicUrl = publicHttpUrl(resolvedUrl) || publicHttpUrl(media.url);
     if (publicUrl) return publicUrl;
     return mediaReferenceToFile(media);
 }
 
 async function imageToAgnesReference(image: ReferenceImage) {
-    const resolvedUrl = await resolveImageUrl(image.storageKey, "");
+    const resolvedUrl = await mediaPublicUrl(image.storageKey);
     for (const url of [image.dataUrl, image.url, resolvedUrl]) {
         const publicUrl = publicHttpUrl(url);
         if (publicUrl) return publicUrl;
@@ -577,9 +579,7 @@ async function imageToAgnesReference(image: ReferenceImage) {
 }
 
 async function agnesVideoV25ReferenceUrl(reference: ReferenceImage | ReferenceVideo | ReferenceAudio) {
-    const resolvedUrl = "dataUrl" in reference
-        ? await resolveImageUrl(reference.storageKey, reference.url || "")
-        : await resolveMediaUrl(reference.storageKey, reference.url);
+    const resolvedUrl = await mediaPublicUrl(reference.storageKey, reference.url || "");
     const url = publicHttpUrl(reference.url) || ("dataUrl" in reference ? publicHttpUrl(reference.dataUrl) : "") || publicHttpUrl(resolvedUrl);
     if (!url) throw new VideoRequestError("Agnes Video 2.5 的参考素材必须具有公网访问地址");
     return url;
@@ -765,7 +765,7 @@ async function cacheProtectedGeminiVideo(config: AiConfig, model: string, task: 
         { headers: usesAccountProxy(config) ? aiHeaders(config) : geminiDirectHeaders(config) },
     );
     if (!response.ok) throw new VideoRequestError(`视频内容下载失败：${response.status}`, task);
-    const media = await uploadMediaFile(await response.blob(), "generated-video");
+    const media = await uploadMediaFile(await response.blob(), "generated-video", false);
     return { ...task, url: media.url, video_url: media.url, storageKey: media.storageKey };
 }
 

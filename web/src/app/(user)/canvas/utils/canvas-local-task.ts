@@ -1,4 +1,4 @@
-import { getMediaBlob, resolveMediaUrl, setMediaBlob, type UploadedFile } from "@/services/file-storage";
+import { getMediaBlob, setMediaBlob, type UploadedFile } from "@/services/file-storage";
 import { fetchDesktopTaskMedia, type DesktopTaskMedia } from "@/services/desktop-runtime";
 
 const LOCAL_TASK_STORAGE_PREFIX = "local-task";
@@ -18,8 +18,8 @@ export async function persistDesktopTaskMedia(taskId: string): Promise<UploadedF
     }
 
     const blob = existing || new Blob([bytes], { type: media.mime_type });
-    const url = existing ? await resolveMediaUrl(storageKey) : await setMediaBlob(storageKey, blob);
-    if (!url) throw new Error("本地任务媒体无法载入画布");
+    if (!existing) await setMediaBlob(storageKey, blob, false);
+    const url = "";
     return {
         url,
         storageKey,

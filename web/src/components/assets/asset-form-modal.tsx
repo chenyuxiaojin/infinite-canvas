@@ -4,6 +4,7 @@ import { Upload } from "lucide-react";
 import { useLayoutEffect, useRef, useState } from "react";
 import { App, Button, Form, Input, Modal, Select, Space, Tag, Typography } from "antd";
 
+import { useStoredMediaSource } from "@/hooks/use-stored-media-source";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
 import { uploadAssetMediaFile } from "@/services/file-storage";
 import { uploadImage } from "@/services/image-storage";
@@ -43,6 +44,11 @@ export function AssetFormModal({ open, asset = null, onClose }: AssetFormModalPr
     const title = Form.useWatch("title", form) || "";
     const tags = Form.useWatch("tags", form) || [];
     const content = Form.useWatch("content", form) || "";
+    const previewSource = useStoredMediaSource({
+        storageKey: formKind === "image" ? imageDraft?.storageKey : mediaDraft?.storageKey,
+        fallback: formKind === "image" ? imageDraft?.dataUrl || content : mediaDraft?.url || content,
+        image: formKind === "image", enabled: open && formKind !== "text",
+    });
 
     useLayoutEffect(() => {
         if (!open) return;
@@ -115,7 +121,7 @@ export function AssetFormModal({ open, asset = null, onClose }: AssetFormModalPr
 
     const readImageFile = async (file?: File) => {
         if (!file || !file.type.startsWith("image/")) return;
-        const image = await uploadImage(file);
+        const image = await uploadImage(file, { retainDisplayUrl: false });
         const draft = { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType };
         setImageDraft(draft);
         form.setFieldValue("content", draft.dataUrl);
@@ -127,7 +133,7 @@ export function AssetFormModal({ open, asset = null, onClose }: AssetFormModalPr
         if (!file) return;
         if (formKind === "video" && !file.type.startsWith("video/")) return;
         if (formKind === "audio" && !file.type.startsWith("audio/") && !/\.(mp3|wav)$/i.test(file.name)) return;
-        const media = await uploadAssetMediaFile(file, formKind === "audio" ? "asset-audio" : "asset-video");
+        const media = await uploadAssetMediaFile(file, formKind === "audio" ? "asset-audio" : "asset-video", false);
         const draft = formKind === "audio" ? { url: media.url, storageKey: media.storageKey, bytes: media.bytes, mimeType: media.mimeType } : { url: media.url, storageKey: media.storageKey, width: media.width || 0, height: media.height || 0, bytes: media.bytes, mimeType: media.mimeType };
         setMediaDraft(draft);
         form.setFieldValue("content", media.url);
@@ -211,12 +217,12 @@ export function AssetFormModal({ open, asset = null, onClose }: AssetFormModalPr
                     <div className="rounded-xl border border-stone-200 bg-stone-50 p-4 dark:border-stone-800 dark:bg-stone-950">
                         <Typography.Text strong>预览</Typography.Text>
                         <div className="mt-3 overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-                            {coverUrl || imageDraft?.dataUrl ? (
-                                <img src={coverUrl || imageDraft?.dataUrl} alt="" className="aspect-[4/3] w-full object-cover" />
-                            ) : formKind === "video" && (mediaDraft?.url || content) ? (
-                                <video src={mediaDraft?.url || content} className="aspect-[4/3] w-full bg-black object-contain" controls />
-                            ) : formKind === "audio" && (mediaDraft?.url || content) ? (
-                                <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-5 dark:bg-stone-900"><audio src={mediaDraft?.url || content} controls className="w-full" /></div>
+                            {coverUrl || (formKind === "image" ? previewSource.src : "") ? (
+                                <img src={coverUrl || (formKind === "image" ? previewSource.src : "")} alt="" className="aspect-[4/3] w-full object-cover" />
+                            ) : formKind === "video" && (previewSource.src) ? (
+                                <video src={previewSource.src} className="aspect-[4/3] w-full bg-black object-contain" controls />
+                            ) : formKind === "audio" && (previewSource.src) ? (
+                                <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-5 dark:bg-stone-900"><audio src={previewSource.src} controls className="w-full" /></div>
                             ) : (
                                 <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-5 text-center text-sm text-stone-500 dark:bg-stone-900">{content || "暂无封面"}</div>
                             )}

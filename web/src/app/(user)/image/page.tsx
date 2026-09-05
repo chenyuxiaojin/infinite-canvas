@@ -1,5 +1,7 @@
 "use client";
 
+import { useMediaScope } from "@/hooks/use-media-scope";
+import type { CanvasMediaScope } from "@/services/canvas-media-scope";
 import {
     AlertCircle,
     BookOpen,
@@ -7,7 +9,6 @@ import {
     ChevronDown,
     ChevronUp,
     ClipboardPaste,
-    CloudUpload,
     Copy,
     Download,
     FolderPlus,
@@ -47,7 +48,7 @@ import { nanoid } from "nanoid";
 import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { ImageRequestError, batchCanvasImageTaskStatus, createCanvasImageTask, deleteCanvasImageTask, listCanvasImageTasks, requestEdit, requestGeneration, type CanvasImageTask } from "@/services/api/image";
 import { deleteImageGenerationLogs, fetchImageGenerationLogs, saveImageGenerationLogs } from "@/services/api/generation-logs";
-import { deleteStoredImages, imageToDataUrl, resolveImageUrl, uploadImage, uploadRemoteImageToServer } from "@/services/image-storage";
+import { deleteStoredImages, imageToDataUrl } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useUserStore } from "@/stores/use-user-store";
 import type { ReferenceImage } from "@/types/image";
@@ -130,6 +131,7 @@ const WORKFLOW_BUTTON_POSITION_KEY = "infinite-canvas:workflow-button-position";
 const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
 const categoryStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_categories" });
 export default function ImagePage() {
+    const { scopeRef: mediaScopeRef, uploadImage, resolveImageUrl } = useMediaScope("image-workbench");
     const { message, modal } = App.useApp();
     const fileInputRef = useRef<HTMLInputElement>(null);
     const config = useConfigStore((state) => state.config);
@@ -145,7 +147,7 @@ export default function ImagePage() {
     const [uploadingCount, setUploadingCount] = useState(0);
     const [results, setResults] = useState<GenerationResult[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
-    const [syncingImageIds, setSyncingImageIds] = useState<string[]>([]);
+    useEffect(() => { mediaScopeRef.current.adoptReferences(logs); }, [logs, mediaScopeRef]);
     const [categories, setCategories] = useState<GenerationCategory[]>([]);
     const [resultViewMode, setResultViewModeState] = useState<ResultViewMode>("all");
     const [activeResultCategoryId, setActiveResultCategoryId] = useState<string | null>(null);
@@ -242,11 +244,11 @@ export default function ImagePage() {
     }, [pendingCount, pendingLogCount]);
 
     useEffect(() => {
-        if (!pendingLogCount) return;
+        if (!pendingLogCount || !token) return;
         pollPendingLogsOnce(logsRef.current);
         const timer = window.setInterval(() => pollPendingLogsOnce(logsRef.current), IMAGE_TASK_POLL_INTERVAL_MS);
         return () => window.clearInterval(timer);
-    }, [pendingLogCount]);
+    }, [pendingLogCount, token]);
 
     const setWorkbenchLayout = (layout: WorkbenchLayout) => {
         setWorkbenchLayoutState(layout);
@@ -288,7 +290,7 @@ export default function ImagePage() {
         const dx = event.clientX - drag.startX;
         const dy = event.clientY - drag.startY;
         if (Math.abs(dx) > 4 || Math.abs(dy) > 4) drag.moved = true;
-        
+
         // 直接更新 DOM 样式，免去顶层 React State 的庞大整页重绘 Layout 卡顿！
         const nextPos = clampWorkflowButtonPosition({ x: drag.originX + dx, y: drag.originY + dy });
         if (workflowButtonRef.current) {
@@ -491,10 +493,10 @@ export default function ImagePage() {
                     ...image,
                     storageKey: "",
                 };
-                
+
                 // 更新结果状态
                 setResults((value) => updateResult(value, id, { image: durableImage }));
-                
+
                 // 立即保存单张成功日志
                 await saveLog(
                     buildLog({
@@ -516,7 +518,7 @@ export default function ImagePage() {
             } catch (err) {
                 const errMsg = errorMessage(err);
                 const errDetail = errorDetail(err);
-                
+
                 // 立即保存单张失败日志
                 await saveLog(
                     buildLog({
@@ -592,45 +594,6 @@ export default function ImagePage() {
             metadata: { source: "image-page", prompt },
         });
         message.success("已加入我的素材");
-    };
-
-    const syncImage = async (image: GeneratedImage, index: number) => {
-        if (image.storageKey?.startsWith("server:") || syncingImageIds.includes(image.id)) return null;
-        setSyncingImageIds((ids) => Array.from(new Set([...ids, image.id])));
-        const hideLoading = message.loading("正在同步图片到云端存储...", 0);
-        try {
-            const uploaded = await uploadRemoteImageToServer(image.dataUrl, "image-" + (index + 1) + "." + imageExtension(image.mimeType || image.dataUrl));
-            message.success("图片已同步到云端存储");
-            return { ...image, dataUrl: uploaded.url, storageKey: uploaded.storageKey, width: uploaded.width || image.width, height: uploaded.height || image.height, bytes: uploaded.bytes || image.bytes, mimeType: uploaded.mimeType || image.mimeType };
-        } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : "";
-            if (errorMessage.includes("服务端对象存储未启用") || errorMessage.includes("用户对象存储配置不完整")) {
-                message.error("未添加云存储");
-            } else {
-                message.error(errorMessage || "图片同步失败");
-            }
-            return null;
-        } finally {
-            hideLoading();
-            setSyncingImageIds((ids) => ids.filter((id) => id !== image.id));
-        }
-    };
-
-    const syncResultImage = async (resultId: string, image: GeneratedImage, index: number) => {
-        const synced = await syncImage(image, index);
-        if (!synced) return;
-        setResults((value) => updateResult(value, resultId, { image: synced }));
-    };
-
-    const syncLogImage = async (log: GenerationLog, image: GeneratedImage, index: number) => {
-        const synced = await syncImage(image, index);
-        if (!synced) return;
-        const nextLog = { ...log, images: log.images.map((item) => item.id === image.id ? synced : item) };
-        await logStore.setItem(log.id, serializeLog(nextLog));
-        const nextLogs = logs.map((item) => item.id === log.id ? nextLog : item);
-        setLogs(nextLogs);
-        await persistImageHistory(nextLogs, categories);
-        if (previewLog?.id === log.id) setPreviewLog(nextLog);
     };
 
     const insertPickedAsset = async (payload: InsertAssetPayload) => {
@@ -763,7 +726,7 @@ export default function ImagePage() {
             } catch {
                 // Ignore previous errors so the chain doesn't break permanently
             }
-            const storedLogs = await readStoredLogs();
+            const storedLogs = await readStoredLogs(mediaScopeRef.current);
             const keys = new Set(imageLogIdentityKeys(log));
             const duplicateLogs = storedLogs.filter((item) => item.id !== log.id && imageLogIdentityKeys(item).some((key) => keys.has(key)));
             const nextLogs = dedupeGenerationLogs([persistedLog, ...storedLogs.filter((item) => item.id !== log.id)]);
@@ -777,7 +740,7 @@ export default function ImagePage() {
     };
 
     const refreshLogs = async () => {
-        const nextLogs = await readStoredLogs();
+        const nextLogs = await readStoredLogs(mediaScopeRef.current);
         setLogs(nextLogs);
         return nextLogs;
     };
@@ -786,10 +749,10 @@ export default function ImagePage() {
     const loadAccountImageHistory = async (currentToken: string) => {
         try {
             accountHistorySyncEnabledRef.current = true;
-            const localLogs = await readStoredLogs();
+            const localLogs = await readStoredLogs(mediaScopeRef.current);
             const storedCategories = await readStoredCategories();
             const remoteLogs = await fetchImageGenerationLogs<GenerationLog>(currentToken);
-            const mergedLogs = await mergeGenerationLogs(remoteLogs, localLogs);
+            const mergedLogs = await mergeGenerationLogs(remoteLogs, localLogs, mediaScopeRef.current);
             const categorized = withWorkflowLogCategories(mergedLogs, storedCategories);
             await replaceStoredImageHistory(categorized.logs, categorized.categories);
             setCategories(categorized.categories);
@@ -815,7 +778,7 @@ export default function ImagePage() {
             const tasks = await listCanvasImageTasks(currentConfig, ["image-workbench", "workflow"]);
             const recoverableTasks = tasks.filter(isRecoverableImageTask);
             if (!recoverableTasks.length) return baseLogs || logsRef.current;
-            const currentLogs = baseLogs || (await readStoredLogs());
+            const currentLogs = baseLogs || (await readStoredLogs(mediaScopeRef.current));
             const mergedLogs = mergeBackendImageTasks(currentLogs, recoverableTasks, currentConfig);
             const taskIds = new Set(recoverableTasks.flatMap(imageTaskIdentityKeys));
             const recoveredLogs = mergedLogs.filter((log) => imageLogIdentityKeys(log).some((key) => taskIds.has(key)));
@@ -1149,9 +1112,6 @@ export default function ImagePage() {
                             onEdit={addResultToReferences}
                             onDownload={downloadImage}
                             onSaveAsset={saveResultToAssets}
-                            syncingImageIds={syncingImageIds}
-                            onSyncResult={syncResultImage}
-                            onSyncLog={syncLogImage}
                             onRetry={retryResult}
                         />
                     </>
@@ -1185,9 +1145,6 @@ export default function ImagePage() {
                             onEdit={addResultToReferences}
                             onDownload={downloadImage}
                             onSaveAsset={saveResultToAssets}
-                            syncingImageIds={syncingImageIds}
-                            onSyncResult={syncResultImage}
-                            onSyncLog={syncLogImage}
                             onRetry={retryResult}
                         />
                         <WorkbenchPanel
@@ -1250,7 +1207,7 @@ export default function ImagePage() {
                     onGenerationLogSaved={() => {
                         void (async () => {
                             const nextCategories = await readStoredCategories();
-                            const nextLogs = await readStoredLogs();
+                            const nextLogs = await readStoredLogs(mediaScopeRef.current);
                             setCategories(nextCategories);
                             setLogs(nextLogs);
                             await persistImageHistory(nextLogs, nextCategories);
@@ -1270,7 +1227,7 @@ export default function ImagePage() {
                 }}
             />
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
-            <AssetPickerModal open={assetPickerOpen} defaultTab="my-assets" onInsert={(payload) => void insertPickedAsset(payload)} onClose={() => setAssetPickerOpen(false)} />
+            <AssetPickerModal open={assetPickerOpen} onInsert={(payload) => void insertPickedAsset(payload)} onClose={() => setAssetPickerOpen(false)} />
             <Modal title="删除生成记录" open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={deleteSelectedLogs} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
                 确定删除选中的 {selectedLogIds.length} 条生成记录吗？
             </Modal>
@@ -1595,9 +1552,6 @@ function ResultsPanel({
     onEdit,
     onDownload,
     onSaveAsset,
-    syncingImageIds,
-    onSyncResult,
-    onSyncLog,
     onRetry,
 }: {
     className?: string;
@@ -1627,9 +1581,6 @@ function ResultsPanel({
     onEdit: (image: GeneratedImage, index: number) => void;
     onDownload: (image: GeneratedImage, index: number) => void;
     onSaveAsset: (image: GeneratedImage, index: number) => void;
-    syncingImageIds: string[];
-    onSyncResult: (resultId: string, image: GeneratedImage, index: number) => void;
-    onSyncLog: (log: GenerationLog, image: GeneratedImage, index: number) => void;
     onRetry: (result: GenerationResult) => void;
 }) {
     const { message } = App.useApp();
@@ -1706,7 +1657,7 @@ function ResultsPanel({
                 <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
                     {results.map((result, index) =>
                         result.status === "success" && result.image ? (
-                            <ResultImageCard key={result.id} result={result} image={result.image} index={index} onCopyPrompt={onCopyPrompt} onEdit={onEdit} onDownload={onDownload} onSaveAsset={onSaveAsset} syncing={syncingImageIds.includes(result.image.id)} onSync={(image) => onSyncResult(result.id, image, index)} />
+                            <ResultImageCard key={result.id} result={result} image={result.image} index={index} onCopyPrompt={onCopyPrompt} onEdit={onEdit} onDownload={onDownload} onSaveAsset={onSaveAsset} />
                         ) : result.status === "failed" ? (
                             <FailedImageCard key={result.id} result={result} error={result.error || "生成失败"} onCopyPrompt={onCopyPrompt} onRetry={() => onRetry(result)} />
                         ) : (
@@ -1741,8 +1692,6 @@ function ResultsPanel({
                             onEdit={onEdit}
                             onDownload={onDownload}
                             onSaveAsset={onSaveAsset}
-                            syncing={syncingImageIds.includes(log.images.find((image) => Boolean(image.dataUrl))?.id || "")}
-                            onSync={(image) => onSyncLog(log, image, index)}
                         />
                     ))}
                 </div>
@@ -1867,8 +1816,6 @@ function ResultImageCard({
     onEdit,
     onDownload,
     onSaveAsset,
-    syncing,
-    onSync,
 }: {
     result: GenerationResult;
     image: GeneratedImage;
@@ -1877,8 +1824,6 @@ function ResultImageCard({
     onEdit: (image: GeneratedImage, index: number) => void;
     onDownload: (image: GeneratedImage, index: number) => void;
     onSaveAsset: (image: GeneratedImage, index: number) => void;
-    syncing: boolean;
-    onSync: (image: GeneratedImage) => void;
 }) {
     return (
         <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
@@ -1900,7 +1845,7 @@ function ResultImageCard({
                     <span>{formatDuration(image.durationMs)}</span>
                 </div>
                 <div className="flex shrink-0 gap-1">
-                    <Button size="small" title="同步到云端存储" icon={<CloudUpload className="size-3.5" />} loading={syncing} disabled={image.storageKey?.startsWith("server:")} onClick={() => onSync(image)} />
+
                     <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => void onSaveAsset(image, index)} />
                     <Button size="small" icon={<PenLine className="size-3.5" />} onClick={() => void onEdit(image, index)} />
                     <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(image, index)} />
@@ -2013,8 +1958,6 @@ function HistoryLogCard({
     onEdit,
     onDownload,
     onSaveAsset,
-    syncing,
-    onSync,
 }: {
     log: GenerationLog;
     categories: GenerationCategory[];
@@ -2032,8 +1975,6 @@ function HistoryLogCard({
     onEdit: (image: GeneratedImage, index: number) => void;
     onDownload: (image: GeneratedImage, index: number) => void;
     onSaveAsset: (image: GeneratedImage, index: number) => void;
-    syncing: boolean;
-    onSync: (image: GeneratedImage) => void;
 }) {
     const displayImages = log.images.filter((image) => Boolean(image.dataUrl));
     const firstImage = displayImages[0];
@@ -2171,7 +2112,7 @@ function HistoryLogCard({
                 </div>
                 {firstImage ? (
                     <div className="flex shrink-0 gap-1">
-                        <Button size="small" title="同步到云端存储" icon={<CloudUpload className="size-3.5" />} loading={syncing} disabled={firstImage.storageKey?.startsWith("server:")} onClick={() => closeThen(() => onSync(firstImage))} />
+
                         <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => closeThen(() => void onSaveAsset(firstImage, index))} />
                         <Button size="small" icon={<PenLine className="size-3.5" />} onClick={() => closeThen(() => void onEdit(firstImage, index))} />
                         <Button size="small" icon={<Download className="size-3.5" />} onClick={() => closeThen(() => onDownload(firstImage, index))} />
@@ -2525,14 +2466,14 @@ function errorDetail(error: unknown) {
     }
 }
 
-async function readStoredLogs() {
+async function readStoredLogs(scope: CanvasMediaScope) {
     if (typeof window === "undefined") return [];
     try {
         const values: GenerationLog[] = [];
         await logStore.iterate<GenerationLog, void>((value) => {
             values.push(value);
         });
-        const logs = await Promise.all(values.map(normalizeLog));
+        const logs = await Promise.all(values.map((log) => normalizeLog(log, scope)));
         return dedupeGenerationLogs(logs);
     } catch {
         return [];
@@ -2612,9 +2553,9 @@ function shouldPreserveLocalImageLogDuringRemoteMerge(log: GenerationLog, remote
     return !keys.length || !keys.some((key) => remoteKeys.has(key));
 }
 
-async function mergeGenerationLogs(remoteLogs: GenerationLog[], localLogs: GenerationLog[]) {
-    const normalizedRemote = await Promise.all(remoteLogs.map(normalizeLog));
-    const normalizedLocal = await Promise.all(localLogs.map(normalizeLog));
+async function mergeGenerationLogs(remoteLogs: GenerationLog[], localLogs: GenerationLog[], scope: CanvasMediaScope) {
+    const normalizedRemote = await Promise.all(remoteLogs.map((log) => normalizeLog(log, scope)));
+    const normalizedLocal = await Promise.all(localLogs.map((log) => normalizeLog(log, scope)));
     const remoteKeys = new Set(normalizedRemote.flatMap(imageLogIdentityKeys));
     const preservedLocal = normalizedLocal.filter((log) => shouldPreserveLocalImageLogDuringRemoteMerge(log, remoteKeys));
     return dedupeGenerationLogs([...normalizedRemote, ...preservedLocal]);
@@ -2628,23 +2569,23 @@ function mergeGenerationCategories(remoteCategories: GenerationCategory[], local
     return [...byId.values()].sort((a, b) => a.createdAt - b.createdAt);
 }
 
-async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog> {
+async function normalizeLog(log: Partial<GenerationLog>, scope: CanvasMediaScope): Promise<GenerationLog> {
     const references = await Promise.all(
         (log.references || []).map(async (item) => ({
             ...item,
-            dataUrl: await resolveImageUrl(item.storageKey, item.dataUrl),
+            dataUrl: (item.storageKey ? await scope.url(item.storageKey, item.dataUrl, true) : item.dataUrl),
         })),
     );
     const images = await Promise.all(
         (log.images || []).map(async (item) => {
-            const dataUrl = await resolveImageUrl(item.storageKey, item.dataUrl);
+            const dataUrl = (item.storageKey ? await scope.url(item.storageKey, item.dataUrl, true) : item.dataUrl);
             return { ...item, dataUrl };
         }),
     );
     const visibleImages = images.filter((image) => Boolean(image.dataUrl));
     if (!visibleImages.length && log.status === "成功") {
         const taskImageUrl = log.task?.image_url || log.task?.url || "";
-        const dataUrl = await resolveImageUrl(log.task?.storageKey, taskImageUrl);
+        const dataUrl = (log.task?.storageKey ? await scope.url(log.task.storageKey, taskImageUrl, true) : taskImageUrl);
         if (dataUrl) {
             visibleImages.push({
                 id: log.task?.id || log.id || nanoid(),

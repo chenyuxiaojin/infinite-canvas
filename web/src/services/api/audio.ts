@@ -6,7 +6,7 @@ import { isGrok2APITtsConfig, normalizeGrokTtsFormat, normalizeGrokTtsLanguage, 
 import { isMimoPresetTtsModel, isMimoTtsModel, isMimoVoiceCloneModel, isMimoVoiceDesignModel, normalizeMimoTtsFormat, normalizeMimoTtsVoice } from "@/lib/mimo-tts";
 import { geminiActionUrl, geminiDirectHeaders, geminiErrorMessage, isGeminiConfig, isGeminiTtsModel } from "@/lib/gemini";
 import { geminiPcmBase64ToWav, normalizeGeminiTtsVoice } from "@/lib/gemini-tts";
-import { resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
+import { readMediaOriginal, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { buildApiUrl, channelIdForActiveModel, localChannelForActiveModel, type AiConfig } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
 import type { ReferenceAudio } from "@/types/media";
@@ -123,7 +123,7 @@ export async function requestAudioGeneration(config: AiConfig, prompt: string, r
 
 export async function storeGeneratedAudio(blob: Blob, format = "mp3"): Promise<UploadedFile> {
     const audio = blob.type.startsWith("audio/") ? blob : new Blob([blob], { type: audioMimeType(format) });
-    return uploadMediaFile(audio, "audio");
+    return uploadMediaFile(audio, "audio", false);
 }
 
 export async function createCanvasAudioTask(config: AiConfig, prompt: string, options: CanvasAudioTaskOptions = {}, referenceAudio?: ReferenceAudio): Promise<CanvasAudioTask> {
@@ -281,11 +281,7 @@ async function buildMiMoNativeRequest(config: AiConfig, model: string, prompt: s
 
 async function referenceAudioDataUrl(referenceAudio?: ReferenceAudio) {
     if (!referenceAudio) throw new Error("请连接并选择参考音频节点");
-    const url = await resolveMediaUrl(referenceAudio.storageKey, referenceAudio.url);
-    if (!url) throw new Error("参考音频不可用");
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`读取参考音频失败（${response.status}）`);
-    const blob = await response.blob();
+    const blob = await readMediaOriginal(referenceAudio.storageKey, referenceAudio.url);
     const mimeType = normalizeCloneMimeType(blob.type) || normalizeCloneMimeType(referenceAudio.type);
     if (!mimeType) throw new Error("参考音频仅支持 MP3 或 WAV");
     const base64 = await blobToBase64(blob);

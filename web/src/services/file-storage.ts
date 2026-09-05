@@ -1,6 +1,8 @@
 "use client";
 
 import localforage from "localforage";
+import { isTauri } from "@tauri-apps/api/core";
+import { StoredObjectUrlCache } from "./stored-object-url-cache";
 import { nanoid } from "nanoid";
 
 import { deleteAnonymousStorageFile, uploadAnonymousStorageFile } from "@/services/anonymous-storage";
@@ -11,26 +13,23 @@ import { useUserStore } from "@/stores/use-user-store";
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
 
 const store = localforage.createInstance({ name: "infinite-canvas", storeName: "media_files" });
-const objectUrls = new Map<string, string>();
+const objectUrls = new StoredObjectUrlCache();
 let storageConfigPromise: Promise<StorageConfig> | null = null;
 
-export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
+export async function uploadMediaFile(input: string | Blob, prefix = "file", retainDisplayUrl = true): Promise<UploadedFile> {
     const blob = typeof input === "string" ? await (await fetch(input)).blob() : input;
     const storageKey = `${prefix}:${nanoid()}`;
     await store.setItem(storageKey, blob);
     const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
-    const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : {};
-    return { url, storageKey, bytes: blob.size, mimeType: blob.type || "application/octet-stream", ...meta };
+    try {
+        const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : {};
+        if (retainDisplayUrl) objectUrls.set(storageKey, url, blob.size);
+        return { url: retainDisplayUrl ? url : "", storageKey, bytes: blob.size, mimeType: blob.type || "application/octet-stream", ...meta };
+    } finally { if (!retainDisplayUrl) URL.revokeObjectURL(url); }
 }
 
-export async function uploadAssetMediaFile(file: File, prefix = "asset-media"): Promise<UploadedFile> {
-    try {
-        return await uploadMediaBlobToServer(file, file.name || `${prefix}-${nanoid()}`);
-    } catch (error) {
-        if (error instanceof Error && !error.message.includes("服务端对象存储未启用")) throw error;
-        return uploadMediaFile(file, prefix);
-    }
+export async function uploadAssetMediaFile(file: File, prefix = "asset-media", retainDisplayUrl = true): Promise<UploadedFile> {
+    return uploadMediaFile(file, prefix, retainDisplayUrl);
 }
 
 export async function downloadRemoteMedia(url: string) {
@@ -89,7 +88,7 @@ async function uploadWebDAVMediaDirect(blob: Blob, filename: string, provider: U
 async function cacheAnonymousMedia(uploaded: UploadedFile, blob: Blob) {
     await store.setItem(uploaded.storageKey, blob);
     const url = URL.createObjectURL(blob);
-    objectUrls.set(uploaded.storageKey, url);
+    objectUrls.set(uploaded.storageKey, url, blob.size);
     const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : {};
     return { ...uploaded, url, bytes: uploaded.bytes || blob.size, mimeType: uploaded.mimeType || blob.type || "application/octet-stream", ...meta };
 }
@@ -113,10 +112,17 @@ export async function resolveMediaUrl(storageKey?: string, fallback = "") {
     if (cached) return cached;
     const blob = await store.getItem<Blob>(storageKey).catch(() => null);
     if (blob) {
+        const existing = objectUrls.get(storageKey);
+        if (existing) return existing;
         const url = URL.createObjectURL(blob);
-        objectUrls.set(storageKey, url);
+        objectUrls.set(storageKey, url, blob.size);
         return url;
     }
+    return resolveMediaRemoteUrl(storageKey, fallback);
+}
+
+export async function resolveMediaRemoteUrl(storageKey?: string, fallback = "") {
+    if (!storageKey) return fallback;
     if (storageKey.startsWith("server:webdav:")) {
         const provider = loadUserStorageProvider();
         if (provider?.type !== "webdav") return fallback;
@@ -148,12 +154,11 @@ export async function getMediaBlob(storageKey: string) {
     return store.getItem<Blob>(storageKey);
 }
 
-export async function setMediaBlob(storageKey: string, blob: Blob) {
+export async function setMediaBlob(storageKey: string, blob: Blob, retainDisplayUrl = true) {
     await store.setItem(storageKey, blob);
-    const previous = objectUrls.get(storageKey);
-    if (previous) URL.revokeObjectURL(previous);
+    if (!retainDisplayUrl) return "";
     const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
+    objectUrls.set(storageKey, url, blob.size);
     return url;
 }
 
@@ -166,8 +171,6 @@ async function deleteServerMedia(storageKey: string) {
     if (provider?.type === "webdav") {
         const direct = await import("@/services/webdav-direct-storage");
         if (await direct.deletePersistedDirectWebDAV(provider, storageKey)) {
-            const url = objectUrls.get(storageKey);
-            if (url) URL.revokeObjectURL(url);
             objectUrls.delete(storageKey);
             await store.removeItem(storageKey);
             return;
@@ -176,8 +179,6 @@ async function deleteServerMedia(storageKey: string) {
     if (!token) {
         if (!provider) return;
         await deleteAnonymousStorageFile(id, toProviderPayload(provider));
-        const url = objectUrls.get(storageKey);
-        if (url) URL.revokeObjectURL(url);
         objectUrls.delete(storageKey);
         await store.removeItem(storageKey);
         return;
@@ -192,6 +193,9 @@ async function deleteServerMedia(storageKey: string) {
 }
 
 export async function deleteStoredMedia(keys: Iterable<string>) {
+    // Desktop version history owns stable references beyond the current canvas.
+    // Removing a card is not permission to destroy its original media bytes.
+    if (isTauri()) return;
     const { useAssetStore } = await import("@/stores/use-asset-store");
     const assetKeys = new Set(
         useAssetStore.getState().assets
@@ -205,8 +209,6 @@ export async function deleteStoredMedia(keys: Iterable<string>) {
                 await deleteServerMedia(key);
                 return;
             }
-            const url = objectUrls.get(key);
-            if (url) URL.revokeObjectURL(url);
             objectUrls.delete(key);
             await store.removeItem(key);
         }),
@@ -214,6 +216,9 @@ export async function deleteStoredMedia(keys: Iterable<string>) {
 }
 
 export async function cleanupUnusedMedia(usedData: unknown) {
+    // Desktop version history owns stable references beyond the current canvas.
+    // Removing a card is not permission to destroy its original media bytes.
+    if (isTauri()) return;
     const usedKeys = collectMediaStorageKeys(usedData);
     const unused: string[] = [];
     await store.iterate((_value, key) => {
@@ -221,8 +226,6 @@ export async function cleanupUnusedMedia(usedData: unknown) {
     });
     await Promise.all(
         unused.map(async (key) => {
-            const url = objectUrls.get(key);
-            if (url) URL.revokeObjectURL(url);
             objectUrls.delete(key);
             await store.removeItem(key);
         }),
@@ -239,9 +242,32 @@ export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()
 function readVideoMeta(url: string) {
     return new Promise<{ width: number; height: number }>((resolve) => {
         const video = document.createElement("video");
-        const done = () => resolve({ width: video.videoWidth || 1280, height: video.videoHeight || 720 });
+        const done = () => {
+            const meta = { width: video.videoWidth || 1280, height: video.videoHeight || 720 };
+            video.onloadedmetadata = null; video.onerror = null;
+            video.removeAttribute("src"); video.load();
+            resolve(meta);
+        };
         video.onloadedmetadata = done;
         video.onerror = done;
         video.src = url;
     });
+}
+
+export function leaseStoredMediaBlob(storageKey: string, blob: Blob) {
+    return objectUrls.acquire(storageKey, blob);
+}
+
+export async function readMediaOriginal(storageKey?: string, fallback = "") {
+    const original = storageKey ? await getMediaBlob(storageKey) : null;
+    if (original) return original;
+    const url = await resolveMediaRemoteUrl(storageKey, fallback);
+    if (!url) throw new Error("参考素材不可用");
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`参考素材读取失败：${response.status}`);
+    return response.blob();
+}
+
+export function adoptStoredMediaUrl(storageKey: string) {
+    return objectUrls.adopt(storageKey);
 }

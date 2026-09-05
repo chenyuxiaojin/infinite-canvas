@@ -3,10 +3,11 @@
 import { create } from "zustand";
 import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
 
+import { stableAssetMedia } from "@/services/asset-media-reference";
 import { nanoid } from "nanoid";
 import { localForageStorage } from "@/lib/localforage-storage";
-import { cleanupUnusedImages, resolveImageUrl, uploadImage } from "@/services/image-storage";
-import { cleanupUnusedMedia, resolveMediaUrl } from "@/services/file-storage";
+import { cleanupUnusedImages } from "@/services/image-storage";
+import { cleanupUnusedMedia } from "@/services/file-storage";
 import { fetchUserAssetData, syncUserAssetData } from "@/services/api/user-config";
 
 export type AssetKind = "text" | "image" | "video" | "audio";
@@ -53,22 +54,9 @@ const assetStorage: PersistStorage<AssetStore> = {
         const value = await localForageStorage.getItem(name);
         if (!value) return null;
         const parsed = JSON.parse(value) as StorageValue<AssetStore>;
-        parsed.state.assets = await Promise.all(
-            parsed.state.assets.map(async (asset) => {
-                if (asset.kind === "video" && asset.data.storageKey) return { ...asset, data: { ...asset.data, url: await resolveMediaUrl(asset.data.storageKey, asset.data.url) } };
-                if (asset.kind === "audio" && asset.data.storageKey) return { ...asset, data: { ...asset.data, url: await resolveMediaUrl(asset.data.storageKey, asset.data.url) } };
-                if (asset.kind !== "image") return asset;
-                if (asset.data.storageKey)
-                    return {
-                        ...asset,
-                        coverUrl: asset.coverUrl.startsWith("blob:") ? await resolveImageUrl(asset.data.storageKey, asset.coverUrl) : asset.coverUrl,
-                        data: { ...asset.data, dataUrl: await resolveImageUrl(asset.data.storageKey, asset.data.dataUrl) },
-                    };
-                if (!asset.data.dataUrl.startsWith("data:image/")) return asset;
-                const image = await uploadImage(asset.data.dataUrl);
-                return { ...asset, coverUrl: asset.coverUrl.startsWith("data:image/") ? image.url : asset.coverUrl, data: { ...asset.data, dataUrl: image.url, storageKey: image.storageKey, bytes: image.bytes, mimeType: image.mimeType } };
-            }),
-        );
+        // Persistent assets are references, not mounted display consumers.
+        // Reading the index must not load every original into Blob URL memory.
+        parsed.state.assets = parsed.state.assets.map(stableAssetMedia);
         return parsed;
     },
     setItem: (name, value) => localForageStorage.setItem(name, JSON.stringify(value)),
@@ -82,13 +70,13 @@ export const useAssetStore = create<AssetStore>()(
             addAsset: (asset) => {
                 const now = new Date().toISOString();
                 const id = nanoid();
-                set((state) => ({ assets: [{ ...asset, id, createdAt: now, updatedAt: now } as Asset, ...state.assets] }));
+                set((state) => ({ assets: [stableAssetMedia({ ...asset, id, createdAt: now, updatedAt: now } as Asset), ...state.assets] }));
                 scheduleAssetSync(get);
                 return id;
             },
             updateAsset: (id, patch) =>
                 set((state) => {
-                    const assets = state.assets.map((asset) => (asset.id === id ? ({ ...asset, ...patch, updatedAt: new Date().toISOString() } as Asset) : asset));
+                    const assets = state.assets.map((asset) => (asset.id === id ? stableAssetMedia({ ...asset, ...patch, updatedAt: new Date().toISOString() } as Asset) : asset));
                     window.setTimeout(() => scheduleAssetSync(get), 0);
                     return { assets };
                 }),

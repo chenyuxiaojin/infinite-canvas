@@ -1,5 +1,6 @@
 "use client";
 
+import { useMediaScope } from "@/hooks/use-media-scope";
 import { App, Button, Checkbox, Empty, Image, Input, Modal, Select, Space, Switch, Tag, Typography } from "antd";
 import { AlertCircle, ArrowDown, ArrowUp, Bot, CheckCircle2, Copy, Download, Edit3, FilePlus2, Globe2, Layers3, LoaderCircle, LockKeyhole, Play, Plus, Sparkles, Trash2, WandSparkles } from "lucide-react";
 import localforage from "localforage";
@@ -15,7 +16,7 @@ import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "
 import { createCanvasImageTask, requestEdit, requestGeneration, requestImageQuestion, type CanvasImageTask } from "@/services/api/image";
 import { saveImageGenerationLogs } from "@/services/api/generation-logs";
 import { deleteUserWorkflow, draftUserWorkflow, fetchUserConfig, fetchUserWorkflows, saveUserWorkflow, type CreativeWorkflowRecord } from "@/services/api/user-config";
-import { deleteStoredImages, imageToDataUrl, uploadImage } from "@/services/image-storage";
+import { deleteStoredImages, imageToDataUrl } from "@/services/image-storage";
 import { channelProtocolForConfig, defaultConfig, localChannelForActiveModel, normalizeLocalChannels, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore } from "@/stores/use-user-store";
@@ -216,6 +217,7 @@ export function CreativeWorkflowWorkspace({
     onWorkflowTaskSuccess?: (task: WorkflowExternalTaskSuccess) => void;
     onWorkflowTaskFailure?: (task: WorkflowExternalTaskFailure) => void;
 } = {}) {
+    const { scopeRef: mediaScopeRef, uploadImage } = useMediaScope("creative-workflow");
     const { message, modal } = App.useApp();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const effectiveConfig = useEffectiveConfig();
@@ -404,7 +406,8 @@ export function CreativeWorkflowWorkspace({
         if (keys.length) await deleteStoredImages(keys).catch((error) => message.error(error instanceof Error ? error.message : "参考图文件删除失败"));
     };
 
-    const insertWorkflowAsset = (payload: InsertAssetPayload) => {
+    const insertWorkflowAsset = async (payload: InsertAssetPayload) => {
+        if (payload.kind === "image" && payload.storageKey) payload = { ...payload, dataUrl: await mediaScopeRef.current.url(payload.storageKey, payload.dataUrl, true) };
         if (payload.kind === "text") {
             const text = payload.content.trim();
             if (text) setInputValues((value) => ({ ...value, [runningWorkflow?.variables[0]?.key || "asset_text"]: text }));
@@ -431,7 +434,8 @@ export function CreativeWorkflowWorkspace({
         setWorkflowAssetPickerOpen(false);
     };
 
-    const insertAgentAsset = (payload: InsertAssetPayload) => {
+    const insertAgentAsset = async (payload: InsertAssetPayload) => {
+        if (payload.kind === "image" && payload.storageKey) payload = { ...payload, dataUrl: await mediaScopeRef.current.url(payload.storageKey, payload.dataUrl, true) };
         if (payload.kind === "text") {
             const text = payload.content.trim();
             if (text) setAgentPrompt((value) => (value.trim() ? `${value.trim()}\n\n${text}` : text));
@@ -535,7 +539,7 @@ export function CreativeWorkflowWorkspace({
             return;
         }
         if (!token) {
-            message.warning("请先登录后使用工作流创建 Agent");
+            message.warning("此版本已停用账号工作流服务");
             return;
         }
         setAgentLoading(true);
@@ -956,9 +960,6 @@ export function CreativeWorkflowWorkspace({
                             onChange={setWorkflowCategory}
                         />
                         <Input.Search allowClear placeholder="搜索名称、分类、描述" className="w-72 max-w-full" value={query} onChange={(event) => setQuery(event.target.value)} />
-                        <Button icon={<Bot className="size-4" />} onClick={() => setAgentOpen(true)}>
-                            AI 创建
-                        </Button>
                         <Button icon={<Layers3 className="size-4" />} onClick={() => setEditingWorkflow(createBlankWorkflow(effectiveConfig, "multi_image_series"))}>
                             新建多图
                         </Button>
@@ -1045,139 +1046,6 @@ export function CreativeWorkflowWorkspace({
                 onCancel={() => setEditingWorkflow(null)}
                 onSave={(workflow) => void saveWorkflow(workflow)}
             />
-            <Modal title="AI 创建工作流" open={agentOpen} width={980} onCancel={() => setAgentOpen(false)} footer={null} destroyOnHidden>
-                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-                    <div className="space-y-3">
-                        <div className="flex items-center justify-between gap-3">
-                            <div className="text-sm font-medium">描述你要沉淀的创作流程</div>
-                            <div className="flex min-w-0 items-center gap-2">
-                                <div className="hidden min-w-[220px] max-w-[360px] sm:block">
-                                    <ModelPicker
-                                        config={effectiveConfig}
-                                        fullWidth
-                                        capability="text"
-                                        value={agentModel}
-                                        channelId={agentChannelId}
-                                        placeholder="选择 Agent 文本模型"
-                                        onChange={(model, channelId) => {
-                                            setAgentTextModel(model);
-                                            setAgentTextChannelId(channelId || "");
-                                        }}
-                                        onMissingConfig={() => openConfigDialog(true)}
-                                    />
-                                </div>
-                                <div className="hidden min-w-0 max-w-[220px] truncate rounded-md border border-stone-300 px-2 py-1 text-xs text-stone-600 dark:border-stone-700 dark:text-stone-300 lg:block" title={`${agentModelInfo.channelName} · ${agentModelInfo.modelName}`}>
-                                    {agentModelInfo.channelName}
-                                </div>
-                                <div className="inline-flex rounded-md border border-stone-300 p-0.5 dark:border-stone-700">
-                                    <button type="button" title="个人工作流" className={`inline-flex size-8 items-center justify-center rounded ${agentScope === "private" ? "border border-stone-400 text-stone-950 dark:border-stone-500 dark:text-stone-50" : "text-stone-500"}`} onClick={() => setAgentScope("private")}>
-                                        <LockKeyhole className="size-4" />
-                                    </button>
-                                    <button type="button" title="公开工作流" className={`inline-flex size-8 items-center justify-center rounded ${agentScope === "public" ? "border border-stone-400 text-stone-950 dark:border-stone-500 dark:text-stone-50" : "text-stone-500"}`} onClick={() => setAgentScope("public")}>
-                                        <Globe2 className="size-4" />
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                        <div className="sm:hidden">
-                            <ModelPicker
-                                config={effectiveConfig}
-                                fullWidth
-                                capability="text"
-                                value={agentModel}
-                                channelId={agentChannelId}
-                                placeholder="选择 Agent 文本模型"
-                                onChange={(model, channelId) => {
-                                    setAgentTextModel(model);
-                                    setAgentTextChannelId(channelId || "");
-                                }}
-                                onMissingConfig={() => openConfigDialog(true)}
-                            />
-                        </div>
-                        <Input.TextArea value={agentPrompt} autoSize={{ minRows: 14, maxRows: 22 }} placeholder="例如：创建一个电商海报工作流，只需要输入产品名称、核心卖点、活动信息，固定商业摄影质感和营销文案结构。" onChange={(event) => setAgentPrompt(event.target.value)} />
-                        <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-800">
-                            <div className="flex items-center justify-between gap-3">
-                                <div>
-                                    <div className="text-sm font-medium">参考图</div>
-                                    <div className="mt-1 text-xs text-stone-500">可上传样例图，作为创建工作流的视觉参考。</div>
-                                </div>
-                                <div className="flex gap-2">
-                                    <Button size="small" onClick={() => setAgentAssetPickerOpen(true)}>
-                                        我的素材
-                                    </Button>
-                                    <Button size="small" onClick={() => agentReferenceInputRef.current?.click()}>
-                                        上传
-                                    </Button>
-                                </div>
-                            </div>
-                            <input
-                                ref={agentReferenceInputRef}
-                                type="file"
-                                accept="image/*"
-                                multiple
-                                className="hidden"
-                                onChange={(event) => {
-                                    const input = event.currentTarget;
-                                    void addAgentReferences(input.files).finally(() => {
-                                        input.value = "";
-                                    });
-                                }}
-                            />
-                            {agentReferences.length ? (
-                                <div className="mt-3 grid grid-cols-5 gap-2">
-                                    {agentReferences.map((image) => (
-                                        <div key={image.id} className="group relative overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
-                                            <img src={image.dataUrl} alt={image.name} className="aspect-square w-full object-cover" />
-                                            <button
-                                                type="button"
-                                                className="absolute right-1 top-1 grid size-6 place-items-center rounded bg-black/65 text-white opacity-0 transition group-hover:opacity-100"
-                                                onClick={() => void removeAgentReference(image.id)}
-                                                aria-label="删除参考图"
-                                            >
-                                                <Trash2 className="size-3.5" />
-                                            </button>
-                                        </div>
-                                    ))}
-                                </div>
-                            ) : null}
-                        </div>
-                        <Button block type="primary" loading={agentLoading} icon={<Sparkles className="size-4" />} onClick={() => void runWorkflowAgent()}>
-                            生成工作流草稿
-                        </Button>
-                    </div>
-                    <aside className="space-y-3 rounded-lg border border-stone-200 p-3 dark:border-stone-800">
-                        <div className="text-sm font-medium">草稿预览</div>
-                        {agentDraft ? (
-                            <>
-                                <div>
-                                    <div className="text-base font-semibold">{agentDraft.name}</div>
-                                    <div className="mt-1 flex flex-wrap gap-1">
-                                        <Tag className="m-0">{agentDraft.category || "未分类"}</Tag>
-                                        <Tag className="m-0">{agentDraft.variables.length} 个变量</Tag>
-                                        <Tag className="m-0">{agentDraft.scope === "public" ? "公开" : "个人"}</Tag>
-                                    </div>
-                                </div>
-                                <p className="text-sm text-stone-500 dark:text-stone-400">{agentDraft.description || "暂无描述"}</p>
-                                <div className="max-h-60 overflow-y-auto rounded-md bg-stone-100 p-3 text-xs dark:bg-stone-950">
-                                    <div className="whitespace-pre-wrap">{agentDraft.config.promptTemplate}</div>
-                                </div>
-                                {agentWarnings.length ? (
-                                    <div className="space-y-1 text-xs text-amber-600 dark:text-amber-300">
-                                        {agentWarnings.map((item) => (
-                                            <div key={item}>{item}</div>
-                                        ))}
-                                    </div>
-                                ) : null}
-                                <Button block type="primary" onClick={applyAgentDraft}>
-                                    应用到编辑器
-                                </Button>
-                            </>
-                        ) : (
-                            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="生成后在这里预览草稿" />
-                        )}
-                    </aside>
-                </div>
-            </Modal>
             <Modal title={runningWorkflow?.name || "运行工作流"} open={Boolean(runningWorkflow)} width={980} onCancel={closeRunner} footer={null} destroyOnHidden>
                 {runningWorkflow ? (
                     <div className="grid gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
@@ -1306,8 +1174,8 @@ export function CreativeWorkflowWorkspace({
                     </div>
                 ) : null}
             </Modal>
-            <AssetPickerModal open={agentAssetPickerOpen} defaultTab="my-assets" onInsert={insertAgentAsset} onClose={() => setAgentAssetPickerOpen(false)} />
-            <AssetPickerModal open={workflowAssetPickerOpen} defaultTab="my-assets" onInsert={insertWorkflowAsset} onClose={() => setWorkflowAssetPickerOpen(false)} />
+            <AssetPickerModal open={agentAssetPickerOpen} onInsert={insertAgentAsset} onClose={() => setAgentAssetPickerOpen(false)} />
+            <AssetPickerModal open={workflowAssetPickerOpen} onInsert={insertWorkflowAsset} onClose={() => setWorkflowAssetPickerOpen(false)} />
         </main>
     );
 }
@@ -1328,7 +1196,7 @@ function WorkflowCard({ workflow, onRun, onEdit, onCopy, onDelete }: { workflow:
                         </Tag>
                         <Tag className="m-0">{workflow.variables.length} 个变量</Tag>
                         <Tag className="m-0" color={workflow.scope === "public" ? "blue" : undefined}>
-                            {workflow.scope === "public" ? "公开" : "个人"}
+                            本地模板
                         </Tag>
                     </div>
                 </div>
@@ -1507,14 +1375,6 @@ function WorkflowEditorModal({
                     <section className="space-y-3 rounded-lg border border-stone-200 p-3 dark:border-stone-800">
                         <div className="flex items-center justify-between gap-3">
                             <div className="text-sm font-medium">基础信息</div>
-                            <div className="inline-flex rounded-md border border-stone-300 bg-transparent p-0.5 dark:border-stone-700">
-                                <button type="button" title="个人工作流" className={`inline-flex size-8 items-center justify-center rounded transition ${workflow.scope !== "public" ? "border border-stone-400 text-stone-950 dark:border-stone-500 dark:text-stone-50" : "text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"}`} onClick={() => patch({ scope: "private" })}>
-                                    <LockKeyhole className="size-4" />
-                                </button>
-                                <button type="button" title="公开工作流" className={`inline-flex size-8 items-center justify-center rounded transition ${workflow.scope === "public" ? "border border-stone-400 text-stone-950 dark:border-stone-500 dark:text-stone-50" : "text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"}`} onClick={() => patch({ scope: "public" })}>
-                                    <Globe2 className="size-4" />
-                                </button>
-                            </div>
                         </div>
                         <Input value={workflow.name} placeholder="工作流名称" onChange={(event) => patch({ name: event.target.value })} />
                         <Input value={workflow.category} placeholder="分类，例如 电商海报" onChange={(event) => patch({ category: event.target.value })} />

@@ -1,7 +1,10 @@
 "use client";
+import { useStoredMediaSource } from "@/hooks/use-stored-media-source";
+import { useMediaScope } from "@/hooks/use-media-scope";
+import type { CanvasMediaScope } from "@/services/canvas-media-scope";
 import axios from "axios";
 
-import { AlertCircle, ArrowLeft, ArrowRight, BookOpen, CheckSquare, ChevronDown, ChevronUp, ClipboardPaste, CloudUpload, Copy, Download, FolderPlus, History, LoaderCircle, Music2, PanelBottom, PanelLeft, Plus, RotateCcw, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, BookOpen, CheckSquare, ChevronDown, ChevronUp, ClipboardPaste, Copy, Download, FolderPlus, History, LoaderCircle, Music2, PanelBottom, PanelLeft, Plus, RotateCcw, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { App, Button, Checkbox, Empty, Input, Modal, Switch, Tag, Typography } from "antd";
 import localforage from "localforage";
@@ -18,8 +21,8 @@ import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { isMiniMaxH3Config } from "@/lib/minimax-video";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import { COGVIDEOX3_DURATIONS, isAgnesVideoV25Model, isCogVideoX3Model, modelKey, normalizeCogVideoX3Duration, supportsVideoAudioGeneration, supportsVideoFrameReferences } from "@/lib/video-model-capabilities";
-import { deleteStoredMedia, downloadRemoteMedia, resolveMediaUrl, uploadMediaFile, uploadRemoteMediaToServer } from "@/services/file-storage";
-import { deleteStoredImages, resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { deleteStoredMedia, readMediaOriginal } from "@/services/file-storage";
+import { deleteStoredImages } from "@/services/image-storage";
 import { deleteVideoGenerationLogs, fetchVideoGenerationLogs, saveVideoGenerationLogs } from "@/services/api/generation-logs";
 import { createVideoGenerationTask, deleteVideoGenerationTask, listVideoGenerationTasks, pollVideoGenerationTaskStatus, VIDEO_POLL_INTERVAL_MS, VideoRequestError, type VideoResponse } from "@/services/api/video";
 import { useAssetStore } from "@/stores/use-asset-store";
@@ -101,6 +104,7 @@ type AssetPickerTarget = "general" | "image" | "video" | "audio" | "firstFrame" 
 const WORKBENCH_LAYOUT_KEY = "infinite-canvas:video-workbench-layout";
 const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
 export default function VideoPage() {
+    const { scopeRef: mediaScopeRef, uploadImage, uploadMediaFile } = useMediaScope("video-workbench");
     const { message } = App.useApp();
     const fileInputRef = useRef<HTMLInputElement>(null);
     const elementFileInputRef = useRef<HTMLInputElement>(null);
@@ -130,6 +134,7 @@ export default function VideoPage() {
     const [audioReferences, setAudioReferences] = useState<ReferenceAudio[]>([]);
     const [results, setResults] = useState<GenerationResult[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
+    useEffect(() => { mediaScopeRef.current.adoptReferences(logs); }, [logs, mediaScopeRef]);
     const [running, setRunning] = useState(false);
     const [workbenchLayout, setWorkbenchLayoutState] = useState<WorkbenchLayout>("side");
     const [bottomSettingsCollapsed, setBottomSettingsCollapsed] = useState(true);
@@ -143,7 +148,6 @@ export default function VideoPage() {
     const [previewLog, setPreviewLog] = useState<GenerationLog | null>(null);
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [taskCount, setTaskCount] = useState(1);
-    const [syncingVideoIds, setSyncingVideoIds] = useState<string[]>([]);
     const pollingLogIdsRef = useRef(new Set<string>());
     const logsRef = useRef<GenerationLog[]>([]);
     const effectiveConfigRef = useRef(videoConfig);
@@ -173,6 +177,7 @@ export default function VideoPage() {
         if (!pendingLogs.length) return;
         pendingLogs.forEach((log) => {
             if (pollingLogIdsRef.current.has(log.id)) return;
+            if (!token && (log.config.channelMode === "remote" || log.task?.channelId || log.task?.channel_id || log.task?.userChannelId || log.task?.user_channel_id)) return;
             const resumeConfig = buildResumeVideoConfig(effectiveConfigRef.current, log);
             const taskId = videoLogTaskId(log);
             if (!taskId || !isAiConfigReady(resumeConfig, log.model)) return;
@@ -649,7 +654,7 @@ export default function VideoPage() {
             const nextLogs = settled
                 .map((item) => (item.status === "fulfilled" ? item.value : null))
                 .filter((item): item is NonNullable<typeof item> => Boolean(item));
-            const storedLogs = await readStoredLogs();
+            const storedLogs = await readStoredLogs(mediaScopeRef.current);
             setLogs(storedLogs);
             const createdCount = nextLogs.filter((item) => item.status === "生成中").length;
             const failedCount = nextLogs.filter((item) => item.status === "失败").length;
@@ -721,46 +726,12 @@ export default function VideoPage() {
     const downloadVideo = async (video: GeneratedVideo) => {
         const hideLoading = message.loading("正在下载视频...", 0);
         try {
-            saveAs(await downloadRemoteMedia(video.url), "video.mp4");
+            saveAs(await readMediaOriginal(video.storageKey, video.url), "video.mp4");
         } catch (error) {
             message.error(error instanceof Error ? error.message : "视频下载失败");
         } finally {
             hideLoading();
         }
-    };
-
-    const syncVideo = async (video: GeneratedVideo, index = 0) => {
-        if (isCloudVideo(video)) return video;
-        setSyncingVideoIds((ids) => Array.from(new Set([...ids, video.id])));
-        const hideLoading = message.loading("正在同步视频到云端存储...", 0);
-        try {
-            const uploaded = await uploadRemoteMediaToServer(video.url, `video-${index + 1}.mp4`);
-            message.success("视频已同步到云端存储");
-            return { ...video, url: uploaded.url, storageKey: uploaded.storageKey, width: uploaded.width || video.width, height: uploaded.height || video.height, bytes: uploaded.bytes || video.bytes, mimeType: uploaded.mimeType || video.mimeType };
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : "视频同步失败");
-            return null;
-        } finally {
-            hideLoading();
-            setSyncingVideoIds((ids) => ids.filter((id) => id !== video.id));
-        }
-    };
-
-    const syncResultVideo = async (resultId: string, video: GeneratedVideo, index: number) => {
-        const synced = await syncVideo(video, index);
-        if (!synced) return;
-        setResults((value) => updateResult(value, resultId, { video: synced }));
-    };
-
-    const syncLogVideo = async (log: GenerationLog, video: GeneratedVideo, index: number) => {
-        const synced = await syncVideo(video, index);
-        if (!synced) return;
-        const nextLog = { ...log, video: synced };
-        await logStore.setItem(log.id, serializeLog(nextLog));
-        const nextLogs = logs.map((item) => (item.id === log.id ? nextLog : item));
-        setLogs(nextLogs);
-        await persistVideoLog(nextLog);
-        if (previewLog?.id === log.id) setPreviewLog(nextLog);
     };
 
     const saveResultToAssets = (video: GeneratedVideo) => {
@@ -777,6 +748,10 @@ export default function VideoPage() {
     };
 
     const insertPickedAsset = async (payload: InsertAssetPayload) => {
+        if (payload.kind !== "text" && payload.storageKey) {
+            const url = await mediaScopeRef.current.url(payload.storageKey, payload.kind === "image" ? payload.dataUrl : payload.url, payload.kind === "image");
+            payload = payload.kind === "image" ? { ...payload, dataUrl: url } : { ...payload, url };
+        }
         const insertImage = async () => {
             if (!referenceImageLimit) {
                 message.warning("当前 Kling 模型不支持参考图");
@@ -902,7 +877,7 @@ export default function VideoPage() {
     };
 
     const refreshLogs = async () => {
-        const nextLogs = await readStoredLogs();
+        const nextLogs = await readStoredLogs(mediaScopeRef.current);
         setLogs(nextLogs);
         return nextLogs;
     };
@@ -914,7 +889,7 @@ export default function VideoPage() {
             const tasks = await listVideoGenerationTasks(config);
             const recoverableTasks = tasks.filter(isRecoverableBackendVideoTask);
             if (!recoverableTasks.length) return baseLogs || logsRef.current;
-            const currentLogs = baseLogs || (await readStoredLogs());
+            const currentLogs = baseLogs || (await readStoredLogs(mediaScopeRef.current));
             const mergedLogs = mergeBackendVideoTasks(currentLogs, recoverableTasks, config);
             const taskKeys = new Set(recoverableTasks.flatMap(videoTaskIdentityKeys));
             const recoveredLogs = mergedLogs.filter((log) => videoLogIdentityKeys(log).some((key) => taskKeys.has(key)));
@@ -929,9 +904,9 @@ export default function VideoPage() {
 
     const loadAccountVideoHistory = async (currentToken: string) => {
         try {
-            const localLogs = await readStoredLogs();
+            const localLogs = await readStoredLogs(mediaScopeRef.current);
             const remoteLogs = await fetchVideoGenerationLogs<GenerationLog>(currentToken);
-            const mergedLogs = await mergeVideoLogs(remoteLogs, localLogs);
+            const mergedLogs = await mergeVideoLogs(remoteLogs, localLogs, mediaScopeRef.current);
             await replaceStoredVideoHistory(mergedLogs);
             setLogs(mergedLogs);
             return mergedLogs;
@@ -953,7 +928,7 @@ export default function VideoPage() {
 
     const finalizeGenerationLog = async (log: GenerationLog) => {
         await saveGenerationLog(log);
-        const nextLogs = await readStoredLogs();
+        const nextLogs = await readStoredLogs(mediaScopeRef.current);
         setLogs(nextLogs);
         await persistVideoLog(log);
     };
@@ -972,7 +947,7 @@ export default function VideoPage() {
                 return;
             }
             if (isCompletedVideoTask(task)) {
-                if (!task.video_url && !task.url) {
+                if (!task.video_url && !task.url && !task.storageKey) {
                     const nextLog = { ...baseLog, status: "失败" as const, error: "视频生成完成但没有返回视频地址", errorDetail: errorDetail(new VideoRequestError("视频生成完成但没有返回视频地址", task)) };
                     await finalizeGenerationLog(nextLog);
                     setResults((value) => updateResultByLogId(value, log.id, { status: "failed", task, error: nextLog.error, errorDetail: nextLog.errorDetail, durationMs: nextLog.durationMs, lastPolledAt: nextLog.lastPolledAt }));
@@ -1147,10 +1122,7 @@ export default function VideoPage() {
                             onRetryResult={retryResult}
                             onCopyPrompt={(value) => void copyPrompt(value, (content) => message.success(content))}
                             onDownload={downloadVideo}
-                            onSyncResult={syncResultVideo}
-                            onSyncLog={syncLogVideo}
                             onSaveAsset={saveResultToAssets}
-                            syncingVideoIds={syncingVideoIds}
                         />
                     </>
                 ) : (
@@ -1176,10 +1148,7 @@ export default function VideoPage() {
                             onRetryResult={retryResult}
                             onCopyPrompt={(value) => void copyPrompt(value, (content) => message.success(content))}
                             onDownload={downloadVideo}
-                            onSyncResult={syncResultVideo}
-                            onSyncLog={syncLogVideo}
                             onSaveAsset={saveResultToAssets}
-                            syncingVideoIds={syncingVideoIds}
                         />
                         <WorkbenchPanel
                             layout="bottom"
@@ -1270,7 +1239,7 @@ export default function VideoPage() {
                 }}
             />
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
-            <AssetPickerModal open={assetPickerOpen} defaultTab="my-assets" onInsert={(payload) => void insertPickedAsset(payload)} onClose={() => setAssetPickerOpen(false)} />
+            <AssetPickerModal open={assetPickerOpen} onInsert={(payload) => void insertPickedAsset(payload)} onClose={() => setAssetPickerOpen(false)} />
             <Modal title="删除生成记录" open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={deleteSelectedLogs} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
                 确定删除选中的 {selectedLogIds.length} 条生成记录吗？
             </Modal>
@@ -1786,10 +1755,7 @@ function ResultsPanel({
     onRetryResult,
     onCopyPrompt,
     onDownload,
-    onSyncResult,
-    onSyncLog,
     onSaveAsset,
-    syncingVideoIds,
 }: {
     className?: string;
     results: GenerationResult[];
@@ -1808,10 +1774,7 @@ function ResultsPanel({
     onRetryResult: (result: GenerationResult) => void;
     onCopyPrompt: (text: string) => void | Promise<void>;
     onDownload: (video: GeneratedVideo) => void;
-    onSyncResult: (resultId: string, video: GeneratedVideo, index: number) => void;
-    onSyncLog: (log: GenerationLog, video: GeneratedVideo, index: number) => void;
     onSaveAsset: (video: GeneratedVideo) => void;
-    syncingVideoIds: string[];
 }) {
     const visibleResults = results.filter((result) => result.status !== "failed" || pendingCount > 0);
     const liveResultKeys = new Set(visibleResults.flatMap(videoResultIdentityKeys));
@@ -1838,9 +1801,9 @@ function ResultsPanel({
             </div>
             {totalCount ? (
                 <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-                    {visibleResults.map((result, index) => (result.status === "success" && result.video ? <ResultVideoCard key={result.id} result={result} video={result.video} index={index} syncing={syncingVideoIds.includes(result.video.id)} onCopyPrompt={onCopyPrompt} onDownload={onDownload} onSync={(video) => onSyncResult(result.id, video, index)} onSaveAsset={onSaveAsset} /> : result.status === "failed" ? <FailedVideoCard key={result.id} result={result} error={result.error || "生成失败"} onCopyPrompt={onCopyPrompt} onPreview={() => onPreviewResult(result)} onRetry={() => onRetryResult(result)} /> : <PendingVideoCard key={result.id} result={result} now={now} onCopyPrompt={onCopyPrompt} />))}
+                    {visibleResults.map((result, index) => (result.status === "success" && result.video ? <ResultVideoCard key={result.id} result={result} video={result.video} index={index} onCopyPrompt={onCopyPrompt} onDownload={onDownload} onSaveAsset={onSaveAsset} /> : result.status === "failed" ? <FailedVideoCard key={result.id} result={result} error={result.error || "生成失败"} onCopyPrompt={onCopyPrompt} onPreview={() => onPreviewResult(result)} onRetry={() => onRetryResult(result)} /> : <PendingVideoCard key={result.id} result={result} now={now} onCopyPrompt={onCopyPrompt} />))}
                     {visibleLogs.map((log, index) => (
-                        <HistoryLogCard key={log.id} log={log} index={index} selected={selectedLogIds.includes(log.id)} active={activeLogId === log.id} syncing={Boolean(log.video && syncingVideoIds.includes(log.video.id))} onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))} onDelete={() => onDeleteLog(log)} onPreview={() => onPreviewLog(log)} onRetry={() => onRetryLog(log)} onCopyPrompt={onCopyPrompt} onDownload={onDownload} onSync={(video) => onSyncLog(log, video, index)} onSaveAsset={onSaveAsset} />
+                        <HistoryLogCard key={log.id} log={log} index={index} selected={selectedLogIds.includes(log.id)} active={activeLogId === log.id} onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))} onDelete={() => onDeleteLog(log)} onPreview={() => onPreviewLog(log)} onRetry={() => onRetryLog(log)} onCopyPrompt={onCopyPrompt} onDownload={onDownload} onSaveAsset={onSaveAsset} />
                     ))}
                 </div>
             ) : (
@@ -1857,7 +1820,7 @@ function HistoryIcon() {
     return <History className="size-4 shrink-0 text-stone-400" />;
 }
 
-function ResultVideoCard({ result, video, index, syncing, onCopyPrompt, onDownload, onSync, onSaveAsset }: { result: GenerationResult; video: GeneratedVideo; index: number; syncing: boolean; onCopyPrompt: (text: string) => void | Promise<void>; onDownload: (video: GeneratedVideo) => void; onSync: (video: GeneratedVideo) => void; onSaveAsset: (video: GeneratedVideo) => void }) {
+function ResultVideoCard({ result, video, index, onCopyPrompt, onDownload, onSaveAsset }: { result: GenerationResult; video: GeneratedVideo; index: number; onCopyPrompt: (text: string) => void | Promise<void>; onDownload: (video: GeneratedVideo) => void; onSaveAsset: (video: GeneratedVideo) => void }) {
     return (
         <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
             <div className="relative aspect-video bg-black">
@@ -1866,10 +1829,10 @@ function ResultVideoCard({ result, video, index, syncing, onCopyPrompt, onDownlo
                     <Tag className="m-0 text-[10px]" color="blue">成功</Tag>
                 </div>
                 <ReferenceThumbnailOverlay references={result.references} className="left-1.5 top-1.5" />
-                <video src={video.url} controls className="size-full object-contain" />
+                <StoredVideo video={video} className="size-full object-contain" />
             </div>
             <TaskInfo item={result} onCopyPrompt={onCopyPrompt} />
-            <VideoMetaBar video={video} index={index} syncing={syncing} onDownload={onDownload} onSync={onSync} onSaveAsset={onSaveAsset} />
+            <VideoMetaBar video={video} index={index} onDownload={onDownload} onSaveAsset={onSaveAsset} />
         </div>
     );
 }
@@ -1931,7 +1894,7 @@ function FailedVideoCard({ result, error, onCopyPrompt, onPreview, onRetry }: { 
     );
 }
 
-function HistoryLogCard({ log, index, selected, active, syncing, onSelectedChange, onDelete, onPreview, onRetry, onCopyPrompt, onDownload, onSync, onSaveAsset }: { log: GenerationLog; index: number; selected: boolean; active: boolean; syncing: boolean; onSelectedChange: (checked: boolean) => void; onDelete: () => void; onPreview: () => void; onRetry: () => void; onCopyPrompt: (text: string) => void | Promise<void>; onDownload: (video: GeneratedVideo) => void; onSync: (video: GeneratedVideo) => void; onSaveAsset: (video: GeneratedVideo) => void }) {
+function HistoryLogCard({ log, index, selected, active, onSelectedChange, onDelete, onPreview, onRetry, onCopyPrompt, onDownload, onSaveAsset }: { log: GenerationLog; index: number; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onDelete: () => void; onPreview: () => void; onRetry: () => void; onCopyPrompt: (text: string) => void | Promise<void>; onDownload: (video: GeneratedVideo) => void; onSaveAsset: (video: GeneratedVideo) => void }) {
     const [expanded, setExpanded] = useState(false);
     const [detailOpen, setDetailOpen] = useState(false);
     return (
@@ -1945,7 +1908,7 @@ function HistoryLogCard({ log, index, selected, active, syncing, onSelectedChang
                     {log.video ? <VideoSourceTag video={log.video} /> : null}
                     <Tag className="m-0 text-[10px]" color={log.status === "成功" ? "blue" : log.status === "生成中" ? "processing" : "red"}>{log.status}</Tag>
                 </div>
-                {log.video ? <video src={log.video.url} controls className="size-full bg-black object-contain" /> : <div className="flex size-full flex-col items-center justify-center gap-2 p-5 text-center text-sm text-red-500"><AlertCircle className="size-7" /><span>{log.error || "没有可显示的视频"}</span></div>}
+                {log.video ? <StoredVideo video={log.video} className="size-full bg-black object-contain" /> : <div className="flex size-full flex-col items-center justify-center gap-2 p-5 text-center text-sm text-red-500"><AlertCircle className="size-7" /><span>{log.error || "没有可显示的视频"}</span></div>}
                 <ReferenceThumbnailOverlay references={log.references} className="bottom-1.5 right-1.5" />
             </div>
             <div className="space-y-2 border-t border-stone-200 p-2.5 text-xs dark:border-stone-800">
@@ -1970,7 +1933,7 @@ function HistoryLogCard({ log, index, selected, active, syncing, onSelectedChang
                     <Button size="small" onClick={onPreview}>载入</Button>
                     <Button size="small" icon={<RotateCcw className="size-3.5" />} onClick={onRetry}>重试</Button>
                 </div>
-                {log.video ? <div className="flex shrink-0 gap-1"><Button size="small" title="同步到云端存储" icon={<CloudUpload className="size-3.5" />} loading={syncing} disabled={isCloudVideo(log.video)} onClick={() => onSync(log.video!)} /><Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => onSaveAsset(log.video!)} /><Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(log.video!)} /></div> : null}
+                {log.video ? <div className="flex shrink-0 gap-1"><Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => onSaveAsset(log.video!)} /><Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(log.video!)} /></div> : null}
             </div>
             <Modal title="失败详情" open={detailOpen} width={760} onCancel={() => setDetailOpen(false)} footer={null}>
                 <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-md bg-stone-950 p-3 text-xs text-stone-100">{log.errorDetail || log.error || "没有详情"}</pre>
@@ -1979,7 +1942,7 @@ function HistoryLogCard({ log, index, selected, active, syncing, onSelectedChang
     );
 }
 
-function VideoMetaBar({ video, syncing, onDownload, onSync, onSaveAsset }: { video: GeneratedVideo; index: number; syncing: boolean; onDownload: (video: GeneratedVideo) => void; onSync: (video: GeneratedVideo) => void; onSaveAsset: (video: GeneratedVideo) => void }) {
+function VideoMetaBar({ video, onDownload, onSaveAsset }: { video: GeneratedVideo; index: number; onDownload: (video: GeneratedVideo) => void; onSaveAsset: (video: GeneratedVideo) => void }) {
     return (
         <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 border-t border-stone-200 px-2.5 py-2 dark:border-stone-800">
             <div className="flex min-w-0 flex-wrap gap-x-1.5 gap-y-1 text-[10px] text-stone-500 dark:text-stone-400">
@@ -1988,7 +1951,7 @@ function VideoMetaBar({ video, syncing, onDownload, onSync, onSaveAsset }: { vid
                 <span>{formatDuration(video.durationMs)}</span>
             </div>
             <div className="flex shrink-0 gap-1">
-                <Button size="small" title="同步到云端存储" icon={<CloudUpload className="size-3.5" />} loading={syncing} disabled={isCloudVideo(video)} onClick={() => onSync(video)} />
+
                 <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => onSaveAsset(video)} />
                 <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(video)} />
             </div>
@@ -2132,9 +2095,9 @@ async function persistStoredVideoLogs(logs: GenerationLog[]) {
     );
 }
 
-async function mergeVideoLogs(remoteLogs: GenerationLog[], localLogs: GenerationLog[]) {
-    const normalizedRemote = (await normalizeLogsSafely(remoteLogs)).filter(shouldSyncVideoLog);
-    const normalizedLocal = await normalizeLogsSafely(localLogs);
+async function mergeVideoLogs(remoteLogs: GenerationLog[], localLogs: GenerationLog[], scope: CanvasMediaScope) {
+    const normalizedRemote = (await normalizeLogsSafely(remoteLogs, scope)).filter(shouldSyncVideoLog);
+    const normalizedLocal = await normalizeLogsSafely(localLogs, scope);
     const remoteKeys = new Set(normalizedRemote.flatMap(videoLogIdentityKeys));
     const preservedLocal = normalizedLocal.filter((log) => shouldPreserveLocalLogDuringRemoteMerge(log, remoteKeys));
     return dedupeVideoLogs([...normalizedRemote, ...preservedLocal]);
@@ -2239,7 +2202,7 @@ function backendTaskToLog(task: VideoResponse, fallbackConfig: AiConfig): Genera
     const createdAt = parseTaskTimestamp(task.createdAt ?? task.created_at) || Date.now();
     const status = isFailedVideoTask(task) ? "失败" : isCompletedVideoTask(task) ? "成功" : "生成中";
     const durationMs = Math.max(0, Date.now() - createdAt);
-    const video = status === "成功" && (task.video_url || task.url) ? videoFromTaskResponse(task, durationMs) : undefined;
+    const video = status === "成功" && (task.video_url || task.url || task.storageKey) ? videoFromTaskResponse(task, durationMs) : undefined;
     return {
         id: `backend-${videoTaskIdentityKeys(task)[0] || nanoid()}`,
         createdAt,
@@ -2508,7 +2471,7 @@ function parseTaskVideoSize(value: unknown) {
 }
 
 function isCompletedVideoTask(task: VideoResponse) {
-    return Boolean(task.video_url || task.url) || ["completed", "complete", "done", "succeeded", "success"].includes((task.status || "").toLowerCase());
+    return Boolean(task.video_url || task.url || task.storageKey) || ["completed", "complete", "done", "succeeded", "success"].includes((task.status || "").toLowerCase());
 }
 
 function isFailedVideoTask(task: VideoResponse) {
@@ -2525,10 +2488,6 @@ function isRecoverableBackendVideoTask(task: VideoResponse) {
     return !isCompletedVideoTask(task) && !isFailedVideoTask(task);
 }
 
-function isCloudVideo(video: GeneratedVideo) {
-    return Boolean(video.storageKey);
-}
-
 function errorMessage(error: unknown) {
     return error instanceof Error ? error.message : "生成失败";
 }
@@ -2543,24 +2502,24 @@ function errorDetail(error: unknown) {
     }
 }
 
-async function readStoredLogs() {
+async function readStoredLogs(scope: CanvasMediaScope) {
     if (typeof window === "undefined") return [];
     try {
         const logs: GenerationLog[] = [];
         await logStore.iterate<GenerationLog, void>((value) => {
             logs.push(value);
         });
-        return (await normalizeLogsSafely(logs)).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        return (await normalizeLogsSafely(logs, scope)).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     } catch {
         return [];
     }
 }
 
-async function normalizeLogsSafely(logs: Array<Partial<GenerationLog>>) {
+async function normalizeLogsSafely(logs: Array<Partial<GenerationLog>>, scope: CanvasMediaScope) {
     const normalized = await Promise.all(
         logs.map(async (log) => {
             try {
-                return await normalizeLog(log);
+                return await normalizeLog(log, scope);
             } catch {
                 return null;
             }
@@ -2569,44 +2528,44 @@ async function normalizeLogsSafely(logs: Array<Partial<GenerationLog>>) {
     return normalized.filter((log): log is GenerationLog => Boolean(log));
 }
 
-async function safeResolveMediaUrl(storageKey: string, fallback: string) {
+async function safeResolveMediaUrl(storageKey: string, fallback: string, scope: CanvasMediaScope) {
     try {
-        return await resolveMediaUrl(storageKey, fallback);
+        return await scope.url(storageKey, fallback, false);
     } catch {
         return fallback;
     }
 }
 
-async function safeResolveImageUrl(storageKey: string | undefined, fallback: string) {
+async function safeResolveImageUrl(storageKey: string | undefined, fallback: string, scope: CanvasMediaScope) {
     try {
-        return await resolveImageUrl(storageKey, fallback);
+        return storageKey ? await scope.url(storageKey, fallback, true) : fallback;
     } catch {
         return fallback;
     }
 }
 
-async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog> {
-    const video = log.video?.storageKey ? { ...log.video, url: await safeResolveMediaUrl(log.video.storageKey, log.video.url) } : log.video;
+async function normalizeLog(log: Partial<GenerationLog>, scope: CanvasMediaScope): Promise<GenerationLog> {
+    const video = log.video?.storageKey ? { ...log.video, url: await safeResolveMediaUrl(log.video.storageKey, log.video.url, scope) } : log.video;
     const videoReferences = await Promise.all(
         (log.videoReferences || []).map(async (item) => ({
             ...item,
-            url: item.storageKey ? await safeResolveMediaUrl(item.storageKey, item.url) : item.url,
+            url: item.storageKey ? await safeResolveMediaUrl(item.storageKey, item.url, scope) : item.url,
         })),
     );
     const audioReferences = await Promise.all(
         (log.audioReferences || []).map(async (item) => ({
             ...item,
-            url: item.storageKey ? await safeResolveMediaUrl(item.storageKey, item.url) : item.url,
+            url: item.storageKey ? await safeResolveMediaUrl(item.storageKey, item.url, scope) : item.url,
         })),
     );
     const references = await Promise.all(
         (log.references || []).map(async (item) => ({
             ...item,
-            dataUrl: await safeResolveImageUrl(item.storageKey, item.dataUrl),
+            dataUrl: await safeResolveImageUrl(item.storageKey, item.dataUrl, scope),
         })),
     );
-    const firstFrame = log.firstFrame ? { ...log.firstFrame, dataUrl: await safeResolveImageUrl(log.firstFrame.storageKey, log.firstFrame.dataUrl) } : null;
-    const lastFrame = log.lastFrame ? { ...log.lastFrame, dataUrl: await safeResolveImageUrl(log.lastFrame.storageKey, log.lastFrame.dataUrl) } : null;
+    const firstFrame = log.firstFrame ? { ...log.firstFrame, dataUrl: await safeResolveImageUrl(log.firstFrame.storageKey, log.firstFrame.dataUrl, scope) } : null;
+    const lastFrame = log.lastFrame ? { ...log.lastFrame, dataUrl: await safeResolveImageUrl(log.lastFrame.storageKey, log.lastFrame.dataUrl, scope) } : null;
     const config = normalizeLogConfig(log);
     return {
         id: log.id || nanoid(),
@@ -2995,4 +2954,9 @@ function buildResumeVideoConfig(config: AiConfig, log: GenerationLog): AiConfig 
 
 function videoLogTaskId(log: GenerationLog) {
     return log.task?.id || log.task?.video_id || log.task?.task_id || "";
+}
+
+function StoredVideo({ video, className }: { video: { url: string; storageKey?: string }; className: string }) {
+    const source = useStoredMediaSource({ storageKey: video.storageKey, fallback: video.url, image: false });
+    return <video src={source.src || undefined} controls className={className} />;
 }

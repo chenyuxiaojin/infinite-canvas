@@ -17,4 +17,5 @@ export type CanvasExportAsset = {
     path: string;
     mimeType: string;
     bytes: number;
+    sha256?: string;
 };

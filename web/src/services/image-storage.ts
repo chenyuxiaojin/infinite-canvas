@@ -1,6 +1,8 @@
 "use client";
 
 import localforage from "localforage";
+import { isTauri } from "@tauri-apps/api/core";
+import { StoredObjectUrlCache } from "./stored-object-url-cache";
 
 import { nanoid } from "nanoid";
 import { readImageMeta } from "@/lib/image-utils";
@@ -44,6 +46,7 @@ export type UserStorageProvider = UserS3StorageProvider | UserWebDAVStorageProvi
 
 type UploadImageOptions = {
     localOnly?: boolean;
+    retainDisplayUrl?: boolean;
 };
 
 export type StorageConfig = {
@@ -53,7 +56,7 @@ export type StorageConfig = {
 };
 
 const store = localforage.createInstance({ name: "infinite-canvas", storeName: "image_files" });
-const objectUrls = new Map<string, string>();
+const objectUrls = new StoredObjectUrlCache();
 const serverUrls = new Map<string, string>();
 export const USER_STORAGE_PROVIDER_KEY = "infinite-canvas:user_storage_provider";
 export const USER_WEBDAV_STORAGE_PROVIDER_KEY = "infinite-canvas:user_webdav_storage_provider";
@@ -137,16 +140,19 @@ export async function uploadImage(input: string | Blob, options: UploadImageOpti
     } else {
         blob = url;
     }
-    if (!options.localOnly) {
+    // 新素材默认保存在本机；旧对象存储配置仅供已有素材读取。
+    if (options.localOnly === false) {
         const serverUpload = await maybeUploadImageToServer(blob);
         if (serverUpload) return serverUpload;
     }
     const storageKey = `image:${nanoid()}`;
     await store.setItem(storageKey, blob);
     const urlObj = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, urlObj);
-    const meta = await readImageMeta(urlObj);
-    return { url: urlObj, storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: blob.type || meta.mimeType };
+    try {
+        const meta = await readImageMeta(urlObj);
+        if (options.retainDisplayUrl !== false) objectUrls.set(storageKey, urlObj, blob.size);
+        return { url: options.retainDisplayUrl === false ? "" : urlObj, storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: blob.type || meta.mimeType };
+    } finally { if (options.retainDisplayUrl === false) URL.revokeObjectURL(urlObj); }
 }
 
 export async function uploadRemoteImageToServer(url: string, filename: string): Promise<UploadedImage> {
@@ -227,8 +233,10 @@ async function resolveLocalImageUrl(storageKey: string) {
     if (cached) return cached;
     const blob = await store.getItem<Blob>(storageKey);
     if (!blob) return "";
+    const existing = objectUrls.get(storageKey);
+    if (existing) return existing;
     const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
+    objectUrls.set(storageKey, url, blob.size);
     return url;
 }
 
@@ -278,7 +286,7 @@ async function uploadWebDAVImageDirect(blob: Blob, filename: string, provider: U
 async function cacheAnonymousImage(uploaded: UploadedImage, blob: Blob) {
     await store.setItem(uploaded.storageKey, blob);
     const url = URL.createObjectURL(blob);
-    objectUrls.set(uploaded.storageKey, url);
+    objectUrls.set(uploaded.storageKey, url, blob.size);
     if (uploaded.storageKey.startsWith("server:") && uploaded.url && !uploaded.url.includes("direct=1")) serverUrls.set(uploaded.storageKey.slice("server:".length), uploaded.url);
     const meta = await readImageMeta(url);
     return { ...uploaded, url, width: uploaded.width || meta.width, height: uploaded.height || meta.height, mimeType: uploaded.mimeType || blob.type || meta.mimeType, bytes: uploaded.bytes || blob.size };
@@ -299,16 +307,21 @@ export async function getImageBlob(storageKey: string) {
     return store.getItem<Blob>(storageKey);
 }
 
-export async function setImageBlob(storageKey: string, blob: Blob) {
+export async function setImageBlob(storageKey: string, blob: Blob, retainDisplayUrl = true) {
     await store.setItem(storageKey, blob);
-    const previous = objectUrls.get(storageKey);
-    if (previous) URL.revokeObjectURL(previous);
+    if (!retainDisplayUrl) return "";
     const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
+    objectUrls.set(storageKey, url, blob.size);
     return url;
 }
 
 export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string }) {
+    // Agent/export-style reads consume original bytes, not a display URL whose
+    // lifetime is owned by a mounted preview.
+    if (image.storageKey) {
+        const original = await store.getItem<Blob>(image.storageKey).catch(() => null);
+        if (original) return blobToDataUrl(original);
+    }
     const serverObjectId = image.storageKey?.startsWith("server:") ? image.storageKey.slice("server:".length) : "";
     const directGuestObject = image.storageKey?.startsWith("server:webdav:");
     const hasPersistedUrl = [image.dataUrl, image.url].some((url) => Boolean(url && !url.startsWith("blob:")));
@@ -318,6 +331,8 @@ export async function imageToDataUrl(image: { url?: string; dataUrl?: string; st
     const resolvedUrl = image.storageKey
         ? await resolveImageUrl(image.storageKey, image.url || image.dataUrl || "")
         : "";
+    const lease = image.storageKey ? objectUrls.adopt(image.storageKey) : undefined;
+    try {
     const urls = [
         image.dataUrl && !image.dataUrl.startsWith("blob:") ? image.dataUrl : "",
         image.url && !image.url.startsWith("blob:") ? image.url : "",
@@ -342,9 +357,13 @@ export async function imageToDataUrl(image: { url?: string; dataUrl?: string; st
         }
     }
     throw new Error(lastError || "读取参考图失败");
+    } finally { lease?.release(); }
 }
 
 export async function deleteStoredImages(keys: Iterable<string>) {
+    // Desktop version history owns stable references beyond the current canvas.
+    // Removing a card is not permission to destroy its original media bytes.
+    if (isTauri()) return;
     const { useAssetStore } = await import("@/stores/use-asset-store");
     const assetKeys = new Set(
         useAssetStore.getState().assets
@@ -358,8 +377,6 @@ export async function deleteStoredImages(keys: Iterable<string>) {
                 await deleteServerImage(key);
                 return;
             }
-            const url = objectUrls.get(key);
-            if (url) URL.revokeObjectURL(url);
             objectUrls.delete(key);
             await store.removeItem(key);
         }),
@@ -367,6 +384,9 @@ export async function deleteStoredImages(keys: Iterable<string>) {
 }
 
 export async function cleanupUnusedImages(usedData: unknown) {
+    // Desktop version history owns stable references beyond the current canvas.
+    // Removing a card is not permission to destroy its original media bytes.
+    if (isTauri()) return;
     const usedKeys = collectImageStorageKeys(usedData);
     const unused: string[] = [];
     await store.iterate((_value, key) => {
@@ -494,8 +514,6 @@ async function deleteServerImage(storageKey: string) {
     if (provider?.type === "webdav") {
         const direct = await import("@/services/webdav-direct-storage");
         if (await direct.deletePersistedDirectWebDAV(provider, storageKey)) {
-            const url = objectUrls.get(storageKey);
-            if (url) URL.revokeObjectURL(url);
             objectUrls.delete(storageKey);
             await store.removeItem(storageKey);
             return;
@@ -504,8 +522,6 @@ async function deleteServerImage(storageKey: string) {
     if (!token) {
         if (!provider) return;
         await deleteAnonymousStorageFile(id, toProviderPayload(provider));
-        const url = objectUrls.get(storageKey);
-        if (url) URL.revokeObjectURL(url);
         objectUrls.delete(storageKey);
         await store.removeItem(storageKey);
         return;
@@ -526,4 +542,12 @@ function blobToDataUrl(blob: Blob) {
         reader.onerror = () => reject(new Error("读取图片失败"));
         reader.readAsDataURL(blob);
     });
+}
+
+export function leaseStoredImageBlob(storageKey: string, blob: Blob) {
+    return objectUrls.acquire(storageKey, blob);
+}
+
+export function adoptStoredImageUrl(storageKey: string) {
+    return objectUrls.adopt(storageKey);
 }

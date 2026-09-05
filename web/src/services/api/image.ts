@@ -1,3 +1,4 @@
+import { mediaPublicUrl } from "@/services/media-public-url";
 import axios from "axios";
 
 import { isMiniMaxChannel, miniMaxModels } from "@/lib/minimax-video";
@@ -5,7 +6,7 @@ import { dataUrlToFile } from "@/lib/image-utils";
 import { isKIESeedreamLayerDecompositionModel } from "@/lib/kie-models";
 import { isMimoChannel, mimoModels } from "@/lib/mimo-tts";
 import { dataUrlToGeminiInlineData, geminiActionUrl, geminiDirectHeaders, geminiErrorMessage, isGeminiConfig, normalizeGeminiBaseUrl } from "@/lib/gemini";
-import { imageToDataUrl, resolveImageUrl } from "@/services/image-storage";
+import { imageToDataUrl } from "@/services/image-storage";
 import { buildApiUrl, channelIdForActiveModel, channelProtocolForConfig, directAIProviderForConfig, localChannelForActiveModel, type AiConfig } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
 import type { ReferenceImage } from "@/types/image";
@@ -1064,7 +1065,7 @@ async function createCanvasImageTaskRequest(config: AiConfig & { seedIndex?: num
     if (references.length && isAgnesImageModel(config.model)) {
         const imageUrls = await Promise.all(
             references.map(async (ref) => {
-                const resolvedUrl = await resolveImageUrl(ref.storageKey, "");
+                const resolvedUrl = await mediaPublicUrl(ref.storageKey);
                 for (const url of [ref.dataUrl, ref.url, resolvedUrl]) {
                     const publicUrl = publicHttpUrl(url);
                     if (publicUrl) return publicUrl;
@@ -1458,7 +1459,7 @@ async function requestAgnesImageEdit(config: AiConfig & { seedIndex?: number; se
     // 获取所有参考图的公共 HTTP 链接或降级为 base64 数组，完美对齐 extra_body.image
     const imageUrls = await Promise.all(
         references.map(async (ref) => {
-            const resolvedUrl = await resolveImageUrl(ref.storageKey, "");
+            const resolvedUrl = await mediaPublicUrl(ref.storageKey);
             for (const url of [ref.dataUrl, ref.url, resolvedUrl]) {
                 const publicUrl = publicHttpUrl(url);
                 if (publicUrl) return publicUrl;

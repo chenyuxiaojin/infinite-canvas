@@ -1,45 +1,29 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { App, Button, Empty, Input, Modal, Pagination, Spin, Tabs, Tag } from "antd";
+import { App, Button, Empty, Input, Modal, Pagination, Spin, Tag } from "antd";
 import { ImagePlus, Plus, Search } from "lucide-react";
 
+import { useStoredMediaSource } from "@/hooks/use-stored-media-source";
+import { assetMediaReference } from "@/services/asset-media-reference";
 import { cn } from "@/lib/utils";
 import { useAssetStore, type Asset } from "@/stores/use-asset-store";
-import { fetchAssetLibrary, type AssetLibraryItem } from "@/services/api/assets";
 import { uploadAssetMediaFile } from "@/services/file-storage";
 import { uploadImage } from "@/services/image-storage";
 import type { InsertAssetPayload } from "../types";
 
 export type { InsertAssetPayload } from "../types";
 
-export type AssetPickerTab = "my-assets" | "library";
-
 type Props = {
     open: boolean;
-    defaultTab?: AssetPickerTab;
     onInsert: (payload: InsertAssetPayload) => void;
     onClose: () => void;
 };
 
-export function AssetPickerModal({ open, defaultTab = "my-assets", onInsert, onClose }: Props) {
-    const [activeTab, setActiveTab] = useState<AssetPickerTab>(defaultTab);
-
-    useEffect(() => {
-        if (open) setActiveTab(defaultTab);
-    }, [open, defaultTab]);
-
+export function AssetPickerModal({ open, onInsert, onClose }: Props) {
     return (
-        <Modal title="选择素材" open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden styles={{ body: { padding: "0 24px 24px", minHeight: 480 } }}>
-            <Tabs
-                activeKey={activeTab}
-                onChange={(key) => setActiveTab(key as AssetPickerTab)}
-                items={[
-                    { key: "my-assets", label: "我的素材", children: <MyAssetsTab onInsert={onInsert} /> },
-                    { key: "library", label: "素材库", children: <LibraryTab onInsert={onInsert} /> },
-                ]}
-            />
+        <Modal title="我的素材" open={open} onCancel={onClose} footer={null} width={860} destroyOnHidden styles={{ body: { padding: "0 24px 24px", minHeight: 480 } }}>
+            <MyAssetsTab onInsert={onInsert} />
         </Modal>
     );
 }
@@ -54,105 +38,14 @@ const kindOptions = [
     { label: "音频", value: "audio" },
 ];
 
-function LibraryTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => void }) {
-    const { message } = App.useApp();
-    const [keyword, setKeyword] = useState("");
-    const [kindFilter, setKindFilter] = useState("");
-    const [page, setPage] = useState(1);
-    const [inserting, setInserting] = useState<string | null>(null);
-
-    const query = useQuery({
-        queryKey: ["asset-picker-library", keyword, kindFilter, page],
-        queryFn: () => fetchAssetLibrary({ keyword, type: kindFilter, page, pageSize: PAGE_SIZE }),
-        retry: false,
-    });
-
-    const items = query.data?.items || [];
-    const total = query.data?.total || 0;
-
-    const handleInsert = async (asset: AssetLibraryItem) => {
-        try {
-            setInserting(asset.id);
-            if (asset.type === "text") {
-                onInsert({ kind: "text", content: asset.content, title: asset.title, source: "library" });
-            } else if (asset.type === "video") {
-                onInsert({ kind: "video", url: asset.url, title: asset.title, source: "library" });
-            } else if (asset.type === "audio") {
-                onInsert({ kind: "audio", url: asset.url, title: asset.title, source: "library" });
-            } else {
-                onInsert({ kind: "image", dataUrl: asset.url, title: asset.title, source: "library" });
-            }
-        } catch {
-            message.error("插入失败");
-        } finally {
-            setInserting(null);
-        }
-    };
-
-    return (
-        <div className="space-y-4">
-            <div className="flex flex-wrap items-center gap-3">
-                <Input
-                    className="w-56"
-                    size="small"
-                    prefix={<Search className="size-3.5 text-stone-400" />}
-                    placeholder="搜索素材"
-                    value={keyword}
-                    allowClear
-                    onChange={(e) => {
-                        setPage(1);
-                        setKeyword(e.target.value);
-                    }}
-                />
-                <div className="flex gap-1.5">
-                    {[
-                        { label: "全部", value: "" },
-                        { label: "文本", value: "text" },
-                        { label: "图片", value: "image" },
-                        { label: "视频", value: "video" },
-                        { label: "音频", value: "audio" },
-                    ].map((opt) => (
-                        <Tag.CheckableTag
-                            key={opt.value || "all"}
-                            checked={kindFilter === opt.value}
-                            className={cn("prompt-filter-tag", kindFilter === opt.value && "is-active")}
-                            onChange={() => {
-                                setPage(1);
-                                setKindFilter(opt.value);
-                            }}
-                        >
-                            {opt.label}
-                        </Tag.CheckableTag>
-                    ))}
-                </div>
-            </div>
-
-            {query.isLoading ? (
-                <div className="flex justify-center py-16">
-                    <Spin />
-                </div>
-            ) : items.length ? (
-                <div className="grid grid-cols-4 gap-3">
-                    {items.map((asset) => (
-                        <PickerCard key={asset.id} title={asset.title} kind={asset.type} cover={asset.coverUrl} loading={inserting === asset.id} onClick={() => void handleInsert(asset)} />
-                    ))}
-                </div>
-            ) : (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有素材" className="py-12" />
-            )}
-
-            {total > PAGE_SIZE && (
-                <div className="flex justify-center">
-                    <Pagination size="small" current={page} pageSize={PAGE_SIZE} total={total} onChange={setPage} showSizeChanger={false} />
-                </div>
-            )}
-        </div>
-    );
-}
-
-function PickerCard({ title, kind, cover, loading, onClick }: { title: string; kind: string; cover: string; loading?: boolean; onClick: () => void }) {
+function PickerCard({ asset, loading, onClick }: { asset: Asset; loading?: boolean; onClick: () => void }) {
+    const { title, kind } = asset;
+    const reference = assetMediaReference(asset, true);
+    const source = useStoredMediaSource({ ...reference, observe: true });
+    const cover = reference.image ? source.src : "";
     return (
         <button
+            ref={source.ref}
             type="button"
             className="group relative cursor-pointer overflow-hidden rounded-lg border border-stone-200 bg-white text-left transition hover:border-stone-400 hover:shadow-md dark:border-stone-700 dark:bg-stone-900 dark:hover:border-stone-500"
             onClick={onClick}
@@ -252,7 +145,7 @@ function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => 
                     message.error("请选择图片或填写图片 URL");
                     return;
                 }
-                const stored = selectedFile ? await uploadImage(selectedFile) : null;
+                const stored = selectedFile ? await uploadImage(selectedFile, { retainDisplayUrl: false }) : null;
                 addAsset({
                     kind: "image",
                     title,
@@ -266,7 +159,7 @@ function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => 
                     message.error("请选择视频或填写视频 URL");
                     return;
                 }
-                const stored = selectedFile ? await uploadAssetMediaFile(selectedFile, "asset-video") : null;
+                const stored = selectedFile ? await uploadAssetMediaFile(selectedFile, "asset-video", false) : null;
                 addAsset({
                     kind: "video",
                     title,
@@ -282,7 +175,7 @@ function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => 
                     message.error("请选择音频或填写音频 URL");
                     return;
                 }
-                const stored = selectedFile ? await uploadAssetMediaFile(selectedFile, "asset-audio") : null;
+                const stored = selectedFile ? await uploadAssetMediaFile(selectedFile, "asset-audio", false) : null;
                 addAsset({
                     kind: "audio",
                     title,
@@ -340,7 +233,7 @@ function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => 
             {visible.length ? (
                 <div className="grid grid-cols-4 gap-3">
                     {visible.map((asset) => (
-                        <PickerCard key={asset.id} title={asset.title} kind={asset.kind} cover={asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "")} onClick={() => handleInsert(asset)} />
+                        <PickerCard key={asset.id} asset={asset} onClick={() => handleInsert(asset)} />
                     ))}
                 </div>
             ) : (
