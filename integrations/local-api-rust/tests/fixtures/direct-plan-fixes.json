@@ -1,0 +1,253 @@
+[
+  {
+    "case": 11,
+    "input": {
+      "channel": {
+        "protocol": "kie",
+        "baseUrl": "https://api.kie.ai"
+      },
+      "model": "gemini-omni-video",
+      "endpoint": "/videos",
+      "body": {
+        "audio_url": "https://direct-reference.invalid/run/audio/3",
+        "custom_field": {
+          "keep": true
+        },
+        "image_urls": [
+          "https://direct-reference.invalid/run/image/0",
+          "https://direct-reference.invalid/run/image/1"
+        ],
+        "negative_prompt": "bad",
+        "prompt": "test",
+        "video_urls": [
+          "https://direct-reference.invalid/run/video/2"
+        ]
+      }
+    },
+    "plan": {
+      "provider": "kie",
+      "url": "https://api.kie.ai/v1/jobs/createTask",
+      "contentType": "application/json",
+      "body": {
+        "input": {
+          "audio_url": [
+            "https://direct-reference.invalid/run/audio/3"
+          ],
+          "custom_field": {
+            "keep": true
+          },
+          "image_urls": [
+            "https://direct-reference.invalid/run/image/0",
+            "https://direct-reference.invalid/run/image/1"
+          ],
+          "negative_prompt": "bad",
+          "prompt": "test",
+          "video_urls": [
+            {
+              "url": "https://direct-reference.invalid/run/video/2",
+              "start": 0,
+              "ends": 10
+            }
+          ]
+        },
+        "model": "gemini-omni-video"
+      },
+      "uploads": {
+        "audio": {
+          "url": "https://kieai.redpandaai.co/api/file-stream-upload",
+          "fileField": "file",
+          "fileNameField": "fileName",
+          "extraFields": {
+            "uploadPath": "audios/user-uploads"
+          },
+          "responsePaths": [
+            "data.downloadUrl",
+            "data.fileUrl",
+            "data.url"
+          ]
+        },
+        "image": {
+          "url": "https://kieai.redpandaai.co/api/file-stream-upload",
+          "fileField": "file",
+          "fileNameField": "fileName",
+          "extraFields": {
+            "uploadPath": "images/user-uploads"
+          },
+          "responsePaths": [
+            "data.downloadUrl",
+            "data.fileUrl",
+            "data.url"
+          ]
+        },
+        "video": {
+          "url": "https://kieai.redpandaai.co/api/file-stream-upload",
+          "fileField": "file",
+          "fileNameField": "fileName",
+          "extraFields": {
+            "uploadPath": "videos/user-uploads"
+          },
+          "responsePaths": [
+            "data.downloadUrl",
+            "data.fileUrl",
+            "data.url"
+          ]
+        }
+      }
+    },
+    "reason": "Fix legacy double serialization of a structured video reference into its URL."
+  },
+  {
+    "case": 9,
+    "input": {
+      "channel": {
+        "protocol": "kie",
+        "baseUrl": "https://api.kie.ai"
+      },
+      "model": "kling-3.0/video",
+      "endpoint": "/videos",
+      "body": {
+        "element_list": [
+          {
+            "element_input_urls": [
+              "https://direct-reference.invalid/run/image/0",
+              "https://direct-reference.invalid/run/image/1"
+            ],
+            "name": "role"
+          }
+        ],
+        "mode": "pro",
+        "multi_prompt": [
+          {
+            "duration": "20",
+            "prompt": "shot1"
+          }
+        ],
+        "multi_shot": true,
+        "prompt": "test",
+        "shot_type": "customize"
+      }
+    },
+    "plan": {
+      "provider": "kie",
+      "url": "https://api.kie.ai/v1/jobs/createTask",
+      "contentType": "application/json",
+      "body": {
+        "input": {
+          "mode": "pro",
+          "multi_prompt": [
+            {
+              "duration": 12,
+              "prompt": "shot1"
+            }
+          ],
+          "multi_shots": true,
+          "prompt": "test",
+          "kling_elements": [
+            {
+              "name": "role",
+              "description": "",
+              "element_input_urls": [
+                "https://direct-reference.invalid/run/image/0",
+                "https://direct-reference.invalid/run/image/1"
+              ]
+            }
+          ]
+        },
+        "model": "kling-3.0/video"
+      },
+      "uploads": {
+        "image": {
+          "url": "https://kieai.redpandaai.co/api/file-stream-upload",
+          "fileField": "file",
+          "fileNameField": "fileName",
+          "extraFields": {
+            "uploadPath": "images/user-uploads"
+          },
+          "responsePaths": [
+            "data.downloadUrl",
+            "data.fileUrl",
+            "data.url"
+          ]
+        }
+      }
+    },
+    "reason": "Fix legacy loss of explicitly supplied Kling role elements during second normalization."
+  },
+  {
+    "case": 9,
+    "input": {
+      "channel": {
+        "protocol": "kie",
+        "baseUrl": "https://api.kie.ai"
+      },
+      "model": "kling/kling-3-0",
+      "endpoint": "/videos",
+      "body": {
+        "element_list": [
+          {
+            "element_input_urls": [
+              "https://direct-reference.invalid/run/image/0",
+              "https://direct-reference.invalid/run/image/1"
+            ],
+            "name": "role"
+          }
+        ],
+        "mode": "pro",
+        "multi_prompt": [
+          {
+            "duration": "20",
+            "prompt": "shot1"
+          }
+        ],
+        "multi_shot": true,
+        "prompt": "test",
+        "shot_type": "customize"
+      }
+    },
+    "plan": {
+      "provider": "kie",
+      "url": "https://api.kie.ai/v1/jobs/createTask",
+      "contentType": "application/json",
+      "body": {
+        "input": {
+          "mode": "pro",
+          "multi_prompt": [
+            {
+              "duration": 12,
+              "prompt": "shot1"
+            }
+          ],
+          "multi_shots": true,
+          "prompt": "test",
+          "kling_elements": [
+            {
+              "name": "role",
+              "description": "",
+              "element_input_urls": [
+                "https://direct-reference.invalid/run/image/0",
+                "https://direct-reference.invalid/run/image/1"
+              ]
+            }
+          ]
+        },
+        "model": "kling-3.0/video"
+      },
+      "uploads": {
+        "image": {
+          "url": "https://kieai.redpandaai.co/api/file-stream-upload",
+          "fileField": "file",
+          "fileNameField": "fileName",
+          "extraFields": {
+            "uploadPath": "images/user-uploads"
+          },
+          "responsePaths": [
+            "data.downloadUrl",
+            "data.fileUrl",
+            "data.url"
+          ]
+        }
+      }
+    },
+    "reason": "Fix legacy loss of explicitly supplied Kling role elements during second normalization."
+  }
+]

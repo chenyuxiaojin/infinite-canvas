@@ -1,0 +1,107 @@
+[
+  {
+    "category": "system",
+    "name": "系统",
+    "description": "系统提示词分类",
+    "enabled": true
+  },
+  {
+    "category": "local-awesome-video-prompts",
+    "name": "Awesome Video Prompts (精选影视视频提示词)",
+    "description": "高质量镜头、运镜与影视级视频提示词",
+    "sourceType": "local_markdown",
+    "pathOrUrl": "/Users/chenhuajin/项目/视频制作台/AI编导/参考仓库/awesome-video-prompts/README.md",
+    "remote": false,
+    "enabled": true
+  },
+  {
+    "category": "local-seedance-cinematography",
+    "name": "Seedance 运镜与镜头设计",
+    "description": "运镜机位、焦段景别与镜头语言提示词",
+    "sourceType": "local_markdown",
+    "pathOrUrl": "/Users/chenhuajin/项目/视频制作台/AI编导/参考仓库/Seedance-ShotDesign-Skills/references/cinematography.md",
+    "remote": false,
+    "enabled": true
+  },
+  {
+    "category": "local-seedance-scenarios",
+    "name": "Seedance 经典叙事场景库",
+    "description": "各类题材经典分镜场景与画面描写",
+    "sourceType": "local_markdown",
+    "pathOrUrl": "/Users/chenhuajin/项目/视频制作台/AI编导/参考仓库/Seedance-ShotDesign-Skills/references/scenarios.md",
+    "remote": false,
+    "enabled": true
+  },
+  {
+    "category": "local-minimax-h3",
+    "name": "MiniMax H3 视频生成提示词",
+    "description": "H3 官方模型推荐提示词与运镜规范",
+    "sourceType": "local_markdown",
+    "pathOrUrl": "/Users/chenhuajin/项目/视频制作台/AI编导/参考仓库/MiniMax-H3/README.zh-CN.md",
+    "remote": false,
+    "enabled": true
+  },
+  {
+    "category": "gpt-image-2-prompts",
+    "name": "GPT Image 2 Prompts",
+    "description": "TigerOWO 的 GPT Image 2 案例提示词分类",
+    "githubUrl": "https://github.com/tigerowo/awesome-gpt-image-2-prompts",
+    "sourceType": "remote_github",
+    "remote": true,
+    "enabled": true
+  },
+  {
+    "category": "awesome-gpt-image",
+    "name": "Awesome GPT Image",
+    "description": "ZeroLu 的中文 GPT Image 提示词分类",
+    "githubUrl": "https://github.com/ZeroLu/awesome-gpt-image",
+    "sourceType": "remote_github",
+    "remote": true,
+    "enabled": true
+  },
+  {
+    "category": "awesome-gpt4o-image-prompts",
+    "name": "Awesome GPT4o Image Prompts",
+    "description": "ImgEdify 的 GPT-4o 图像提示词分类",
+    "githubUrl": "https://github.com/ImgEdify/Awesome-GPT4o-Image-Prompts",
+    "sourceType": "remote_github",
+    "remote": true,
+    "enabled": true
+  },
+  {
+    "category": "xianyu-awesome-gptimage2",
+    "name": "Xianyu Awesome GPT Image 2",
+    "description": "xianyu110 的 GPT Image 2 提示词分类",
+    "githubUrl": "https://github.com/xianyu110/awesome-gptimage2",
+    "sourceType": "remote_github",
+    "remote": true,
+    "enabled": true
+  },
+  {
+    "category": "youmind-gpt-image-2",
+    "name": "YouMind GPT Image 2",
+    "description": "YouMind OpenLab 的 GPT Image 2 中文提示词分类",
+    "githubUrl": "https://github.com/YouMind-OpenLab/awesome-gpt-image-2",
+    "sourceType": "remote_github",
+    "remote": true,
+    "enabled": true
+  },
+  {
+    "category": "youmind-nano-banana-pro",
+    "name": "YouMind Nano Banana Pro",
+    "description": "YouMind OpenLab 的 Nano Banana Pro 中文提示词分类",
+    "githubUrl": "https://github.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts",
+    "sourceType": "remote_github",
+    "remote": true,
+    "enabled": true
+  },
+  {
+    "category": "davidwu-gpt-image2-prompts",
+    "name": "awesome-gpt-image2-prompts",
+    "description": "davidwuw0811-boop 整理的 GPT Image 2 提示词分类",
+    "githubUrl": "https://github.com/davidwuw0811-boop/awesome-gpt-image2-prompts",
+    "sourceType": "remote_github",
+    "remote": true,
+    "enabled": true
+  }
+]

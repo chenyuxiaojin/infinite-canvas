@@ -1,0 +1,245 @@
+{
+  "kling-3.0-omni/text-to-video": [
+    [
+      "prompt"
+    ]
+  ],
+  "kling-3.0-omni/image-to-video": [
+    [
+      "image_urls"
+    ]
+  ],
+  "kling-3.0-omni/reference-to-video": [
+    [
+      "image_urls",
+      "video_urls",
+      "elements"
+    ]
+  ],
+  "kling-3.0-omni/transformation": [
+    [
+      "video_urls"
+    ]
+  ],
+  "kling/v3-turbo-text-to-video": [
+    [
+      "prompt"
+    ]
+  ],
+  "bytedance/seedance-2-mini": [
+    [
+      "prompt"
+    ]
+  ],
+  "happyhorse-1-1/text-to-video": [
+    [
+      "prompt"
+    ]
+  ],
+  "kling/v3-turbo-image-to-video": [
+    [
+      "image_urls"
+    ]
+  ],
+  "happyhorse-1-1/image-to-video": [
+    [
+      "image_urls"
+    ]
+  ],
+  "happyhorse-1-1/reference-to-video": [
+    [
+      "reference_image"
+    ]
+  ],
+  "flux-2/flex-image-to-image": [
+    [
+      "input_urls"
+    ]
+  ],
+  "flux-2/pro-image-to-image": [
+    [
+      "input_urls"
+    ]
+  ],
+  "gpt-image-2-image-to-image": [
+    [
+      "input_urls"
+    ]
+  ],
+  "gpt-image/1.5-image-to-image": [
+    [
+      "input_urls"
+    ]
+  ],
+  "google/nano-banana-edit": [
+    [
+      "image_urls"
+    ]
+  ],
+  "grok-imagine/image-to-image": [
+    [
+      "image_urls"
+    ]
+  ],
+  "seedream/4.5-edit": [
+    [
+      "image_urls"
+    ]
+  ],
+  "seedream/5-lite-image-to-image": [
+    [
+      "image_urls"
+    ]
+  ],
+  "seedream/5-pro-image-to-image": [
+    [
+      "image_urls"
+    ]
+  ],
+  "bytedance/seedream-v4-edit": [
+    [
+      "image_urls"
+    ]
+  ],
+  "qwen/image-to-image": [
+    [
+      "image_url"
+    ]
+  ],
+  "qwen/image-edit": [
+    [
+      "image_url"
+    ]
+  ],
+  "qwen2/image-edit": [
+    [
+      "image_url"
+    ]
+  ],
+  "ideogram/v3-remix": [
+    [
+      "image_url"
+    ]
+  ],
+  "seedream/5-pro-layer-decomposition": [
+    [
+      "image_url"
+    ]
+  ],
+  "ideogram/character": [
+    [
+      "reference_image_urls"
+    ]
+  ],
+  "ideogram/v3-edit": [
+    [
+      "image_url"
+    ],
+    [
+      "mask_url"
+    ]
+  ],
+  "ideogram/character-edit": [
+    [
+      "image_url"
+    ],
+    [
+      "mask_url"
+    ],
+    [
+      "reference_image_urls"
+    ]
+  ],
+  "ideogram/character-remix": [
+    [
+      "image_url"
+    ],
+    [
+      "reference_image_urls"
+    ]
+  ],
+  "topaz/image-upscale": [
+    [
+      "image_url"
+    ]
+  ],
+  "recraft/crisp-upscale": [
+    [
+      "image"
+    ]
+  ],
+  "recraft/remove-background": [
+    [
+      "image"
+    ]
+  ],
+  "topaz/video-upscale": [
+    [
+      "video_url"
+    ]
+  ],
+  "infinitalk/from-audio": [
+    [
+      "image_url"
+    ],
+    [
+      "audio_url"
+    ]
+  ],
+  "kling/ai-avatar-standard": [
+    [
+      "image_url"
+    ],
+    [
+      "audio_url"
+    ]
+  ],
+  "kling/ai-avatar-pro": [
+    [
+      "image_url"
+    ],
+    [
+      "audio_url"
+    ]
+  ],
+  "wan/2-2-a14b-speech-to-video-turbo": [
+    [
+      "image_url"
+    ],
+    [
+      "audio_url"
+    ]
+  ],
+  "wan/2-7-videoedit": [
+    [
+      "video_url"
+    ]
+  ],
+  "wan/2-7-r2v": [
+    [
+      "reference_image",
+      "reference_video"
+    ]
+  ],
+  "kling-2.6/motion-control": [
+    [
+      "input_urls"
+    ],
+    [
+      "video_urls"
+    ]
+  ],
+  "kling-3.0/motion-control": [
+    [
+      "input_urls"
+    ],
+    [
+      "video_urls"
+    ]
+  ],
+  "happyhorse/reference-to-video": [
+    [
+      "reference_image"
+    ]
+  ]
+}

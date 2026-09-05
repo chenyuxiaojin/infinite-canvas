@@ -1,0 +1,33 @@
+[package]
+name = "infinite-canvas-local-api"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Rust local business API for the personal Infinite Canvas desktop"
+
+[[bin]]
+name = "infinite-canvas-api"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7.9"
+tokio = { version = "1.43.0", features = ["macros", "net", "rt-multi-thread", "sync", "time", "signal"] }
+rusqlite = { version = "0.32.1", features = ["bundled", "backup"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"
+time = { version = "=0.3.37", features = ["formatting", "parsing"] }
+ureq = { version = "2.12.1", features = ["json"] }
+url = "2.5.4"
+regex = "1.13.1"
+futures-util = "0.3"
+chrono = "0.4.45"
+croner = "=3.0.1"
+tower-http = { version = "0.6", features = ["fs"] }
+tower = { version = "0.5", features = ["util"] }
+
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "stream"] }
+
+[dev-dependencies]
+tempfile = "3"

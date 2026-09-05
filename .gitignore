@@ -11,3 +11,5 @@ data/
 .idea
 /integrations/local-ai-audio-rust/.acceptance/
 /integrations/local-ai-audio-rust/target/
+/integrations/local-api-rust/target/
+/docs/progress/fixtures/canvas-audit-multimedia-v1.zip
