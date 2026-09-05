@@ -22,6 +22,9 @@ description: 当前后端主要数据表与字段说明
 - `users`
 - `credit_logs`
 - `prompts`
+- `prompt_categories`
+- `prompt_catalogs`
+- `prompt_favorites`
 - `assets`
 - `settings`
 - `video_tasks`
@@ -35,6 +38,18 @@ description: 当前后端主要数据表与字段说明
 - `storage_objects`
 
 后续新增表时再同步补充本文档，未实际使用的规划表不提前写入。
+
+### 提示词目录与本机收藏
+
+- `prompt_catalogs`：只保存 `id/title/cover_url/tags/category/github_url/preview/content_hash/created_at/updated_at`。**没有 `prompt` 全文字段**；`preview` 仅由标签组成，封面仅存远程链接。
+- `prompt_categories.index_updated_at`：上次目录写入时间，也标记旧库索引初始化已完成。首次启动仅从原有订阅内容提取元数据，不重新联网，不修改旧内容。
+- `prompt_favorites`：用户主动收藏的全文快照，沿用 `Prompt` 字段，另存 `source_url/saved_at`。按 ID 幂等收藏，刷新在线目录不覆盖、不删除收藏；可以离线读全文，预览图片仍是远程链接。
+- `prompts`：保留已有系统、自建和历史订阅全文。新目录不读取历史订阅全文作为离线兜底，更新订阅只更新 `prompt_catalogs`，不会继续向 `prompts` 写入网络全文。此次保留旧库是保护原始数据的明确例外，未进行自动清理。
+- 目录 ID 由来源分类、标题和正文摘要哈希生成，不使用易变的序号；选中后临时读取来源并比对哈希，源内容变化时要求更新目录，避免错误套用另一条内容。
+- `GET /api/prompts` 返回无全文的目录，支持 `keyword/tag/category/page/pageSize/favorites=true`；`GET /api/prompts/:id` 按需读全文；两者响应均为 `Cache-Control: no-store`。
+- `POST /api/prompt-favorites` 是唯一新增收藏全文的入口，校验所选目录和正文一致；`DELETE /api/prompt-favorites/:id` 仅移除该收藏副本。
+- 源文件只在内存中临时解析（单份最多 20 MB）。部分 GitHub 来源只有整篇 Markdown/JSON，按需加载可能临时读取整份文档，不下载仓库或媒体，也不做全文磁盘缓存。WebView 自身的图片/页面缓存不等于收藏，应用不承诺操作系统层面的零字节缓存。
+- 用户将提示词插入画布/生成任务后，正文作为该项目内容按原有规则保存；这不自动将条目加入提示词收藏。
 
 ### users
 
@@ -403,3 +418,14 @@ Agent Bridge 都读写这些行；Agent 不建立第二份画布项目表。
 | `admin_adjust` | 后台手动调整 |
 | `ai_consume` | 调用后端模型接口消费 |
 | `ai_refund` | 后端模型接口调用失败返还 |
+
+## 本机 Rust 迁移与版本历史新增表
+
+保留原有业务表；新增表不代表恢复上游账号/计费功能。
+
+- `desktop_schema_migrations`：`version` INTEGER 主键、`applied_at` TEXT、`backup_path` TEXT。记录本机 Rust 迁移版本及迁移前一致备份路径。
+- `canvas_version_history`：`sequence` INTEGER 自增主键、`owner`/`project_id` TEXT、`revision` TEXT（原快照 SHA-256）、`snapshot` TEXT（完整项目 JSON）、`created_at` TEXT、`reason` TEXT、`restored_from` INTEGER 可空、`bytes` INTEGER。索引 `idx_canvas_versions_project(owner,project_id,sequence DESC)`。人工和 Agent 成功保存事务内写入，恢复前后强制保留；普通保存 30 秒限频，每项目 100 条/64 MiB 软上限且至少留最新两条。只修剪本表，不清理原素材或已有恢复备份。
+- `canvas_version_restores`：`request_id` TEXT 主键、`owner`/`project_id` TEXT、`source_sequence` INTEGER、`base_revision`/`result_revision` TEXT。恢复的幂等与审计收据，每项目保留最近 1,000 条。恢复要求有效项目及当前修订匹配；不能复活已删除项目。
+- 分页索引：`idx_prompt_catalogs_page(updated_at DESC,id ASC)`、`idx_prompts_page(updated_at DESC,id ASC)`、`idx_prompt_favorites_page(updated_at DESC,id ASC)`、`idx_assets_page(updated_at DESC)`。由 Rust 提示词初始化幂等建立，标签语义和既有目录/素材数据不变。
+
+快照引用媒体而不复制原文件。存储上限指保留记录的逻辑字节数；SQLite 删除记录后的空页可复用，文件物理大小不保证立即缩小。

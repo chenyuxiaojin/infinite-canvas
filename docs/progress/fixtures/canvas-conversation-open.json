@@ -1,0 +1,37 @@
+{
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M4 Max",
+    "node": "v24.12.0"
+  },
+  "database": "/Users/chenhuajin/项目/自己的应用/infinite-canvas-backups/repair-rust-20260905/database-online.db",
+  "corpus": {
+    "sessions": 3,
+    "messages": 28,
+    "textCharacters": 43573
+  },
+  "before": {
+    "firstPassMs": 15.641250000000582,
+    "parsedTextCharacters": 1841,
+    "renderedMessages": 28,
+    "parsedMarkdownMessages": 14,
+    "medianMs": 2.8542079999970156,
+    "minMs": 2.3690000000024156,
+    "maxMs": 3.1252910000002885,
+    "outputChars": 2489,
+    "samples": 12
+  },
+  "after": {
+    "firstPassMs": 18.11266699999942,
+    "parsedTextCharacters": 893,
+    "renderedMessages": 12,
+    "parsedMarkdownMessages": 6,
+    "medianMs": 1.4693330000009155,
+    "minMs": 1.1149160000004485,
+    "maxMs": 3.4383750000015425,
+    "outputChars": 1157,
+    "samples": 12
+  },
+  "limitation": "Real corpus and installed ReactMarkdown, separate fresh Node processes for before/after parse+server-render timing; firstPassMs excludes module loading and database reading. No native App or browser layout/performance claim."
+}

@@ -2,6 +2,7 @@
 
 ## 项目介绍
 
+- [小陈的画布：产品需求与验收标准（实施与验收共同依据）](overview/product-requirements.md)
 - [快速开始](overview/quick-start.md)
 - [功能介绍](overview/features.md)
 - [Docker 部署](overview/docker.md)
@@ -33,12 +34,15 @@
 
 ## 项目进度
 
+- [修复、Rust 迁移与正式安装验收](progress/canvas-rust-repair.md)
+- [画布交互与素材优化](progress/canvas-ui-optimization.md)
+- [版本历史、数据与请求优化](progress/canvas-data-optimization.md)
 - [待测试](progress/pending-test.md)
 - [TODO](progress/todo.md)
 - [macOS 桌面导演台验收矩阵](development/macos-director-acceptance-matrix.md)
 
 ## 说明
 
-- 未登录时画布项目和“我的素材”保存在浏览器本地；登录且账号同步可用时，会同步保存到账号/云端。
+- 当前个人桌面版不提供 App 账号与云同步入口，旧记录保留；上游账号相关历史文档不代表本分支现有功能。
 - macOS 桌面版使用独立本机身份把画布保存到应用数据库，供 WebView 和受控本机 Agent Bridge 共同操作。
 - 本地直连模式下，AI API Key 保存在浏览器本地，并由前端直接请求 OpenAI 兼容接口。

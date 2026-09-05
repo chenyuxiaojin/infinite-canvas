@@ -1,0 +1,77 @@
+// Create an isolated Canvas v3 import fixture from existing local acceptance media.
+// Never accesses the app database, user binding files, network, or AI services.
+import assert from "node:assert/strict";
+import { readFileSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import { unzipSync, zipSync, strToU8 } from "../../web/node_modules/fflate/esm/index.mjs";
+
+const root = fileURLToPath(new URL("../../", import.meta.url));
+const outputDir = path.join(root, "docs/progress/fixtures");
+const projectId = "canvas-audit-multimedia-fixture-v1";
+const title = "独立验收-多媒体-临时";
+const timestamp = "2026-09-04T00:00:00.000Z";
+const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const imagePath = path.join(root, "data/p3-evidence/p3-test-image.png");
+const sourceZipPath = path.join(root, "data/p3-evidence/P3-workflow-bedaac2.zip");
+const image = readFileSync(imagePath);
+const sourceZip = readFileSync(sourceZipPath);
+const sourceEntries = unzipSync(sourceZip);
+const sourceManifest = JSON.parse(new TextDecoder().decode(sourceEntries["projects.json"]));
+const videoAsset = sourceManifest.projects.flatMap((entry) => entry.files).find((asset) => asset.mimeType === "video/mp4");
+assert.ok(videoAsset, "Expected deterministic local P3 MP4");
+const video = sourceEntries[videoAsset.path];
+assert.equal(video.length, videoAsset.bytes);
+execFileSync("/opt/homebrew/bin/ffmpeg", ["-v", "error", "-xerror", "-i", imagePath, "-f", "null", "-"]);
+execFileSync("/opt/homebrew/bin/ffmpeg", ["-v", "error", "-xerror", "-i", "pipe:0", "-f", "null", "-"], { input: video });
+const videoProbe = JSON.parse(execFileSync("/opt/homebrew/bin/ffprobe", ["-v", "error", "-count_frames", "-show_entries", "stream=codec_type,codec_name,width,height,nb_read_frames:format=duration", "-of", "json", "-i", "pipe:0"], { input: video, encoding: "utf8" }));
+const imageProbe = JSON.parse(execFileSync("/opt/homebrew/bin/ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height", "-of", "json", imagePath], { encoding: "utf8" }));
+const nodes = [], files = [], archive = {}, counts = { image: 0, video: 0, text: 0 };
+for (let i = 0; i < 60; i++) {
+  const type = i % 5 < 3 ? "image" : i % 5 === 3 ? "video" : "text";
+  const number = ++counts[type];
+  const id = `${projectId}-${type}-${number}`;
+  const common = { id, type, title: `${type === "image" ? "测试图片" : type === "video" ? "测试视频" : "测试文字"} ${String(number).padStart(2, "0")}`, position: { x: i % 10 * 290, y: Math.floor(i / 10) * 220 }, width: 260, height: 170 };
+  if (type === "text") {
+    nodes.push({ ...common, metadata: { content: `隔离验收节点 ${number}\n中文、emoji 🙂🚀\n仅本机确定性素材，不运行模型。\n按住空格平移，缩放或拖动本节点。\n36 张相同 320×180 图 + 12 段相同 1 秒视频；不代表真实 4K 多媒体压力。`, status: "success", fontSize: 14 } });
+  } else {
+    const storageKey = `${type}:${projectId}-${number}`;
+    const data = type === "image" ? image : video;
+    const mimeType = type === "image" ? "image/png" : "video/mp4";
+    const relativePath = `projects/${projectId}/files/${type}-${number}.${type === "image" ? "png" : "mp4"}`;
+    const metadata = { storageKey, status: "success", naturalWidth: 320, naturalHeight: 180, bytes: data.length, mimeType, ...(type === "video" ? { durationMs: 1000 } : {}) };
+    assert.ok(!("content" in metadata), "Media must exercise normal hydration");
+    nodes.push({ ...common, metadata });
+    files.push({ storageKey, path: relativePath, mimeType, bytes: data.length });
+    archive[relativePath] = new Uint8Array(data);
+  }
+}
+const connections = nodes.slice(1).map((node, i) => ({ id: `${projectId}-edge-${i + 1}`, fromNodeId: nodes[i].id, toNodeId: node.id }));
+const project = { id: projectId, title, createdAt: timestamp, updatedAt: timestamp, nodes, connections, chatSessions: [], activeChatId: null, agentConfig: null, autoTitlePending: false, backgroundMode: "lines", showImageInfo: false, viewport: { x: 20, y: 40, k: 0.38 }, sidePanel: { open: true, width: 320 }, agentPanel: { open: false, width: 390 } };
+const manifest = { app: "infinite-canvas", version: 3, exportedAt: timestamp, projects: [{ project, files }] };
+archive["projects.json"] = strToU8(JSON.stringify(manifest, null, 2));
+const zipped = zipSync(archive, { level: 0, mtime: new Date(timestamp) });
+const verified = unzipSync(zipped);
+assert.equal(Object.keys(verified).length, 49);
+for (const asset of files) assert.equal(sha(verified[asset.path]), sha(asset.mimeType === "image/png" ? image : video));
+assert.equal(new Set(nodes.map((node) => node.id)).size, 60);
+assert.equal(new Set(files.map((file) => file.storageKey)).size, 48);
+assert.equal(JSON.stringify(manifest).includes("local-ref:"), false);
+const zipPath = path.join(outputDir, "canvas-audit-multimedia-v1.zip");
+const report = {
+  title, projectIdInArchive: projectId, importedProjectId: "Generated by app importProject; read back after UI import", format: "Canvas v3", counts, totalNodes: nodes.length, connections: connections.length, assetEntries: files.length, archiveBytes: zipped.length, archiveSha256: sha(zipped), viewport: project.viewport,
+  sources: [{ path: path.relative(root, imagePath), bytes: image.length, sha256: sha(image), probe: imageProbe }, { path: path.relative(root, sourceZipPath), archiveSha256: sha(sourceZip), entry: videoAsset.path, bytes: video.length, sha256: sha(video), probe: videoProbe }],
+  validation: { sourcesFullyDecodedWithFfmpegXerror: true, archiveEntriesRoundTripHashesMatch: true, mediaContentAbsentForHydration: true, noTaskIdsOrGenerationRequests: true },
+  limitations: ["All 36 image nodes repeat the same 632-byte 320x180 PNG; not representative of 4K diverse images", "All 12 video nodes repeat the same 1-second 320x180 deterministic MP4; videos use preload none and one plays at a time", "48 distinct app storage keys and entries, but repeated content may benefit decoder/cache reuse", "No live app FPS, CPU, memory, or input-latency result is asserted by fixture creation"],
+};
+mkdirSync(outputDir, { recursive: true });
+function writeNewOrVerify(file, bytes) {
+  if (existsSync(file)) { assert.equal(sha(readFileSync(file)), sha(bytes), `Refuse to overwrite different artifact: ${file}`); return; }
+  writeFileSync(file, bytes, { flag: "wx" });
+}
+writeNewOrVerify(zipPath, zipped);
+writeNewOrVerify(path.join(outputDir, "canvas-audit-multimedia-v1.manifest.json"), Buffer.from(`${JSON.stringify(report, null, 2)}\n`));
+execFileSync("/usr/bin/unzip", ["-t", zipPath]);
+console.log(JSON.stringify({ zipPath, ...report }, null, 2));
