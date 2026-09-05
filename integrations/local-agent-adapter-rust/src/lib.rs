@@ -4,6 +4,7 @@ mod capabilities;
 mod cli;
 mod client;
 mod error;
+pub mod history;
 mod mcp;
 mod project_binding;
 mod runtime;

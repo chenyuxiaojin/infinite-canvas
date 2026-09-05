@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -141,11 +142,19 @@ impl SqliteCanvasAdapter {
             CREATE INDEX IF NOT EXISTS idx_agent_operation_project
                 ON agent_operation_requests(project_id, created_at);",
         )?;
+        crate::history::initialize(&connection)?;
         Ok(adapter)
     }
 
     pub fn database_path(&self) -> &Path {
         &self.database_path
+    }
+
+    pub fn deleted_project_ids(&self) -> Result<Vec<String>, BridgeError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare("SELECT id FROM canvas_projects WHERE user_id = ?1 AND deleted_at <> ''")?;
+        let rows = statement.query_map([DESKTOP_LOCAL_USER_ID], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(BridgeError::from)
     }
 
     pub fn list_project_documents(&self) -> Result<Vec<Value>, BridgeError> {
@@ -166,6 +175,10 @@ impl SqliteCanvasAdapter {
     }
 
     pub fn save_human_project(&self, project: Value) -> Result<Value, BridgeError> {
+        self.save_human_project_checked(project, None)
+    }
+
+    pub fn save_human_project_checked(&self, project: Value, expected_revision: Option<&str>) -> Result<Value, BridgeError> {
         let metadata = project_metadata(&project)?;
         let raw = serde_json::to_string(&project)
             .map_err(|_| BridgeError::invalid("The canvas project could not be encoded."))?;
@@ -187,6 +200,16 @@ impl SqliteCanvasAdapter {
                 },
             )
             .optional()?;
+        if let Some(expected) = expected_revision {
+            let matches = match &current {
+                Some((raw, _, deleted)) => deleted.is_empty() && revision(raw.as_bytes()) == expected,
+                None => expected.is_empty(),
+            };
+            if !matches {
+                return Err(BridgeError::conflict("REVISION_CONFLICT", "画布已有其他修改，当前编辑已保留，请核对后重试。"));
+            }
+        }
+        let previous_raw = current.as_ref().map(|(raw, _, _)| raw.clone());
         let saved = match current {
             Some((current_raw, _, deleted_at)) if !deleted_at.is_empty() => {
                 return Err(BridgeError::conflict(
@@ -226,8 +249,23 @@ impl SqliteCanvasAdapter {
                 project
             }
         };
+        crate::history::record_save(&transaction, DESKTOP_LOCAL_USER_ID, &metadata.id, previous_raw.as_deref(), &serde_json::to_string(&saved).map_err(|_|BridgeError::internal("无法记录保存版本"))?)?;
         transaction.commit()?;
         Ok(saved)
+    }
+
+    pub fn history_list(&self, id: &str) -> Result<Value, BridgeError> {
+        crate::history::list(&self.connect()?, DESKTOP_LOCAL_USER_ID, id)
+    }
+    pub fn history_preview(&self, id: &str, sequence: i64) -> Result<Value, BridgeError> {
+        crate::history::preview(&self.connect()?, DESKTOP_LOCAL_USER_ID, id, sequence)
+    }
+    pub fn history_restore(&self, id: &str, sequence: i64, expected: &str, request_id: &str) -> Result<Value, BridgeError> {
+        let mut connection=self.connect()?;
+        let transaction=connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result=crate::history::restore(&transaction, DESKTOP_LOCAL_USER_ID, id, sequence, expected, request_id, |project|project_metadata(project).map(|_|()))?;
+        transaction.commit()?;
+        Ok(result)
     }
 
     pub fn delete_human_projects(&self, project_ids: &[String]) -> Result<usize, BridgeError> {
@@ -417,6 +455,7 @@ impl CanvasOperationAdapter for SqliteCanvasAdapter {
                 "The canvas changed while the Agent operation was being applied.",
             ));
         }
+        crate::history::record_save(&transaction, DESKTOP_LOCAL_USER_ID, &request.project_id, Some(&raw), &proposed_raw)?;
         let response_json = serde_json::to_string(&result)
             .map_err(|_| BridgeError::internal("The operation result could not be recorded."))?;
         transaction.execute(
@@ -459,6 +498,17 @@ fn project_metadata(project: &Value) -> Result<ProjectMetadata, BridgeError> {
         return Err(BridgeError::invalid(
             "The canvas project must contain nodes and connections arrays.",
         ));
+    }
+    let mut node_ids=HashSet::new();
+    for node in project["nodes"].as_array().unwrap() {
+        let id=node["id"].as_str().filter(|id|!id.trim().is_empty()).ok_or_else(||BridgeError::invalid("画布存在空白节点编号。"))?;
+        if !node_ids.insert(id){return Err(BridgeError::invalid("画布存在重复节点编号。"));}
+    }
+    let mut connection_ids=HashSet::new();
+    for connection in project["connections"].as_array().unwrap() {
+        let id=connection["id"].as_str().filter(|id|!id.trim().is_empty()).ok_or_else(||BridgeError::invalid("画布存在空白连线编号。"))?;
+        if !connection_ids.insert(id){return Err(BridgeError::invalid("画布存在重复连线编号。"));}
+        if !["fromNodeId","toNodeId"].iter().all(|key|connection[*key].as_str().is_some_and(|id|node_ids.contains(id))){return Err(BridgeError::invalid("连线的节点不存在，保存已停止，原画布未改动。"));}
     }
     Ok(ProjectMetadata {
         id,
@@ -741,6 +791,25 @@ fn timestamp_is_newer(current: &str, incoming: &str) -> Result<bool, BridgeError
 mod tests {
     use super::*;
 
+    #[test]
+    fn human_compare_and_swap_preserves_other_writers_and_tombstones() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = directory.path().join("canvas.db");
+        let sql = Connection::open(&db).unwrap();
+        sql.execute_batch("CREATE TABLE canvas_projects (user_id TEXT NOT NULL, id TEXT NOT NULL, project_data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(user_id,id));").unwrap();
+        let adapter = SqliteCanvasAdapter::open(db).unwrap();
+        adapter.save_human_project_checked(project(),Some("")).unwrap();
+        let base = adapter.get_project("project-1").unwrap();
+        let mut first = project(); first["title"] = json!("first writer");
+        adapter.save_human_project_checked(first.clone(),Some(&base.revision)).unwrap();
+        let mut second = project(); second["title"] = json!("second writer");
+        assert_eq!(adapter.save_human_project_checked(second,Some(&base.revision)).unwrap_err().code,"REVISION_CONFLICT");
+        assert_eq!(adapter.get_project("project-1").unwrap().project["title"],"first writer");
+        adapter.delete_human_projects(&["project-1".into()]).unwrap();
+        assert_eq!(adapter.deleted_project_ids().unwrap(),vec!["project-1"]);
+        assert!(adapter.save_human_project_checked(first,Some("")).is_err());
+    }
+
     fn project() -> Value {
         json!({
             "id": "project-1",
@@ -750,6 +819,15 @@ mod tests {
             "nodes": [],
             "connections": []
         })
+    }
+    #[test]
+    fn graph_validation_rejects_missing_or_duplicate_endpoints_without_mutation() {
+        let mut value=project();
+        value["nodes"]=json!([{"id":"n"}]);value["connections"]=json!([{"id":"c","fromNodeId":"n","toNodeId":"missing"}]);
+        assert!(project_metadata(&value).is_err());
+        value["connections"][0]["toNodeId"]=json!("n");assert!(project_metadata(&value).is_ok());
+        value["nodes"]=json!([{"id":"n"},{"id":"n"}]);assert!(project_metadata(&value).is_err());
+        value["nodes"]=json!([{"id":"n"}]);value["connections"].as_array_mut().unwrap().push(json!({"id":"c","fromNodeId":"n","toNodeId":"n"}));assert!(project_metadata(&value).is_err());
     }
 
     #[test]

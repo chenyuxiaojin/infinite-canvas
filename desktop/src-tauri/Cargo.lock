@@ -1710,13 +1710,17 @@ dependencies = [
 
 [[package]]
 name = "infinite-canvas-desktop"
-version = "0.5.5"
+version = "1.0.0"
 dependencies = [
+ "axum",
+ "getrandom 0.3.4",
  "infinite-canvas-external-connectors",
  "infinite-canvas-local-agent-adapter",
  "infinite-canvas-local-executor",
+ "libc",
  "local-ai-audio",
  "portable-pty",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -1725,6 +1729,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

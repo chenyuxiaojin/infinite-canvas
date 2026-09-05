@@ -18,6 +18,10 @@ pub(crate) struct DesktopAgentBridge {
 }
 
 impl DesktopAgentBridge {
+    pub(crate) fn canvas(&self) -> Arc<SqliteCanvasAdapter> {
+        self.canvas.clone()
+    }
+
     pub(crate) fn start(
         app_data_directory: &Path,
         database_path: &Path,
@@ -86,11 +90,11 @@ pub(crate) fn desktop_canvas_project(
 pub(crate) fn save_desktop_canvas_project(
     bridge: State<'_, DesktopAgentBridge>,
     project: Value,
-) -> Result<Value, String> {
-    bridge
-        .canvas
-        .save_human_project(project)
-        .map_err(|error| error.to_string())
+    expected_revision: Option<String>,
+) -> Result<local_agent_adapter::ProjectDocument, String> {
+    let id = project["id"].as_str().ok_or("缺少画布 ID")?.to_owned();
+    bridge.canvas.save_human_project_checked(project, expected_revision.as_deref()).map_err(|error| error.to_string())?;
+    bridge.canvas.get_project(&id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -114,4 +118,27 @@ pub(crate) fn desktop_canvas_project_revision(
         .get_project(&project_id)
         .map(|document| document.revision)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn desktop_canvas_deleted_ids(bridge: State<'_, DesktopAgentBridge>) -> Result<Vec<String>, String> {
+    bridge.canvas.deleted_project_ids().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn desktop_canvas_history(bridge: State<'_, DesktopAgentBridge>, project_id: String) -> Result<Value, String> {
+    bridge.canvas.history_list(&project_id).map_err(|e|e.to_string())
+}
+#[tauri::command]
+pub(crate) fn desktop_canvas_history_preview(bridge: State<'_, DesktopAgentBridge>, project_id: String, sequence: i64) -> Result<Value, String> {
+    bridge.canvas.history_preview(&project_id,sequence).map_err(|e|e.to_string())
+}
+#[tauri::command]
+pub(crate) fn desktop_canvas_history_restore(bridge: State<'_, DesktopAgentBridge>, project_id: String, sequence: i64, expected_revision: String, request_id: String) -> Result<Value, String> {
+    bridge.canvas.history_restore(&project_id,sequence,&expected_revision,&request_id).map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn desktop_canvas_document(bridge: State<'_, DesktopAgentBridge>, project_id: String) -> Result<local_agent_adapter::ProjectDocument, String> {
+    bridge.canvas.get_project(&project_id).map_err(|error| error.to_string())
 }

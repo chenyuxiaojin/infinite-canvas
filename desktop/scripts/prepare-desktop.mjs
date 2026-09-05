@@ -12,6 +12,7 @@ const desktopDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryDir = resolve(desktopDir, "..");
 const webDir = join(repositoryDir, "web");
 const agentCliDir = join(repositoryDir, "integrations", "local-agent-adapter-rust");
+const localApiDir = join(repositoryDir, "integrations", "local-api-rust");
 const tauriDir = join(desktopDir, "src-tauri");
 const binariesDir = join(tauriDir, "binaries");
 const webResourceDir = join(tauriDir, "resources", "web");
@@ -56,36 +57,25 @@ for (const requiredPath of [standaloneDir, staticDir, publicDir]) {
 rmSync(webResourceDir, { recursive: true, force: true });
 mkdirSync(webResourceDir, { recursive: true });
 cpSync(standaloneDir, webResourceDir, { recursive: true });
+cpSync(join(desktopDir, "scripts", "background-node.cjs"), join(webResourceDir, "background-node.cjs"));
 cpSync(publicDir, join(webResourceDir, "public"), { recursive: true });
 mkdirSync(join(webResourceDir, ".next"), { recursive: true });
 cpSync(staticDir, join(webResourceDir, ".next", "static"), { recursive: true });
 
 mkdirSync(binariesDir, { recursive: true });
-run("cargo", ["build", "--release", "--bin", "infinite-canvas"], {
+run("cargo", ["build", "--release", "--locked", "--bin", "infinite-canvas"], {
   cwd: agentCliDir,
 });
 cpSync(
   join(agentCliDir, "target", "release", "infinite-canvas"),
   join(binariesDir, `infinite-canvas-${targetTriple}`),
 );
-run(
-  "go",
-  [
-    "build",
-    "-trimpath",
-    "-ldflags=-s -w",
-    "-o",
-    join(binariesDir, `infinite-canvas-api-${targetTriple}`),
-    ".",
-  ],
-  {
-    env: {
-      ...process.env,
-      CGO_ENABLED: "0",
-      GOARCH: "arm64",
-      GOOS: "darwin",
-    },
-  },
+run("cargo", ["build", "--release", "--locked", "--bin", "infinite-canvas-api"], {
+  cwd: localApiDir,
+});
+cpSync(
+  join(localApiDir, "target", "release", "infinite-canvas-api"),
+  join(binariesDir, `infinite-canvas-api-${targetTriple}`),
 );
 run("lipo", [
   "-thin",

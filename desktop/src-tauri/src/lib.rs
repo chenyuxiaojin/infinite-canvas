@@ -13,6 +13,10 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 mod agent_bridge;
+mod canvas_codex;
+mod canvas_local_agent;
+mod local_image;
+mod canvas_media;
 mod project_binding;
 mod runtime;
 mod terminal;
@@ -107,7 +111,7 @@ async fn save_canvas_export(
     let selected = app
         .dialog()
         .file()
-        .set_title("导出无限画布项目")
+        .set_title("导出小陈的画布项目")
         .set_file_name("infinite-canvas-export.zip")
         .add_filter("ZIP archive", &["zip"])
         .blocking_save_file();
@@ -264,7 +268,7 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
         app.handle(),
         "node",
         &web_dir,
-        &["server.js"],
+        &["--require", "./background-node.cjs", "server.js"],
         &[
             ("API_BASE_URL", "http://127.0.0.1:3101"),
             ("HOSTNAME", "127.0.0.1"),
@@ -279,7 +283,7 @@ fn start_desktop(app: &mut App) -> Result<(), String> {
         "main",
         WebviewUrl::External("http://127.0.0.1:3100".parse().unwrap()),
     )
-    .title("无限画布")
+    .title("小陈的画布")
     .inner_size(1440.0, 900.0)
     .min_inner_size(1100.0, 700.0)
     .resizable(true)
@@ -296,6 +300,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(Sidecars::default())
         .manage(terminal::TerminalManager::default())
+        .manage(canvas_codex::CanvasCodexManager::default())
+        .manage(canvas_local_agent::CanvasLocalAgentManager::default())
         .invoke_handler(tauri::generate_handler![
             runtime::probe_desktop_runtime,
             runtime::generate_desktop_test_clip,
@@ -305,18 +311,35 @@ pub fn run() {
             runtime::cancel_desktop_task,
             agent_bridge::desktop_canvas_projects,
             agent_bridge::desktop_canvas_project_ids,
+            agent_bridge::desktop_canvas_document,
+            agent_bridge::desktop_canvas_deleted_ids,
             agent_bridge::desktop_canvas_project,
             agent_bridge::save_desktop_canvas_project,
             agent_bridge::delete_desktop_canvas_projects,
             agent_bridge::desktop_canvas_project_revision,
+            local_image::read_canvas_local_image,
+            canvas_media::read_canvas_local_media,
             project_binding::resolve_canvas_project_workspace,
+            project_binding::inspect_canvas_project_bindings,
+            agent_bridge::desktop_canvas_history,
+            agent_bridge::desktop_canvas_history_preview,
+            agent_bridge::desktop_canvas_history_restore,
             project_binding::select_film_directory,
             project_binding::bind_canvas_project_directory,
             save_canvas_export,
             terminal::pty_spawn,
+            terminal::pty_ack,
             terminal::pty_write,
             terminal::pty_resize,
             terminal::pty_terminate,
+            canvas_local_agent::canvas_local_agent_open,
+            canvas_local_agent::canvas_local_agent_send,
+            canvas_local_agent::canvas_local_agent_respond,
+            canvas_local_agent::canvas_local_agent_permission,
+            canvas_local_agent::canvas_local_agent_close,
+            canvas_codex::canvas_codex_open,
+            canvas_codex::canvas_codex_send,
+            canvas_codex::canvas_codex_close,
         ])
         .setup(|app| {
             if let Err(error) = start_desktop(app) {
@@ -332,6 +355,9 @@ pub fn run() {
         .expect("error while building the Tauri application")
         .run(|app, event| {
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                app.state::<terminal::TerminalManager>().shutdown();
+                app.state::<canvas_codex::CanvasCodexManager>().shutdown();
+                app.state::<canvas_local_agent::CanvasLocalAgentManager>().shutdown();
                 stop_agent_bridge(app);
                 stop_desktop_runtime(app);
                 stop_sidecars(app);

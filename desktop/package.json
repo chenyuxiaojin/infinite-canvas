@@ -1,11 +1,12 @@
 {
   "name": "infinite-canvas-desktop",
-  "version": "0.5.5",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "node scripts/dev-desktop.mjs",
     "stage": "node scripts/prepare-desktop.mjs",
-    "build:app": "tauri build --bundles app && rm -rf ~/Applications/无限画布.app && cp -R src-tauri/target/release/bundle/macos/无限画布.app ~/Applications/ && rm -rf src-tauri/target/release/bundle/macos/无限画布.app",
+    "build:app": "tauri build --bundles app && node scripts/install-local.mjs",
+    "install:app": "node scripts/install-local.mjs",
     "tauri": "tauri"
   },
   "devDependencies": {
