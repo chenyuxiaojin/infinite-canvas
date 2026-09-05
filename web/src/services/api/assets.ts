@@ -28,6 +28,6 @@ export type AssetLibraryQuery = {
     pageSize?: number;
 };
 
-export async function fetchAssetLibrary(query: AssetLibraryQuery = {}) {
-    return apiGet<AssetLibraryResponse>("/api/assets", compactApiParams(query));
+export async function fetchAssetLibrary(query: AssetLibraryQuery = {}, signal?: AbortSignal) {
+    return apiGet<AssetLibraryResponse>("/api/assets", compactApiParams(query), undefined, signal);
 }

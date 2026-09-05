@@ -76,11 +76,18 @@ func SyncPromptCategory(category string) ([]model.PromptCategory, error) {
 		if item.Category != category {
 			continue
 		}
+		if !item.Enabled {
+			return nil, promptError("此订阅源已停用")
+		}
 		items, err := buildPromptCategoryItem(item)
 		if err != nil {
 			return nil, err
 		}
-		if err := repository.ReplacePromptCategory(item, items); err != nil {
+		entries := catalogEntries(item, items)
+		if len(entries) == 0 {
+			return nil, promptError("来源没有解析出提示词，已保留上一次目录")
+		}
+		if err := repository.ReplacePromptCatalog(item.Category, entries, time.Now().Format(time.RFC3339)); err != nil {
 			return nil, err
 		}
 		return repository.ListPromptCategories()
@@ -119,7 +126,7 @@ func parseURLToPrompts(targetURL, category string) ([]model.Prompt, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("拉取远端提示词 HTTP 状态异常: %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := readPromptDocument(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -251,8 +258,17 @@ func fetchText(baseURL, file string) (string, error) {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return "", errors.New(file + " 拉取失败")
 	}
-	data, err := io.ReadAll(response.Body)
+	data, err := readPromptDocument(response.Body)
 	return string(data), err
+}
+
+func readPromptDocument(reader io.Reader) ([]byte, error) {
+	const limit = 20 * 1024 * 1024
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err == nil && len(data) > limit {
+		return nil, promptError("来源文档超过 20 MB，请改用单个提示词文档链接")
+	}
+	return data, err
 }
 
 type gptImage2Case struct {

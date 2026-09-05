@@ -9,7 +9,8 @@ import (
 )
 
 func Prompts(w http.ResponseWriter, r *http.Request) {
-	result, err := service.ListPrompts(parseQuery(r))
+	w.Header().Set("Cache-Control", "no-store")
+	result, err := service.ListPromptDirectory(parseQuery(r), r.URL.Query().Get("favorites") == "true")
 	if err != nil {
 		FailError(w, err)
 		return
@@ -68,7 +69,36 @@ func SyncPrompts(w http.ResponseWriter, r *http.Request) {
 		OK(w, result)
 		return
 	}
-	service.SyncRemotePromptCategories()
-	OK(w, service.ListPromptCategories())
+	OK(w, service.SyncPromptSources())
 }
 
+func PromptDetail(w http.ResponseWriter, r *http.Request, id string) {
+	w.Header().Set("Cache-Control", "no-store")
+	item, err := service.PromptDetail(id)
+	if err != nil {
+		FailError(w, err)
+		return
+	}
+	OK(w, item)
+}
+
+func FavoritePrompt(w http.ResponseWriter, r *http.Request) {
+	var item model.Prompt
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024)).Decode(&item); err != nil {
+		Fail(w, "收藏内容无效或过大")
+		return
+	}
+	if err := service.FavoritePrompt(item); err != nil {
+		FailError(w, err)
+		return
+	}
+	OK(w, true)
+}
+
+func UnfavoritePrompt(w http.ResponseWriter, r *http.Request, id string) {
+	if err := service.UnfavoritePrompt(id); err != nil {
+		FailError(w, err)
+		return
+	}
+	OK(w, true)
+}

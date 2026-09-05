@@ -116,6 +116,9 @@ func New() *gin.Engine {
 	v1.POST("/user-data/assets", gin.WrapF(handler.SaveUserAssetData))
 	api.GET("/proxy-image", gin.WrapF(handler.ProxyImage))
 	api.GET("/prompts", middleware.OptionalAuth, gin.WrapF(handler.Prompts))
+	api.GET("/prompts/:id", func(c *gin.Context) { handler.PromptDetail(c.Writer, c.Request, c.Param("id")) })
+	api.POST("/prompt-favorites", gin.WrapF(handler.FavoritePrompt))
+	api.DELETE("/prompt-favorites/:id", func(c *gin.Context) { handler.UnfavoritePrompt(c.Writer, c.Request, c.Param("id")) })
 	api.GET("/prompt-categories", gin.WrapF(handler.PromptCategories))
 	api.POST("/prompt-categories", gin.WrapF(handler.SavePromptCategory))
 	api.DELETE("/prompt-categories/:category", func(c *gin.Context) {

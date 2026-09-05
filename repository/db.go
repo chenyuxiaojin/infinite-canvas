@@ -75,6 +75,8 @@ func DB() (*gorm.DB, error) {
 			&model.CreditLog{},
 			&model.Prompt{},
 			&model.PromptCategory{},
+			&model.PromptCatalog{},
+			&model.PromptFavorite{},
 			&model.Asset{},
 			&model.Setting{},
 			&model.CreativeWorkflow{},

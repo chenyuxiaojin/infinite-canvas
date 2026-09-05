@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { forwardResponseBody, requestLifetime, RequestFailure } from "@/services/api/request-lifetime";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -31,23 +32,37 @@ async function proxy(request: NextRequest, context: RouteContext) {
     const target = `${apiBaseUrl.replace(/\/$/, "")}/api/${path.map(encodeURIComponent).join("/")}${request.nextUrl.search}`;
     const hasBody = request.method !== "GET" && request.method !== "HEAD";
 
+    const incomingId = request.headers.get("x-request-id") || "";
+    const requestId = /^[0-9a-f-]{36}$/i.test(incomingId) ? incomingId : crypto.randomUUID();
+    // No total deadline: long streams remain alive while bytes arrive.
+    const lifetime = requestLifetime(request.signal, 300_000);
+    const headers = proxyHeaders(request);
+    headers.set("x-request-id", requestId);
     try {
         const response = await fetch(target, {
             method: request.method,
-            headers: proxyHeaders(request),
+            headers,
+            signal: lifetime.signal,
             body: hasBody ? request.body : undefined,
             duplex: hasBody ? "half" : undefined,
             redirect: "manual",
         } as RequestInit & { duplex?: "half" });
 
-        return new Response(response.body, {
+        const outgoingHeaders = responseHeaders(response);
+        outgoingHeaders.set("x-request-id", response.headers.get("x-request-id") || requestId);
+        lifetime.touch();
+        if (!response.body) lifetime.dispose();
+        return new Response(response.body ? forwardResponseBody(response.body, lifetime) : null, {
             status: response.status,
             statusText: response.statusText,
-            headers: responseHeaders(response),
+            headers: outgoingHeaders,
         });
     } catch (error) {
-        console.error("Failed to proxy", target, error);
-        return Response.json({ code: 1, data: null, msg: "接口连接失败，请确认后端服务已启动" }, { status: 502 });
+        lifetime.dispose();
+        const reason = lifetime.signal.reason;
+        const kind = request.signal.aborted ? "cancelled" : reason instanceof RequestFailure ? reason.kind : "connect_failed";
+        const msg = kind === "cancelled" ? "已停止等待" : kind === "read_timeout" ? "读取超时，服务长时间没有返回数据" : "接口连接失败，后端服务可能未启动或已退出";
+        return Response.json({ code: 1, data: null, kind, requestId, submitted: hasBody, msg: msg + (hasBody ? "；请求可能已提交，请核对结果后再操作" : "") }, { status: kind === "cancelled" ? 499 : kind === "read_timeout" ? 504 : 502, headers: { "x-request-id": requestId } });
     }
 }
 

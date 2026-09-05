@@ -16,6 +16,9 @@ func main() {
 	if err := service.EnsureDefaultAdmin(); err != nil {
 		log.Fatal(err)
 	}
+	if err := service.InitializePromptCatalog(); err != nil {
+		log.Printf("initialize prompt catalog failed: %v", err)
+	}
 	service.StartPromptSyncScheduler()
 	service.StartCanvasProjectCleanupScheduler()
 	handler.StartVideoTaskPoller()

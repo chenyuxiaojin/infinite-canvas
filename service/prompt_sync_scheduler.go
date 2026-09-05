@@ -4,9 +4,9 @@ import (
 	"log"
 	"sync"
 
+	"github.com/robfig/cron/v3"
 	"github.com/tigerowo/infinite-canvas/model"
 	"github.com/tigerowo/infinite-canvas/repository"
-	"github.com/robfig/cron/v3"
 )
 
 const defaultPromptSyncCron = "0 0 * * *"
@@ -49,17 +49,32 @@ func RefreshPromptSyncScheduler() {
 }
 
 func SyncRemotePromptCategories() {
+	SyncPromptSources()
+}
+
+type PromptSyncResult struct {
+	Category string `json:"category"`
+	Name     string `json:"name"`
+	Error    string `json:"error,omitempty"`
+}
+
+func SyncPromptSources() []PromptSyncResult {
+	results := []PromptSyncResult{}
 	for _, category := range repository.PromptCategories() {
-		if !category.Remote {
+		if !category.Enabled || (!category.Remote && category.SourceType == "") {
 			continue
 		}
+		result := PromptSyncResult{Category: category.Category, Name: category.Name}
 		log.Printf("scheduled prompt sync start category=%s", category.Category)
 		if _, err := SyncPromptCategory(category.Category); err != nil {
 			log.Printf("scheduled prompt sync failed category=%s err=%v", category.Category, err)
-			continue
+			result.Error = "更新失败，已保留原目录"
+		} else {
+			log.Printf("scheduled prompt sync done category=%s", category.Category)
 		}
-		log.Printf("scheduled prompt sync done category=%s", category.Category)
+		results = append(results, result)
 	}
+	return results
 }
 
 func normalizePromptSyncSetting(setting model.PromptSyncSetting) model.PromptSyncSetting {
