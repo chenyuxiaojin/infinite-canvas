@@ -37,8 +37,10 @@ type Props = {
     selectedNodeIds: Set<string>;
     open: boolean;
     width: number;
+    spotlightGroupId?: string | null;
     onWidthChange: (width: number) => void;
     onFocusNode: (nodeId: string) => void;
+    onFocusGroup?: (groupId: string | null) => void;
     onAssetDragStart: (payload: InsertAssetPayload) => void;
     onAssetDragEnd: () => void;
     onInsertAsset: (payload: InsertAssetPayload) => void;
@@ -52,7 +54,7 @@ const ASSET_TYPE_OPTIONS = [
     { label: "音频", value: "audio" },
 ];
 
-export function CanvasSidePanel({ nodes, selectedNodeIds, open, width, onWidthChange, onFocusNode, onAssetDragStart, onAssetDragEnd, onInsertAsset }: Props) {
+export function CanvasSidePanel({ nodes, selectedNodeIds, open, width, spotlightGroupId, onWidthChange, onFocusNode, onFocusGroup, onAssetDragStart, onAssetDragEnd, onInsertAsset }: Props) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
     const [mounted, setMounted] = useState(open);
@@ -113,7 +115,7 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, open, width, onWidthCh
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
-                        <CanvasNodeOutline nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} />
+                        <CanvasNodeOutline nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} spotlightGroupId={spotlightGroupId} onFocusGroup={onFocusGroup} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab theme={theme} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />
                     ) : (

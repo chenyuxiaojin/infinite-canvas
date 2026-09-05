@@ -1,9 +1,11 @@
 import type { CanvasProject } from "./stores/use-canvas-store";
+import type { LocalMediaReference } from "./types";
 
 export type CanvasExportFile = {
     app: "infinite-canvas";
-    version: 3;
+    version: 3 | 4 | 5;
     exportedAt: string;
+    mediaMode?: "embedded" | "references";
     projects: CanvasProjectExportItem[];
 };
 
@@ -18,4 +20,6 @@ export type CanvasExportAsset = {
     mimeType: string;
     bytes: number;
     sha256?: string;
+    embedded?: boolean;
+    reference?: LocalMediaReference;
 };

@@ -11,6 +11,17 @@ import { isDesktopRuntime, loadDesktopCanvasProjects, loadDesktopCanvasDeletedId
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { validateCanvasGraph } from "../utils/canvas-graph";
 import type { CanvasAgentConfig, CanvasAssistantSession, CanvasConnection, CanvasNodeData, CanvasPendingAgentRequest, ViewportTransform } from "../types";
+import {
+    CANVAS_OPERATION_PROTOCOL_VERSION,
+    applyCanvasOperationBatch,
+    buildCanvasStructureOperations,
+    createCanvasOperationState,
+    migrateCanvasProject,
+    rebindCanvasProjectIdentity,
+    type CanvasOperationBatch,
+    type CanvasOperationOutcome,
+    type CanvasOperationState,
+} from "../protocol/canvas-operation-protocol";
 
 export type CanvasSidePanelState = {
     open: boolean;
@@ -39,10 +50,13 @@ export type CanvasProject = {
     viewport: ViewportTransform;
     sidePanel: CanvasSidePanelState;
     agentPanel: CanvasSidePanelState;
+    operationState: CanvasOperationState;
 };
 
 type CanvasStore = {
     hydrated: boolean;
+    desktopPersistenceStatus: "not_applicable" | "checking" | "database" | "error";
+    desktopPersistenceError: string | null;
     projects: CanvasProject[];
     restoredRevisions: Record<string, string>;
     saveStatus: Record<string, { state: "pending" | "saved" | "error"; error?: string }>;
@@ -54,9 +68,10 @@ type CanvasStore = {
     renameProject: (id: string, title: string) => void;
     deleteProjects: (ids: string[]) => void;
     updateProject: (id: string, patch: Partial<Pick<CanvasProject, "nodes" | "connections" | "chatSessions" | "activeChatId" | "agentConfig" | "autoTitlePending" | "backgroundMode" | "showImageInfo" | "viewport" | "sidePanel" | "agentPanel" | "pendingAgentRequest">>) => void;
+    applyOperationBatch: (batch: CanvasOperationBatch) => CanvasOperationOutcome<CanvasProject> | null;
+    refreshFromDesktop: (projectId?: string) => Promise<void>;
     syncWithRemote: (token: string, syncEnabled: boolean) => Promise<void>;
     setSyncEnabled: (enabled: boolean) => void;
-    refreshFromDesktop: () => Promise<void>;
 };
 
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
@@ -183,6 +198,7 @@ async function readDesktopProjects(localProjects: CanvasProject[]) {
     for (const project of localProjects.filter((item) => !desktopIds.has(item.id) && !deletedDesktopIds.has(item.id))) {
         if (!pendingProjects.has(project.id)) pendingProjects.set(project.id, project);
     }
+    useCanvasStore.setState({ desktopPersistenceStatus: "database", desktopPersistenceError: null });
     return mergeDesktopCanvasProjects(desktopProjects, localProjects.filter((project) => !deletedDesktopIds.has(project.id)));
 }
 
@@ -195,40 +211,19 @@ function cancelProjectSaves(ids: string[]) {
     });
 }
 
-async function reconcileCanvasProjects(
-    token: string,
-    remoteProjects: CanvasProject[],
-    localProjects: CanvasProject[],
-) {
-    const remoteById = new Map(
-        remoteProjects.map((project) => [project.id, project]),
-    );
-    const missingProjects = localProjects.filter(
-        (project) => !remoteById.has(project.id),
-    );
-    const existingLocalProjects = localProjects.filter((project) =>
-        remoteById.has(project.id),
-    );
+async function reconcileCanvasProjects(token: string, remoteProjects: CanvasProject[], localProjects: CanvasProject[]) {
+    const remoteById = new Map(remoteProjects.map((project) => [project.id, project]));
+    const missingProjects = localProjects.filter((project) => !remoteById.has(project.id));
+    const existingLocalProjects = localProjects.filter((project) => remoteById.has(project.id));
     const projects = missingProjects.length
         ? await syncCanvasProjects(token, missingProjects)
-            .then((syncedProjects) =>
-                mergeCanvasProjects(
-                    syncedProjects,
-                    existingLocalProjects,
-                ),
-            )
-            .catch(() =>
-                mergeCanvasProjects(remoteProjects, localProjects),
-            )
+              .then((syncedProjects) => mergeCanvasProjects(syncedProjects, existingLocalProjects))
+              .catch(() => mergeCanvasProjects(remoteProjects, localProjects))
         : mergeCanvasProjects(remoteProjects, existingLocalProjects);
 
     localProjects.forEach((project) => {
         const remote = remoteById.get(project.id);
-        if (
-            remote &&
-            Date.parse(project.updatedAt || "") >
-            Date.parse(remote.updatedAt || "")
-        ) {
+        if (remote && Date.parse(project.updatedAt || "") > Date.parse(remote.updatedAt || "")) {
             queueProjectSave(project);
         }
     });
@@ -348,17 +343,13 @@ const canvasStorage: PersistStorage<CanvasStore> = {
 
         if (token) {
             try {
-                const [userConfig, remoteProjects] = await Promise.all([
-                    fetchUserConfig(token),
-                    listCanvasProjects(token),
-                ]);
-                accountCanvasSyncEnabled =
-                    userConfig.syncCapabilities?.userData === true;
+                const [userConfig, remoteProjects] = await Promise.all([fetchUserConfig(token), listCanvasProjects(token)]);
+                accountCanvasSyncEnabled = userConfig.syncCapabilities?.userData === true;
 
                 if (accountCanvasSyncEnabled && localHasData) {
                     const projects = await reconcileCanvasProjects(
                         token,
-                        remoteProjects,
+                        remoteProjects.map((project) => migrateCanvasProject(project)),
                         localProjects,
                     );
 
@@ -368,28 +359,11 @@ const canvasStorage: PersistStorage<CanvasStore> = {
                         version: 0,
                     } as StorageValue<CanvasStore>;
                     queuedPersistState = nextState;
-                    await persistLocalProjects(projects);
-                    return parsed;
-                }
-
-                if (
-                    remoteProjects.length > 0 &&
-                    (accountCanvasSyncEnabled || !localHasData)
-                ) {
-                    const nextState = { projects: remoteProjects };
-                    const parsed = {
-                        state: nextState,
-                        version: 0,
-                    } as StorageValue<CanvasStore>;
-                    queuedPersistState = nextState;
                     await persistLocalProjects(remoteProjects);
                     return parsed;
                 }
             } catch (error) {
-                console.error(
-                    "Failed to hydrate canvas projects from remote",
-                    error,
-                );
+                console.error("Failed to hydrate canvas projects from remote", error);
             }
         }
 
@@ -401,10 +375,7 @@ const canvasStorage: PersistStorage<CanvasStore> = {
 
     setItem: (_name, value) => {
         const nextState = value.state as PersistedCanvasState;
-        if (
-            queuedPersistState &&
-            queuedPersistState.projects === nextState.projects
-        ) {
+        if (queuedPersistState && queuedPersistState.projects === nextState.projects) {
             return;
         }
         queuedPersistState = nextState;
@@ -427,6 +398,8 @@ export const useCanvasStore = create<CanvasStore>()(
     persist(
         (set, get) => ({
             hydrated: false,
+            desktopPersistenceStatus: isDesktopRuntime() ? "checking" : "not_applicable",
+            desktopPersistenceError: null,
             projects: [],
             saveStatus: {},
             restoredRevisions: {},
@@ -486,6 +459,7 @@ export const useCanvasStore = create<CanvasStore>()(
                     viewport: initialViewport,
                     sidePanel: DEFAULT_CANVAS_SIDE_PANEL,
                     agentPanel: options?.pendingAgentRequest ? { ...DEFAULT_CANVAS_AGENT_PANEL, open: true } : DEFAULT_CANVAS_AGENT_PANEL,
+                    operationState: createCanvasOperationState({ nodes: [] }),
                 };
                 set((state) => ({
                     projects: [project, ...state.projects],
@@ -496,10 +470,11 @@ export const useCanvasStore = create<CanvasStore>()(
             importProject: (source) => {
                 validateCanvasGraph({ nodes: source.nodes || [], connections: source.connections || [] });
                 const now = new Date().toISOString();
-                const project: CanvasProject = {
+                const id = nanoid();
+                const project = rebindCanvasProjectIdentity(migrateCanvasProject<CanvasProject>({
                     ...source,
                     __desktopRevision: undefined,
-                    id: nanoid(),
+                    id,
                     title: source.title || "导入画布",
                     createdAt: source.createdAt || now,
                     updatedAt: now,
@@ -514,71 +489,115 @@ export const useCanvasStore = create<CanvasStore>()(
                     viewport: source.viewport || initialViewport,
                     sidePanel: source.sidePanel || DEFAULT_CANVAS_SIDE_PANEL,
                     agentPanel: source.agentPanel || DEFAULT_CANVAS_AGENT_PANEL,
-                };
+                    operationState: source.operationState || createCanvasOperationState({ nodes: source.nodes || [] }),
+                }), id);
                 set((state) => ({
                     projects: [project, ...state.projects],
                 }));
                 queueProjectSave(project);
                 return project.id;
             },
-            openProject: (id) =>
-                get().projects.find((item) => item.id === id) || null,
+            openProject: (id) => get().projects.find((item) => item.id === id) || null,
             renameProject: (id, title) => {
-                const project = get().projects.find(
-                    (item) => item.id === id,
-                );
-                if (!project) return;
+                const sourceProject = get().projects.find((item) => item.id === id);
+                if (!sourceProject) return;
+                const project = migrateCanvasProject(sourceProject);
+                const nextTitle = title.trim() || project.title;
+                if (nextTitle === project.title && !project.autoTitlePending) return;
+                const timestamp = new Date().toISOString();
+                const outcome = applyCanvasOperationBatch(project, {
+                    protocolVersion: CANVAS_OPERATION_PROTOCOL_VERSION,
+                    actor: "human",
+                    requestId: `ui-title-${nanoid()}`,
+                    projectId: id,
+                    baseRevision: project.operationState.revision,
+                    timestamp,
+                    operations: [{ type: "project.update", title: nextTitle }],
+                }, { now: () => timestamp });
+                if (!outcome.result.ok) return;
                 const nextProject = {
-                    ...project,
-                    title: title.trim() || project.title,
+                    ...outcome.project,
                     autoTitlePending: false,
-                    updatedAt: new Date().toISOString(),
                 };
                 set((state) => ({
-                    projects: state.projects.map((item) =>
-                        item.id === id ? nextProject : item,
-                    ),
+                    projects: state.projects.map((item) => (item.id === id ? nextProject : item)),
                 }));
                 queueProjectSave(nextProject);
             },
             deleteProjects: (ids) => {
                 cancelProjectSaves(ids);
                 set((state) => ({
-                    projects: state.projects.filter(
-                        (project) => !ids.includes(project.id),
-                    ),
+                    projects: state.projects.filter((project) => !ids.includes(project.id)),
                 }));
             },
             updateProject: (id, patch) => {
-                const project = get().projects.find(
+                const sourceProject = get().projects.find(
                     (item) => item.id === id,
                 );
-                if (!project) return;
+                if (!sourceProject) return;
+                const project = migrateCanvasProject(sourceProject);
                 const uiOnly = isUiOnlyProjectPatch(patch);
-                const nextProject = {
-                    ...project,
-                    ...patch,
-                    updatedAt: uiOnly ? project.updatedAt : new Date().toISOString(),
+                const targetNodes = patch.nodes || project.nodes;
+                const targetConnections = patch.connections || project.connections;
+                const operations = buildCanvasStructureOperations(project, targetNodes, targetConnections);
+                let nextProject: CanvasProject = project;
+                if (operations.length) {
+                    const timestamp = new Date().toISOString();
+                    const outcome = applyCanvasOperationBatch(project, {
+                        protocolVersion: CANVAS_OPERATION_PROTOCOL_VERSION,
+                        actor: "human",
+                        requestId: `ui-${nanoid()}`,
+                        projectId: id,
+                        baseRevision: project.operationState.revision,
+                        timestamp,
+                        operations,
+                    }, { now: () => timestamp });
+                    if (!outcome.result.ok) {
+                        const draft = { ...project, ...patch, updatedAt: timestamp };
+                        set((state) => ({ projects: state.projects.map((item) => item.id === id ? draft : item) }));
+                        queueProjectSave(draft);
+                        saveStatus(id, "error", outcome.result.error?.message || "画布修改未通过校验，草稿已保留");
+                        return;
+                    }
+                    nextProject = outcome.project;
+                }
+                const { nodes: _nodes, connections: _connections, ...projectPatch } = patch;
+                const projectPatchChanged = Object.entries(projectPatch).some(
+                    ([key, value]) => JSON.stringify(project[key as keyof CanvasProject]) !== JSON.stringify(value),
+                );
+                if (!operations.length && !projectPatchChanged) return;
+                nextProject = {
+                    ...nextProject,
+                    ...projectPatch,
+                    updatedAt: operations.length ? nextProject.updatedAt : uiOnly ? project.updatedAt : new Date().toISOString(),
                 };
                 set((state) => ({
-                    projects: state.projects.map((item) =>
-                        item.id === id ? nextProject : item,
-                    ),
+                    projects: state.projects.map((item) => (item.id === id ? nextProject : item)),
                 }));
                 if (!uiOnly) queueProjectSave(nextProject);
+            },
+            applyOperationBatch: (batch) => {
+                const sourceProject = get().projects.find((project) => project.id === batch.projectId);
+                if (!sourceProject) return null;
+                const outcome = applyCanvasOperationBatch(migrateCanvasProject(sourceProject), batch);
+                set((state) => ({
+                    projects: state.projects.map((project) => project.id === batch.projectId ? outcome.project : project),
+                }));
+                queueProjectSave(outcome.project);
+                return outcome;
             },
             syncWithRemote: async (token, syncEnabled) => {
                 if (!useUserStore.getState().token) return;
                 accountCanvasSyncEnabled = syncEnabled;
                 if (!syncEnabled) return;
-                const localProjects = get().projects;
+                const localProjects = get().projects.map((project) => migrateCanvasProject(project));
                 const remoteProjects = await listCanvasProjects(token).catch(
                     () => null,
                 );
                 if (!remoteProjects) return;
                 const projects = await reconcileCanvasProjects(
                     token,
-                    remoteProjects,
+                    remoteProjects.map((project) => migrateCanvasProject(project)),
                     localProjects,
                 );
                 if (saveTimer) {
@@ -618,17 +637,18 @@ export const useCanvasStore = create<CanvasStore>()(
     ),
 );
 
-export function mergeCanvasProjects(
-    remoteProjects: CanvasProject[],
-    localProjects: CanvasProject[],
-): CanvasProject[] {
+export function mergeCanvasProjects(remoteProjects: CanvasProject[], localProjects: CanvasProject[]): CanvasProject[] {
     const projects = new Map<string, CanvasProject>();
-    [...localProjects, ...remoteProjects].forEach((project) => {
+    [...localProjects, ...remoteProjects].map((project) => migrateCanvasProject(project)).forEach((project) => {
         const previous = projects.get(project.id);
+        const projectTime = Date.parse(project.updatedAt || "") || 0;
+        const previousTime = Date.parse(previous?.updatedAt || "") || 0;
+        const projectRevision = project.operationState.revision;
+        const previousRevision = previous?.operationState.revision ?? -1;
         if (
             !previous ||
-            Date.parse(project.updatedAt || "") >=
-            Date.parse(previous.updatedAt || "")
+            projectRevision > previousRevision ||
+            (projectRevision === previousRevision && projectTime >= previousTime)
         ) {
             projects.set(project.id, project);
         }
@@ -651,7 +671,7 @@ function mergeDesktopCanvasProjects(
         const localProject = localById.get(desktopProject.id);
         if (deletedDesktopIds.has(desktopProject.id)) return;
         projects.set(desktopProject.id, {
-            ...(pendingProjects.get(desktopProject.id) || desktopProject),
+            ...migrateCanvasProject(pendingProjects.get(desktopProject.id) || desktopProject),
             viewport: localProject?.viewport || desktopProject.viewport,
             sidePanel: localProject?.sidePanel || desktopProject.sidePanel,
             agentPanel: localProject?.agentPanel || desktopProject.agentPanel,

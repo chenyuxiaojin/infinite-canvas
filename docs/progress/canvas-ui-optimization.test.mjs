@@ -45,13 +45,13 @@ const contextModule = load(base + 'agent/canvas-agent-context.ts', {
  '@/lib/video-model-capabilities': {supportsVideoAudioGeneration: () => false}, '../types': types,
 });
 test('context body budget and one-hop related nodes do not depend on edge ordering', () => {
- const input = {projectId: 'isolated', projectTitle: 'test', nodes: Array.from({length: 130}, (_, i) => ({...node(String(i)), title: String(i), type: 'text', metadata: {content: 'original body'}})), selectedNodeIds: ['0'], config: {}, agentState: {approvedNodeIds: [], referenceNodeIds: []}, connections: [edge('a','0','1'),edge('b','1','2')]};
+ const input = {operationState: { version: 1, revision: 0, locks: {}, tasks: {}, requests: {}, audit: [], history: { prunedAuditEntries: 0, prunedRequestEntries: 0, latestPrunedRevision: 0 } }, projectId: 'isolated', projectTitle: 'test', nodes: Array.from({length: 130}, (_, i) => ({...node(String(i)), title: String(i), type: 'text', metadata: {content: 'original body'}})), selectedNodeIds: ['0'], config: {}, agentState: {approvedNodeIds: [], referenceNodeIds: []}, connections: [edge('a','0','1'),edge('b','1','2')]};
  const first = contextModule.buildCanvasAgentContext(input);
- const reverse = contextModule.buildCanvasAgentContext({...input, connections: [...input.connections].reverse()});
+ const reverse = contextModule.buildCanvasAgentContext({ operationState: { version: 1, revision: 0, locks: {}, tasks: {}, requests: {}, audit: [], history: { prunedAuditEntries: 0, prunedRequestEntries: 0, latestPrunedRevision: 0 } },...input, connections: [...input.connections].reverse()});
  assert.equal(first.nodes.length, 120);
  assert.deepEqual([...first.nodes.filter(n => n.text).map(n => n.id)], ['0','1']);
  assert.deepEqual([...reverse.nodes.filter(n => n.text).map(n => n.id)], ['0','1']);
- const broad = contextModule.buildCanvasAgentContext({...input, selectedNodeIds: input.nodes.map(n => n.id)});
+ const broad = contextModule.buildCanvasAgentContext({ operationState: { version: 1, revision: 0, locks: {}, tasks: {}, requests: {}, audit: [], history: { prunedAuditEntries: 0, prunedRequestEntries: 0, latestPrunedRevision: 0 } },...input, selectedNodeIds: input.nodes.map(n => n.id)});
  assert.equal(broad.nodes.filter(n => n.text).length, 16);
  assert.equal(input.nodes[2].metadata.content, 'original body');
 });

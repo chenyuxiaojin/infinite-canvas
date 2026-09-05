@@ -429,3 +429,8 @@ Agent Bridge 都读写这些行；Agent 不建立第二份画布项目表。
 - 分页索引：`idx_prompt_catalogs_page(updated_at DESC,id ASC)`、`idx_prompts_page(updated_at DESC,id ASC)`、`idx_prompt_favorites_page(updated_at DESC,id ASC)`、`idx_assets_page(updated_at DESC)`。由 Rust 提示词初始化幂等建立，标签语义和既有目录/素材数据不变。
 
 快照引用媒体而不复制原文件。存储上限指保留记录的逻辑字节数；SQLite 删除记录后的空页可复用，文件物理大小不保证立即缩小。
+
+
+## 分支整合后的公共协作状态
+
+`canvas_projects.project_data` 继续保留未知兼容字段，并新增/沿用 `operationState`（revision、locks、tasks、requests、audit、history）。Bridge 公共操作与任务写入同一项目行并记录主线持久历史；没有新增第二套画布表。外部普通操作使用内容 SHA-256 校验，内部协作 reducer 使用数字修订号，两者不能混作同一个版本字段。

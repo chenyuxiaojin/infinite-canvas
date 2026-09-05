@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowUp, LoaderCircle, Maximize2 } from "lucide-react";
 import { Button, Modal, Tooltip } from "antd";
 
@@ -54,13 +54,44 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const [expanded, setExpanded] = useState(false);
     const credits = requestCreditCost({ channelMode: config.channelMode, modelCosts, model: config.model, count: mode === "image" ? config.count : 1 });
 
+    // 打字只更新本地状态，停顿 400ms 才提交到画布工程，避免每个按键触发全画布重渲染（中文输入法组词时会闪屏）
+    const lastCommittedRef = useRef(sourcePrompt);
+    const commitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const flushPrompt = (value: string) => {
+        if (commitTimerRef.current) {
+            clearTimeout(commitTimerRef.current);
+            commitTimerRef.current = null;
+        }
+        if (value === lastCommittedRef.current) return;
+        lastCommittedRef.current = value;
+        onPromptChange(node.id, value);
+    };
+
     useEffect(() => {
+        lastCommittedRef.current = sourcePrompt;
         setPrompt(sourcePrompt);
-    }, [node.id, sourcePrompt]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [node.id]);
+
+    useEffect(() => {
+        if (sourcePrompt === lastCommittedRef.current) return;
+        lastCommittedRef.current = sourcePrompt;
+        setPrompt(sourcePrompt);
+    }, [sourcePrompt]);
+
+    useEffect(() => () => {
+        if (commitTimerRef.current) clearTimeout(commitTimerRef.current);
+    }, []);
 
     const updatePrompt = (value: string) => {
         setPrompt(value);
-        onPromptChange(node.id, value);
+        if (commitTimerRef.current) clearTimeout(commitTimerRef.current);
+        commitTimerRef.current = setTimeout(() => {
+            commitTimerRef.current = null;
+            lastCommittedRef.current = value;
+            onPromptChange(node.id, value);
+        }, 400);
     };
 
     const canSubmit = Boolean(prompt.trim()) || (isPanorama && (hasImageContent || mentionReferences.length > 0));
@@ -68,6 +99,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const submit = () => {
         const text = prompt.trim();
         if (!canSubmit || isRunning) return;
+        flushPrompt(prompt);
         onGenerate(node.id, mode, text);
         if (!isPanorama) setPrompt("");
     };

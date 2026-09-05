@@ -20,9 +20,10 @@ function load(path, imports = {}, globals = {}) {
     } }).outputText;
     const module = { exports: {} };
     vm.runInNewContext(output, {
-        module, exports: module.exports, Blob, URL, URLSearchParams, console,
+        module, exports: module.exports, Blob, URL, URLSearchParams, console, structuredClone,
         setTimeout, clearTimeout, fetch: noRequest, ...globals,
         require(name) {
+            if (name === "../protocol/canvas-operation-protocol") return load("app/(user)/canvas/protocol/canvas-operation-protocol.ts");
             if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "fragment" };
             assert.ok(Object.hasOwn(imports, name), `Unexpected import ${name} in ${path}`);
             return imports[name];

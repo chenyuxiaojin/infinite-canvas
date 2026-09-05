@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Input, Select } from "antd";
-import { BookOpen, Box, Check, ChevronRight, CircleAlert, Clapperboard, FileText, Group, Image as ImageIcon, Layers, LoaderCircle, MapPin, Music2, Palette, Search, Settings2, Type, Users, Video, type LucideIcon } from "lucide-react";
+import { Clock, BookOpen, Box, Check, ChevronRight, CircleAlert, Clapperboard, FileText, Group, Image as ImageIcon, Layers, LoaderCircle, MapPin, Music2, Palette, Search, Settings2, Type, Users, Video, type LucideIcon } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { cn } from "@/lib/utils";
@@ -22,6 +22,7 @@ const NODE_TYPES = {
 };
 const NODE_FILTER_OPTIONS = [{ label: "全部", value: "all" }, ...Object.entries(NODE_TYPES).map(([value, { label }]) => ({ label, value }))];
 const NODE_STATUS = {
+    pending_approval: { label: "待确认", icon: Clock },
     success: { label: "已完成", icon: Check },
     loading: { label: "生成中", icon: LoaderCircle },
     error: { label: "生成失败", icon: CircleAlert },
@@ -52,7 +53,7 @@ function getNodeCategory(title: string): NodeCategory {
     return "other";
 }
 
-export function CanvasNodeOutline({ nodes, selectedNodeIds, onFocusNode }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void }) {
+export function CanvasNodeOutline({ nodes, selectedNodeIds, onFocusNode, spotlightGroupId, onFocusGroup }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; spotlightGroupId?: string | null; onFocusGroup?: (groupId: string | null) => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [keyword, setKeyword] = useState("");
     const [typeFilter, setTypeFilter] = useState("all");
@@ -107,7 +108,7 @@ export function CanvasNodeOutline({ nodes, selectedNodeIds, onFocusNode }: { nod
                     const status = node.metadata?.status && node.metadata.status !== "idle" ? NODE_STATUS[node.metadata.status] : undefined;
                     const StatusIcon = status?.icon;
                     return (
-                        <li key={node.id}>
+                        <li key={node.id} className="flex items-center">
                             <button
                                 ref={(element) => { if (element) rowRefs.current.set(node.id, element); else rowRefs.current.delete(node.id); }}
                                 type="button"
@@ -122,6 +123,7 @@ export function CanvasNodeOutline({ nodes, selectedNodeIds, onFocusNode }: { nod
                                 <span className={cn("min-w-0 flex-1 line-clamp-2 break-words text-sm leading-5", active && "font-medium")}>{title}</span>
                                 {status && StatusIcon ? <span className="mt-0.5 shrink-0" role="img" aria-label={status.label} title={status.label} style={{ color: theme.node.muted }}><StatusIcon className={cn("size-3.5", node.metadata?.status === "loading" && "animate-spin motion-reduce:animate-none")} aria-hidden /></span> : null}
                             </button>
+                            {node.type === "group" && onFocusGroup ? <button type="button" aria-pressed={spotlightGroupId === node.id} title={spotlightGroupId === node.id ? "退出场次聚焦" : "聚焦此场次"} className="shrink-0 px-2 py-2 text-xs" style={{ color: spotlightGroupId === node.id ? theme.toolbar.activeText : theme.node.muted }} onClick={() => onFocusGroup(spotlightGroupId === node.id ? null : node.id)}>{spotlightGroupId === node.id ? "退出" : "聚焦"}</button> : null}
                         </li>
                     );
                 })}

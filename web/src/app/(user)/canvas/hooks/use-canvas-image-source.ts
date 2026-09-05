@@ -4,17 +4,18 @@ import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { acquireCanvasLocalImage, localCanvasImageKey } from "@/services/canvas-local-image";
 
+import type { LocalMediaReference } from "../types";
 import { acquireCanvasStoredMedia } from "@/services/canvas-media-lease";
 
 type Lease = ReturnType<typeof acquireCanvasLocalImage>;
 type LoadedImage = { identity: string; lease: Lease; src?: string; error?: string };
 
-export function useCanvasImageSource(metadata?: { content?: string; storageKey?: string }, enabled = true, observeVisibility = false, image = true) {
+export function useCanvasImageSource(metadata?: { content?: string; storageKey?: string; localMedia?: LocalMediaReference }, enabled = true, observeVisibility = false, image = true) {
     const params = useParams<{ id?: string }>();
     const projectId = params?.id || "";
     const localKey = localCanvasImageKey(metadata);
     const storageKey = localKey || metadata?.storageKey || "";
-    const identity = JSON.stringify([projectId, storageKey, image]);
+    const identity = JSON.stringify([projectId, storageKey, image, metadata?.localMedia]);
     const ref = useRef<HTMLDivElement>(null);
     const leaseRef = useRef<Lease | null>(null);
     const [visible, setVisible] = useState(!observeVisibility);
@@ -32,7 +33,13 @@ export function useCanvasImageSource(metadata?: { content?: string; storageKey?:
 
     useEffect(() => {
         if (!enabled || !storageKey || (localKey && !projectId) || (observeVisibility && !visible)) return;
-        const lease = localKey && image ? acquireCanvasLocalImage(projectId, localKey) : acquireCanvasStoredMedia(storageKey, metadata?.content, image, projectId);
+        const lease = !image && metadata?.localMedia ? {
+            url: import("@/services/desktop-runtime").then(({ resolveLocalMediaReference }) => resolveLocalMediaReference(metadata.localMedia!, projectId)).then((result) => {
+                if (result.status !== "available" || !result.playbackUrl) throw new Error("本机媒体不可用，请重新定位原文件");
+                return result.playbackUrl;
+            }),
+            release() {},
+        } : localKey && image ? acquireCanvasLocalImage(projectId, localKey) : acquireCanvasStoredMedia(storageKey, metadata?.content, image, projectId);
         leaseRef.current = lease;
         let live = true;
         setLoaded(null);

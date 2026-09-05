@@ -1,27 +1,35 @@
 use std::{
+    io::Read,
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
 };
 
-use local_agent_adapter::{AgentRuntime, BridgeError, TestClipRequest};
+use local_agent_adapter::{
+    AgentRuntime, BridgeError, ImageIngestRequest, TestClipRequest, VideoIngestRequest,
+};
 use local_ai_audio::{
     Capability, EndToEndStatus, LoopbackServiceProbe, ProviderId as AudioProviderId,
     ProviderStatus as AudioProviderStatus, ServiceProbe, ServiceState, ServiceStatus,
 };
 use local_executor::{
-    AllowedRoot, Executor, ExecutorConfig, ExecutorError, GenerateTestClip, OutputConflictPolicy,
-    RootId, ScopedPath, SubmitOutcome, TaskAction, TaskId, TaskRequest, TaskResult, TaskSnapshot,
-    TaskStatus, ToolDiscoveryConfig, Toolchain,
+    AllowedRoot, Executor, ExecutorConfig, ExecutorError, GenerateTestClip, MediaProbe,
+    OutputConflictPolicy, RootId, ScopedPath, SubmitOutcome, TaskAction, TaskId, TaskRequest,
+    TaskResult, TaskSnapshot, TaskStatus, ToolDiscoveryConfig, Toolchain, TranscodeToMp4,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::State;
 
+use crate::local_media::{LocalMediaManager, LocalMediaResolution, TaskMediaReferenceInput};
+
 const ACCEPTANCE_ROOT_ID: &str = "desktop-acceptance";
+const AGENT_MEDIA_ROOT_ID: &str = "agent-media";
 const TEST_CLIP_IDEMPOTENCY_KEY: &str = "desktop-p2-deterministic-clip-v1";
-const MAX_DESKTOP_TASK_MEDIA_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_AGENT_MEDIA_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_AGENT_IMAGE_BYTES: u64 = 100 * 1024 * 1024;
+const AGENT_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp"];
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ToolSummary {
@@ -72,28 +80,25 @@ pub(crate) struct SubmittedTask {
     duplicate: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct DesktopTaskMedia {
-    task_id: String,
-    mime_type: &'static str,
-    file_name: String,
-    sha256: String,
-    bytes: Vec<u8>,
-}
-
 pub(crate) struct DesktopRuntime {
     executor: Mutex<Option<Executor>>,
     ffmpeg: FfmpegSummary,
     acceptance_directory: Option<PathBuf>,
+    agent_media_directory: Option<PathBuf>,
+    local_media: std::sync::Arc<LocalMediaManager>,
 }
 
 impl DesktopRuntime {
-    pub(crate) fn initialize(app_data_directory: &Path) -> Self {
+    pub(crate) fn initialize(
+        app_data_directory: &Path,
+        local_media: std::sync::Arc<LocalMediaManager>,
+    ) -> Self {
         let toolchain = match Toolchain::discover(ToolDiscoveryConfig::default()) {
             Ok(toolchain) => toolchain,
             Err(_) => {
                 return Self::unavailable(
                     "FFmpeg or ffprobe was not found in the desktop allowlist.",
+                    local_media,
                 );
             }
         };
@@ -109,12 +114,19 @@ impl DesktopRuntime {
         let executor_root = app_data_directory.join("local-executor");
         let state_directory = executor_root.join("state");
         let acceptance_directory = executor_root.join("acceptance");
+        let agent_media_directory = app_data_directory.join("agent-media");
+        let agent_media_inbox = agent_media_directory.join("inbox");
+        let agent_media_verified = agent_media_directory.join("verified");
         if std::fs::create_dir_all(&state_directory).is_err()
             || std::fs::create_dir_all(&acceptance_directory).is_err()
+            || std::fs::create_dir_all(&agent_media_inbox).is_err()
+            || std::fs::create_dir_all(&agent_media_verified).is_err()
         {
             return Self {
                 executor: Mutex::new(None),
                 acceptance_directory: None,
+                agent_media_directory: None,
+                local_media,
                 ffmpeg: FfmpegSummary {
                     status: "error",
                     diagnostic: "The desktop executor data directories could not be prepared."
@@ -130,6 +142,8 @@ impl DesktopRuntime {
                 return Self {
                     executor: Mutex::new(None),
                     acceptance_directory: None,
+                    agent_media_directory: None,
+                    local_media,
                     ffmpeg: FfmpegSummary {
                         status: "error",
                         diagnostic: "The built-in desktop root identifier is invalid.".to_owned(),
@@ -144,6 +158,8 @@ impl DesktopRuntime {
                 return Self {
                     executor: Mutex::new(None),
                     acceptance_directory: None,
+                    agent_media_directory: None,
+                    local_media,
                     ffmpeg: FfmpegSummary {
                         status: "error",
                         diagnostic: "The desktop acceptance root could not be registered."
@@ -153,9 +169,41 @@ impl DesktopRuntime {
                 };
             }
         };
+        let agent_media_root_id = match RootId::new(AGENT_MEDIA_ROOT_ID) {
+            Ok(root_id) => root_id,
+            Err(_) => {
+                return Self {
+                    executor: Mutex::new(None),
+                    acceptance_directory: None,
+                    agent_media_directory: None,
+                    local_media,
+                    ffmpeg: FfmpegSummary {
+                        status: "error",
+                        diagnostic: "The Agent media root identifier is invalid.".to_owned(),
+                        tools,
+                    },
+                };
+            }
+        };
+        let agent_media_root = match AllowedRoot::new(agent_media_root_id, &agent_media_directory) {
+            Ok(root) => root,
+            Err(_) => {
+                return Self {
+                    executor: Mutex::new(None),
+                    acceptance_directory: None,
+                    agent_media_directory: None,
+                    local_media,
+                    ffmpeg: FfmpegSummary {
+                        status: "error",
+                        diagnostic: "The Agent media root could not be registered.".to_owned(),
+                        tools,
+                    },
+                };
+            }
+        };
         let executor = match Executor::new(ExecutorConfig {
             state_directory,
-            allowed_roots: vec![allowed_root],
+            allowed_roots: vec![allowed_root, agent_media_root],
             toolchain,
         }) {
             Ok(executor) => executor,
@@ -163,6 +211,8 @@ impl DesktopRuntime {
                 return Self {
                     executor: Mutex::new(None),
                     acceptance_directory: None,
+                    agent_media_directory: None,
+                    local_media,
                     ffmpeg: FfmpegSummary {
                         status: "error",
                         diagnostic: "The desktop media task journal could not be opened."
@@ -176,6 +226,8 @@ impl DesktopRuntime {
         Self {
             executor: Mutex::new(Some(executor)),
             acceptance_directory: Some(acceptance_directory),
+            agent_media_directory: Some(agent_media_directory),
+            local_media,
             ffmpeg: FfmpegSummary {
                 status: "available",
                 diagnostic: "The allowlisted local media executor is ready.".to_owned(),
@@ -184,10 +236,12 @@ impl DesktopRuntime {
         }
     }
 
-    fn unavailable(diagnostic: &str) -> Self {
+    fn unavailable(diagnostic: &str, local_media: std::sync::Arc<LocalMediaManager>) -> Self {
         Self {
             executor: Mutex::new(None),
             acceptance_directory: None,
+            agent_media_directory: None,
+            local_media,
             ffmpeg: FfmpegSummary {
                 status: "unavailable",
                 diagnostic: diagnostic.to_owned(),
@@ -233,6 +287,29 @@ impl DesktopRuntime {
         operation(executor).map_err(map_executor_error)
     }
 
+    pub(crate) fn agent_media_directory(&self) -> Option<&PathBuf> {
+        self.agent_media_directory.as_ref()
+    }
+
+    pub(crate) fn submit_paid_media_verification(
+        &self,
+        request: &VideoIngestRequest,
+    ) -> Result<TaskId, BridgeError> {
+        let media_directory = self
+            .agent_media_directory
+            .as_ref()
+            .ok_or_else(|| BridgeError::unavailable(self.ffmpeg.diagnostic.clone()))?;
+        let task = agent_video_ingest_request(media_directory, request)?;
+        let outcome = self.with_agent_executor(|executor| executor.submit(task))?;
+        Ok(match outcome {
+            SubmitOutcome::Accepted(task_id) | SubmitOutcome::Duplicate(task_id) => task_id,
+        })
+    }
+
+    pub(crate) fn paid_media_task(&self, task_id: &TaskId) -> Result<TaskSnapshot, BridgeError> {
+        self.with_agent_executor(|executor| executor.task(task_id))
+    }
+
     fn report(&self) -> DesktopRuntimeReport {
         DesktopRuntimeReport {
             transport: "agent_bridge",
@@ -268,6 +345,96 @@ impl AgentRuntime for DesktopRuntime {
             .map_err(|_| BridgeError::internal("The desktop runtime report could not be encoded."))
     }
 
+    fn media_inbox(&self) -> Result<Value, BridgeError> {
+        let directory = self
+            .agent_media_directory
+            .as_ref()
+            .map(|directory| directory.join("inbox"))
+            .ok_or_else(|| BridgeError::unavailable(self.ffmpeg.diagnostic.clone()))?;
+        if !directory.is_dir() {
+            return Err(BridgeError::unavailable(
+                "The fixed Agent media inbox is unavailable.",
+            ));
+        }
+        Ok(json!({
+            "kind": "fixed_app_support_inbox",
+            "inbox_id": "agent-media-inbox",
+            "request_field": "inbox_file_name",
+            "accepted_mime_types": ["video/mp4", "image/png", "image/jpeg", "image/webp"],
+            "max_file_bytes": MAX_AGENT_MEDIA_BYTES,
+            "max_image_file_bytes": MAX_AGENT_IMAGE_BYTES,
+            "arbitrary_paths": false,
+            "absolute_path_exposed": false
+        }))
+    }
+
+    fn validate_video_ingest(&self, request: &VideoIngestRequest) -> Result<(), BridgeError> {
+        let media_directory = self
+            .agent_media_directory
+            .as_ref()
+            .ok_or_else(|| BridgeError::unavailable(self.ffmpeg.diagnostic.clone()))?;
+        agent_video_ingest_request(media_directory, request).map(|_| ())
+    }
+
+    fn submit_video_ingest(&self, request: &VideoIngestRequest) -> Result<Value, BridgeError> {
+        let media_directory = self
+            .agent_media_directory
+            .as_ref()
+            .ok_or_else(|| BridgeError::unavailable(self.ffmpeg.diagnostic.clone()))?;
+        let task = agent_video_ingest_request(media_directory, request)?;
+        let outcome = self.with_agent_executor(|executor| executor.submit(task))?;
+        let (task_id, duplicate) = match outcome {
+            SubmitOutcome::Accepted(task_id) => (task_id, false),
+            SubmitOutcome::Duplicate(task_id) => (task_id, true),
+        };
+        Ok(json!({
+            "task_id": task_id.as_str(),
+            "duplicate": duplicate,
+            "mode": "allowlisted_mp4_ingest",
+            "paid": false
+        }))
+    }
+
+    fn ingest_image(&self, request: &ImageIngestRequest) -> Result<Value, BridgeError> {
+        let media_directory = self
+            .agent_media_directory
+            .as_ref()
+            .ok_or_else(|| BridgeError::unavailable(self.ffmpeg.diagnostic.clone()))?;
+        agent_image_ingest(media_directory, &self.local_media, request)
+    }
+
+    fn verify_media_reference(&self, reference: &Value) -> Result<(), BridgeError> {
+        let reference: crate::local_media::LocalMediaReference =
+            serde_json::from_value(reference.clone())
+                .map_err(|_| BridgeError::invalid("The media reference payload is invalid."))?;
+        let resolution = self.local_media.resolve_reference(reference);
+        if resolution.status == "available" {
+            Ok(())
+        } else {
+            Err(BridgeError::conflict(
+                "MEDIA_REFERENCE_UNAVAILABLE",
+                format!(
+                    "The referenced media is not available: {}",
+                    resolution.reason.unwrap_or("unknown")
+                ),
+            ))
+        }
+    }
+
+    fn quote_video_generation(
+        &self,
+        resolution: &str,
+        duration_seconds: u64,
+    ) -> Result<Value, BridgeError> {
+        let config = crate::paid_generation::load_config(self.local_media.app_data_directory())
+            .map_err(BridgeError::unavailable)?;
+        crate::paid_generation::quote(&config, resolution, duration_seconds).ok_or_else(|| {
+            BridgeError::unavailable(format!(
+                "付费生成配置缺少 {resolution} 的单价，请补充 price_yuan_per_second"
+            ))
+        })
+    }
+
     fn submit_test_clip(&self, request: &TestClipRequest) -> Result<Value, BridgeError> {
         let task = agent_test_clip_request(&request.project_id, &request.request_id)?;
         let outcome = self.with_agent_executor(|executor| executor.submit(task))?;
@@ -286,8 +453,7 @@ impl AgentRuntime for DesktopRuntime {
     fn task_status(&self, task_id: &str) -> Result<Value, BridgeError> {
         let task_id = parse_task_id(task_id)?;
         let snapshot = self.with_agent_executor(|executor| executor.task(&task_id))?;
-        serde_json::to_value(snapshot)
-            .map_err(|_| BridgeError::internal("The desktop task status could not be encoded."))
+        task_snapshot_value(self, &task_id, snapshot, false).map_err(BridgeError::internal)
     }
 
     fn cancel_task(&self, task_id: &str) -> Result<Value, BridgeError> {
@@ -330,46 +496,84 @@ pub(crate) fn generate_canvas_test_clip(
 pub(crate) fn desktop_task_status(
     runtime: State<'_, std::sync::Arc<DesktopRuntime>>,
     task_id: TaskId,
-) -> Result<TaskSnapshot, String> {
-    runtime.with_executor(|executor| executor.task(&task_id).map_err(|error| error.to_string()))
+) -> Result<Value, String> {
+    let snapshot = runtime
+        .with_executor(|executor| executor.task(&task_id).map_err(|error| error.to_string()))?;
+    task_snapshot_value(&runtime, &task_id, snapshot, true)
 }
 
 #[tauri::command]
-pub(crate) fn desktop_task_media(
+pub(crate) fn desktop_task_media_reference(
     runtime: State<'_, std::sync::Arc<DesktopRuntime>>,
     task_id: TaskId,
-) -> Result<DesktopTaskMedia, String> {
+) -> Result<LocalMediaResolution, String> {
     let snapshot = runtime
         .with_executor(|executor| executor.task(&task_id).map_err(|error| error.to_string()))?;
-    let (relative, expected_sha256) = completed_media_result(&snapshot)?;
-    let acceptance_directory = runtime
-        .acceptance_directory
-        .as_ref()
-        .ok_or_else(|| "The desktop acceptance directory is unavailable.".to_owned())?;
-    let path = acceptance_directory.join(&relative);
-    let metadata = std::fs::metadata(&path)
-        .map_err(|_| "The verified desktop task media is unavailable.".to_owned())?;
-    if !metadata.is_file() || metadata.len() > MAX_DESKTOP_TASK_MEDIA_BYTES {
-        return Err("The desktop task media crossed the fixed size boundary.".to_owned());
+    task_media_reference(&runtime, &snapshot)
+}
+
+fn task_snapshot_value(
+    runtime: &DesktopRuntime,
+    task_id: &TaskId,
+    snapshot: TaskSnapshot,
+    include_playback_url: bool,
+) -> Result<Value, String> {
+    let mut value = serde_json::to_value(&snapshot)
+        .map_err(|_| "The desktop task status could not be encoded.".to_owned())?;
+    if let Ok(mut reference) = task_media_reference(runtime, &snapshot) {
+        if !include_playback_url {
+            reference.playback_url = None;
+        }
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "local_media".to_owned(),
+                serde_json::to_value(reference)
+                    .map_err(|_| "The local media reference could not be encoded.".to_owned())?,
+            );
+            object.insert("id".to_owned(), Value::String(task_id.as_str().to_owned()));
+        }
     }
-    let bytes = std::fs::read(&path)
-        .map_err(|_| "The verified desktop task media could not be read.".to_owned())?;
-    let actual_sha256 = hex_sha256(&bytes);
-    if actual_sha256 != expected_sha256 {
-        return Err("The desktop task media no longer matches its verified digest.".to_owned());
-    }
-    let file_name = relative
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "The desktop task media name is invalid.".to_owned())?
-        .to_owned();
-    Ok(DesktopTaskMedia {
-        task_id: task_id.as_str().to_owned(),
-        mime_type: "video/mp4",
-        file_name,
-        sha256: actual_sha256,
-        bytes,
-    })
+    Ok(value)
+}
+
+pub(crate) fn task_media_reference(
+    runtime: &DesktopRuntime,
+    snapshot: &TaskSnapshot,
+) -> Result<LocalMediaResolution, String> {
+    let (scoped, expected_sha256, probe) = completed_media_result(snapshot)?;
+    let (root, root_id) = if scoped.root.as_str() == ACCEPTANCE_ROOT_ID {
+        (
+            runtime
+                .acceptance_directory
+                .as_ref()
+                .ok_or_else(|| "The desktop acceptance directory is unavailable.".to_owned())?,
+            ACCEPTANCE_ROOT_ID,
+        )
+    } else {
+        (
+            runtime
+                .agent_media_directory
+                .as_ref()
+                .ok_or_else(|| "The Agent media directory is unavailable.".to_owned())?,
+            AGENT_MEDIA_ROOT_ID,
+        )
+    };
+    let video = probe
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type == "video");
+    runtime
+        .local_media
+        .reference_for_task_media(TaskMediaReferenceInput {
+            root_id,
+            root,
+            relative: &scoped.relative,
+            sha256: &expected_sha256,
+            mime_type: "video/mp4",
+            width: video.and_then(|stream| stream.width.map(u64::from)),
+            height: video.and_then(|stream| stream.height.map(u64::from)),
+            duration_ms: probe.duration_ms,
+        })
 }
 
 #[tauri::command]
@@ -427,6 +631,188 @@ fn agent_test_clip_request(project_id: &str, request_id: &str) -> Result<TaskReq
     .map_err(BridgeError::invalid)
 }
 
+fn agent_video_ingest_request(
+    media_directory: &Path,
+    request: &VideoIngestRequest,
+) -> Result<TaskRequest, BridgeError> {
+    validate_project_id(&request.project_id).map_err(BridgeError::invalid)?;
+    validate_agent_identifier("node_id", &request.node_id, 64)?;
+    validate_agent_identifier("request_id", &request.request_id, 128)?;
+    if request.title.trim().is_empty() || request.title.len() > 256 {
+        return Err(BridgeError::invalid("The Agent video title is invalid."));
+    }
+    if !request.position.x.is_finite()
+        || !request.position.y.is_finite()
+        || request.position.x.abs() > 10_000_000.0
+        || request.position.y.abs() > 10_000_000.0
+    {
+        return Err(BridgeError::invalid(
+            "The Agent video position is outside the allowed range.",
+        ));
+    }
+    if !request.size.width.is_finite()
+        || !request.size.height.is_finite()
+        || !(40.0..=10_000.0).contains(&request.size.width)
+        || !(40.0..=10_000.0).contains(&request.size.height)
+    {
+        return Err(BridgeError::invalid(
+            "The Agent video size is outside the allowed range.",
+        ));
+    }
+    validate_inbox_file_name(&request.inbox_file_name, &["mp4"])?;
+    validate_sha256(&request.expected_sha256)?;
+    let input_path = media_directory.join("inbox").join(&request.inbox_file_name);
+    let metadata = std::fs::symlink_metadata(&input_path)
+        .map_err(|_| BridgeError::not_found("The allowlisted inbox media was not found."))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_AGENT_MEDIA_BYTES
+    {
+        return Err(BridgeError::forbidden(
+            "The inbox video crossed the fixed media boundary.",
+        ));
+    }
+    let actual_sha256 = sha256_file(&input_path)?;
+    if actual_sha256 != request.expected_sha256 {
+        return Err(BridgeError::conflict(
+            "MEDIA_DIGEST_MISMATCH",
+            "The inbox video does not match expected_sha256.",
+        ));
+    }
+    let root = RootId::new(AGENT_MEDIA_ROOT_ID).map_err(|error| {
+        BridgeError::internal(format!("The Agent media root is invalid: {error}"))
+    })?;
+    let input = ScopedPath::new(
+        root.clone(),
+        Path::new("inbox").join(&request.inbox_file_name),
+    )
+    .map_err(|_| BridgeError::forbidden("The inbox file name crossed the allowlisted root."))?;
+    let digest = hex_sha256(format!("{}:{}", request.project_id, request.request_id).as_bytes());
+    let output = ScopedPath::new(root, format!("verified/agent-video-{}.mp4", &digest[..20]))
+        .map_err(|_| BridgeError::internal("The verified Agent media path is invalid."))?;
+    Ok(TaskRequest {
+        idempotency_key: format!(
+            "desktop-agent-video-ingest-v1:{}:{}:{}",
+            request.project_id, request.request_id, request.expected_sha256
+        ),
+        timeout_ms: Duration::from_secs(10 * 60).as_millis() as u64,
+        action: TaskAction::TranscodeToMp4(TranscodeToMp4 {
+            input,
+            output,
+            conflict_policy: OutputConflictPolicy::Reject,
+        }),
+    })
+}
+
+fn agent_image_ingest(
+    media_directory: &Path,
+    local_media: &LocalMediaManager,
+    request: &ImageIngestRequest,
+) -> Result<Value, BridgeError> {
+    validate_project_id(&request.project_id).map_err(BridgeError::invalid)?;
+    validate_agent_identifier("node_id", &request.node_id, 64)?;
+    validate_agent_identifier("request_id", &request.request_id, 128)?;
+    if request.title.trim().is_empty() || request.title.len() > 256 {
+        return Err(BridgeError::invalid("The Agent image title is invalid."));
+    }
+    if !request.position.x.is_finite()
+        || !request.position.y.is_finite()
+        || request.position.x.abs() > 10_000_000.0
+        || request.position.y.abs() > 10_000_000.0
+    {
+        return Err(BridgeError::invalid(
+            "The Agent image position is outside the allowed range.",
+        ));
+    }
+    if !request.size.width.is_finite()
+        || !request.size.height.is_finite()
+        || !(40.0..=10_000.0).contains(&request.size.width)
+        || !(40.0..=10_000.0).contains(&request.size.height)
+    {
+        return Err(BridgeError::invalid(
+            "The Agent image size is outside the allowed range.",
+        ));
+    }
+    validate_inbox_file_name(&request.inbox_file_name, AGENT_IMAGE_EXTENSIONS)?;
+    validate_sha256(&request.expected_sha256)?;
+    let file_name = Path::new(&request.inbox_file_name);
+    let extension = file_name
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .ok_or_else(|| BridgeError::invalid("The inbox image extension is invalid."))?;
+    let mime_type = crate::local_media::mime_type_for_path(file_name)
+        .map_err(BridgeError::invalid)
+        .and_then(|mime| {
+            if mime.starts_with("image/") {
+                Ok(mime)
+            } else {
+                Err(BridgeError::invalid(
+                    "The inbox image MIME type is not an image.",
+                ))
+            }
+        })?;
+    let relative_output = format!(
+        "verified/agent-image-{}.{extension}",
+        &request.expected_sha256[..32]
+    );
+    let target = media_directory.join(&relative_output);
+    // 已验收副本按内容寻址；inbox 文件被清理后同一请求重放仍可成功。
+    let verified_exists =
+        matches!(std::fs::symlink_metadata(&target), Ok(metadata) if metadata.is_file());
+    if !verified_exists {
+        let input_path = media_directory.join("inbox").join(&request.inbox_file_name);
+        let metadata = std::fs::symlink_metadata(&input_path)
+            .map_err(|_| BridgeError::not_found("The allowlisted inbox image was not found."))?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_AGENT_IMAGE_BYTES
+        {
+            return Err(BridgeError::forbidden(
+                "The inbox image crossed the fixed media boundary.",
+            ));
+        }
+        let actual_sha256 = sha256_file(&input_path)?;
+        if actual_sha256 != request.expected_sha256 {
+            return Err(BridgeError::conflict(
+                "MEDIA_DIGEST_MISMATCH",
+                "The inbox image does not match expected_sha256.",
+            ));
+        }
+        crate::local_media::copy_verified_file(&input_path, &target, &request.expected_sha256)
+            .map_err(BridgeError::internal)?;
+    }
+    let probe = crate::local_media::probe_media(&target)
+        .map_err(|_| BridgeError::invalid("The inbox image could not be decoded as an image."))?;
+    // ffprobe 对损坏文件可能回 0×0 流而不报错，必须拒绝零尺寸。
+    let (Some(width), Some(height)) = (
+        probe.width.filter(|value| *value > 0),
+        probe.height.filter(|value| *value > 0),
+    ) else {
+        return Err(BridgeError::invalid(
+            "The inbox image has no decodable dimensions.",
+        ));
+    };
+    let resolution = local_media
+        .reference_for_task_media(TaskMediaReferenceInput {
+            root_id: AGENT_MEDIA_ROOT_ID,
+            root: media_directory,
+            relative: Path::new(&relative_output),
+            sha256: &request.expected_sha256,
+            mime_type: &mime_type,
+            width: Some(width),
+            height: Some(height),
+            duration_ms: None,
+        })
+        .map_err(BridgeError::internal)?;
+    Ok(json!({
+        "mode": "allowlisted_image_ingest",
+        "paid": false,
+        "reference": resolution.reference,
+    }))
+}
+
 fn fixed_test_clip_request(
     idempotency_key: String,
     output_name: &str,
@@ -468,30 +854,111 @@ fn validate_project_id(project_id: &str) -> Result<(), String> {
         || project_id.len() > 64
         || !project_id
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
     {
         return Err("The canvas project identifier is invalid.".to_owned());
     }
     Ok(())
 }
 
-fn completed_media_result(snapshot: &TaskSnapshot) -> Result<(PathBuf, String), String> {
+fn completed_media_result(
+    snapshot: &TaskSnapshot,
+) -> Result<(ScopedPath, String, MediaProbe), String> {
     if snapshot.status != TaskStatus::Succeeded {
         return Err("The desktop task has not completed successfully.".to_owned());
     }
-    let Some(TaskResult::MediaCreated { output, sha256, .. }) = &snapshot.result else {
+    let Some(TaskResult::MediaCreated {
+        output,
+        sha256,
+        probe,
+    }) = &snapshot.result
+    else {
         return Err("The desktop task did not create media.".to_owned());
     };
-    if output.root.as_str() != ACCEPTANCE_ROOT_ID || output.relative.components().count() != 1 {
-        return Err("The desktop task output is outside the acceptance root.".to_owned());
-    }
     let file_name = output.relative.to_string_lossy();
-    if file_name != "desktop-test-clip.mp4"
-        && !(file_name.starts_with("canvas-test-clip-") && file_name.ends_with(".mp4"))
-    {
-        return Err("The desktop task output is not an approved test clip.".to_owned());
+    let allowed = if output.root.as_str() == ACCEPTANCE_ROOT_ID {
+        output.relative.components().count() == 1
+            && (file_name == "desktop-test-clip.mp4"
+                || ((file_name.starts_with("canvas-test-clip-")
+                    || file_name.starts_with("agent-test-clip-"))
+                    && file_name.ends_with(".mp4")))
+    } else if output.root.as_str() == AGENT_MEDIA_ROOT_ID {
+        output.relative.components().count() == 2
+            && output.relative.parent() == Some(Path::new("verified"))
+            && output
+                .relative
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("agent-video-") && name.ends_with(".mp4"))
+    } else {
+        false
+    };
+    if !allowed {
+        return Err("The desktop task output is outside the approved media roots.".to_owned());
     }
-    Ok((output.relative.clone(), sha256.clone()))
+    Ok((output.clone(), sha256.clone(), probe.clone()))
+}
+
+fn validate_agent_identifier(label: &str, value: &str, max: usize) -> Result<(), BridgeError> {
+    if value.is_empty()
+        || value.len() > max
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(BridgeError::invalid(format!(
+            "The Agent {label} is invalid."
+        )));
+    }
+    Ok(())
+}
+
+fn validate_inbox_file_name(value: &str, extensions: &[&str]) -> Result<(), BridgeError> {
+    let path = Path::new(value);
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    if value.is_empty()
+        || value.len() > 255
+        || value.chars().any(char::is_control)
+        || path.components().count() != 1
+        || path.file_name().and_then(|name| name.to_str()) != Some(value)
+        || !extension.is_some_and(|extension| extensions.contains(&extension))
+    {
+        return Err(BridgeError::invalid(format!(
+            "inbox_file_name must be one {} file name without a path.",
+            extensions.join("/")
+        )));
+    }
+    Ok(())
+}
+
+fn validate_sha256(value: &str) -> Result<(), BridgeError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(BridgeError::invalid(
+            "expected_sha256 must be a lowercase SHA-256 digest.",
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, BridgeError> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|_| BridgeError::not_found("The allowlisted inbox media was not found."))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| BridgeError::internal("The inbox media could not be hashed."))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -577,6 +1044,24 @@ fn summarize_audio_service(
 mod tests {
     use super::*;
 
+    fn video_ingest_request(file_name: &str, sha256: String) -> VideoIngestRequest {
+        VideoIngestRequest {
+            project_id: "project-1".to_owned(),
+            node_id: "video-1".to_owned(),
+            request_id: "ingest-1".to_owned(),
+            base_revision: "0".to_owned(),
+            actor: local_agent_adapter::Actor::Agent,
+            inbox_file_name: file_name.to_owned(),
+            expected_sha256: sha256,
+            title: "Shot 001".to_owned(),
+            position: local_agent_adapter::Point { x: 0.0, y: 0.0 },
+            size: local_agent_adapter::CanvasSize {
+                width: 320.0,
+                height: 180.0,
+            },
+        }
+    }
+
     #[test]
     fn deterministic_request_has_no_command_or_freeform_path_surface() {
         let encoded = serde_json::to_string(&deterministic_test_clip_request().unwrap()).unwrap();
@@ -618,6 +1103,190 @@ mod tests {
             assert!(canvas_test_clip_request(project_id).is_err());
         }
         assert!(canvas_test_clip_request(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn video_ingest_accepts_only_a_hashed_mp4_basename_in_the_fixed_inbox() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = root.path().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let bytes = b"fixture-mp4-bytes";
+        std::fs::write(inbox.join("shot-001.mp4"), bytes).unwrap();
+        let request = video_ingest_request("shot-001.mp4", hex_sha256(bytes));
+        let task = agent_video_ingest_request(root.path(), &request).unwrap();
+        let timeout_ms = task.timeout_ms;
+        let TaskAction::TranscodeToMp4(parameters) = task.action else {
+            panic!("expected the fixed transcode action");
+        };
+        assert_eq!(parameters.input.root.as_str(), AGENT_MEDIA_ROOT_ID);
+        assert_eq!(
+            parameters.input.relative,
+            PathBuf::from("inbox/shot-001.mp4")
+        );
+        assert_eq!(parameters.output.root.as_str(), AGENT_MEDIA_ROOT_ID);
+        assert_eq!(
+            parameters.output.relative.parent(),
+            Some(Path::new("verified"))
+        );
+        assert_eq!(parameters.conflict_policy, OutputConflictPolicy::Reject);
+        assert_eq!(timeout_ms, 10 * 60 * 1000);
+    }
+
+    #[test]
+    fn video_ingest_rejects_paths_symlinks_and_digest_mismatches() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = root.path().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(inbox.join("shot.mp4"), b"fixture").unwrap();
+
+        let traversal = video_ingest_request("../shot.mp4", hex_sha256(b"fixture"));
+        assert_eq!(
+            agent_video_ingest_request(root.path(), &traversal)
+                .unwrap_err()
+                .code,
+            "INVALID_REQUEST"
+        );
+
+        let mismatch = video_ingest_request("shot.mp4", "a".repeat(64));
+        assert_eq!(
+            agent_video_ingest_request(root.path(), &mismatch)
+                .unwrap_err()
+                .code,
+            "MEDIA_DIGEST_MISMATCH"
+        );
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(inbox.join("shot.mp4"), inbox.join("link.mp4")).unwrap();
+            let symlink = video_ingest_request("link.mp4", hex_sha256(b"fixture"));
+            assert_eq!(
+                agent_video_ingest_request(root.path(), &symlink)
+                    .unwrap_err()
+                    .code,
+                "CAPABILITY_DENIED"
+            );
+        }
+    }
+
+    fn image_ingest_request(file_name: &str, sha256: String) -> ImageIngestRequest {
+        ImageIngestRequest {
+            project_id: "project-1".to_owned(),
+            node_id: "image-1".to_owned(),
+            request_id: "image-ingest-1".to_owned(),
+            base_revision: "0".to_owned(),
+            actor: local_agent_adapter::Actor::Agent,
+            inbox_file_name: file_name.to_owned(),
+            expected_sha256: sha256,
+            title: "Frame 001".to_owned(),
+            position: local_agent_adapter::Point { x: 0.0, y: 0.0 },
+            size: local_agent_adapter::CanvasSize {
+                width: 320.0,
+                height: 240.0,
+            },
+        }
+    }
+
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn image_ingest_registers_a_content_addressed_reference_and_replays_without_inbox() {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("agent-media");
+        std::fs::create_dir_all(media.join("inbox")).unwrap();
+        let inbox_file = media.join("inbox").join("frame-001.png");
+        std::fs::write(&inbox_file, TINY_PNG).unwrap();
+        if crate::local_media::probe_media(&inbox_file).is_err() {
+            eprintln!("skipping image ingest probe test: ffprobe unavailable");
+            return;
+        }
+        let local_media = LocalMediaManager::offline_for_tests(root.path()).unwrap();
+        let request = image_ingest_request("frame-001.png", hex_sha256(TINY_PNG));
+        let result = agent_image_ingest(&media, &local_media, &request).unwrap();
+        assert_eq!(result["mode"], "allowlisted_image_ingest");
+        assert_eq!(result["paid"], false);
+        let reference = &result["reference"];
+        assert_eq!(reference["rootId"], AGENT_MEDIA_ROOT_ID);
+        assert_eq!(reference["width"], 1);
+        assert_eq!(reference["height"], 1);
+        assert_eq!(reference["mimeType"], "image/png");
+        assert_eq!(reference["sha256"], hex_sha256(TINY_PNG));
+        let relative = reference["relativePath"].as_str().unwrap();
+        assert!(relative.starts_with("verified/agent-image-") && relative.ends_with(".png"));
+        assert!(reference["storageKey"]
+            .as_str()
+            .unwrap()
+            .starts_with("local-ref:asset-"));
+        assert!(result.get("playbackUrl").is_none());
+        assert!(reference.get("playbackUrl").is_none());
+
+        std::fs::remove_file(&inbox_file).unwrap();
+        let replay = agent_image_ingest(&media, &local_media, &request).unwrap();
+        assert_eq!(replay["reference"]["sha256"], reference["sha256"]);
+
+        let garbage = media.join("inbox").join("broken.webp");
+        std::fs::write(&garbage, b"not-an-image").unwrap();
+        let broken = image_ingest_request("broken.webp", hex_sha256(b"not-an-image"));
+        assert_eq!(
+            agent_image_ingest(&media, &local_media, &broken)
+                .unwrap_err()
+                .code,
+            "INVALID_REQUEST"
+        );
+    }
+
+    #[test]
+    fn image_ingest_rejects_paths_extensions_symlinks_and_digest_mismatches() {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("agent-media");
+        std::fs::create_dir_all(media.join("inbox")).unwrap();
+        let local_media = LocalMediaManager::offline_for_tests(root.path()).unwrap();
+        std::fs::write(media.join("inbox").join("frame.png"), b"fixture").unwrap();
+
+        let traversal = image_ingest_request("../frame.png", hex_sha256(b"fixture"));
+        assert_eq!(
+            agent_image_ingest(&media, &local_media, &traversal)
+                .unwrap_err()
+                .code,
+            "INVALID_REQUEST"
+        );
+
+        let wrong_extension = image_ingest_request("frame.mp4", hex_sha256(b"fixture"));
+        assert_eq!(
+            agent_image_ingest(&media, &local_media, &wrong_extension)
+                .unwrap_err()
+                .code,
+            "INVALID_REQUEST"
+        );
+
+        let mismatch = image_ingest_request("frame.png", "a".repeat(64));
+        assert_eq!(
+            agent_image_ingest(&media, &local_media, &mismatch)
+                .unwrap_err()
+                .code,
+            "MEDIA_DIGEST_MISMATCH"
+        );
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                media.join("inbox").join("frame.png"),
+                media.join("inbox").join("link.png"),
+            )
+            .unwrap();
+            let symlink = image_ingest_request("link.png", hex_sha256(b"fixture"));
+            assert_eq!(
+                agent_image_ingest(&media, &local_media, &symlink)
+                    .unwrap_err()
+                    .code,
+                "CAPABILITY_DENIED"
+            );
+        }
     }
 
     #[test]

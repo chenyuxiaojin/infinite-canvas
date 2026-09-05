@@ -2,6 +2,7 @@
 
 import { type CSSProperties, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+    Settings2,
     History,
     Bot,
     PanelRightClose,
@@ -13,7 +14,7 @@ import {
     Video,
     X,
 } from "lucide-react";
-import { Button, Modal, Tooltip } from "antd";
+import { Button, Modal, Switch, Tooltip } from "antd";
 import { motion } from "motion/react";
 import { nanoid } from "nanoid";
 import { useCopyText } from "@/hooks/use-copy-text";
@@ -69,6 +70,10 @@ type CanvasAssistantPanelProps = {
     onOpenAssets: () => void;
     getAgentContext: (state: CanvasAgentState) => CanvasAgentContext;
     onExecuteAction: (action: CanvasAgentAction, messageReferenceNodeIds: string[]) => Promise<CanvasAgentToolResult>;
+    onAgentRunStart: (input: { batchId: string; summary: string }) => void;
+    onAgentRunProgress: (input: { batchId: string; message: string }) => void;
+    onAgentActionResult: (input: { batchId: string; action: CanvasAgentAction; result: CanvasAgentToolResult }) => void;
+    onAgentRunComplete: (input: { batchId: string; error?: string }) => void;
     onCollapseStart: () => void;
     onCollapse: () => void;
     initialRequest?: { prompt: string; references: CanvasAssistantReference[] } | null;
@@ -101,6 +106,10 @@ export function CanvasAssistantPanel({
     onOpenAssets,
     getAgentContext,
     onExecuteAction,
+    onAgentRunStart,
+    onAgentRunProgress,
+    onAgentActionResult,
+    onAgentRunComplete,
     onCollapseStart,
     onCollapse,
     initialRequest,
@@ -123,6 +132,7 @@ export function CanvasAssistantPanel({
     const [isRunning, setIsRunning] = useState(false);
     const [checkedChatIds, setCheckedChatIds] = useState<string[]>([]);
     const [deleteChatIds, setDeleteChatIds] = useState<string[]>([]);
+    const [settingsOpen, setSettingsOpen] = useState(false);
     const [closing, setClosing] = useState(false);
     const [resizing, setResizing] = useState(false);
     const [composerReferenceIds, setComposerReferenceIds] = useState<string[]>([]);
@@ -139,11 +149,14 @@ export function CanvasAssistantPanel({
         activeSessionIdRef.current = resolvedActiveSessionId;
     }, [resolvedActiveSessionId, sessions]);
 
-    useEffect(() => () => {
-        abortRef.current?.abort();
-        pendingDeleteRef.current?.resolve(false);
-        pendingDeleteRef.current = null;
-    }, []);
+    useEffect(
+        () => () => {
+            abortRef.current?.abort();
+            pendingDeleteRef.current?.resolve(false);
+            pendingDeleteRef.current = null;
+        },
+        [],
+    );
 
     const activeSession = safeSessions.find((session) => session.id === resolvedActiveSessionId) || safeSessions[0] || null;
     const provider = activeSession?.provider || "api";
@@ -211,18 +224,20 @@ export function CanvasAssistantPanel({
     const resourceReferences = useMemo(() => buildAllCanvasResourceReferences(nodes), [nodes]);
     const resourceReferenceById = useMemo(() => new Map(resourceReferences.map((reference) => [reference.nodeId, reference])), [resourceReferences]);
     const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
-    const resolveReferences = useCallback((ids: string[]) => ids.flatMap((id) => {
-        const node = nodeById.get(id);
-        const resource = resourceReferenceById.get(id);
-        const reference = node && resource ? nodeToReference(node, resource) : null;
-        return reference ? [reference] : [];
-    }), [nodeById, resourceReferenceById]);
+    const resolveReferences = useCallback(
+        (ids: string[]) =>
+            ids.flatMap((id) => {
+                const node = nodeById.get(id);
+                const resource = resourceReferenceById.get(id);
+                const reference = node && resource ? nodeToReference(node, resource) : null;
+                return reference ? [reference] : [];
+            }),
+        [nodeById, resourceReferenceById],
+    );
     const composerReferences = useMemo(() => resolveReferences(composerReferenceIds), [composerReferenceIds, resolveReferences]);
     const pendingReferences = useMemo(() => {
         const pendingClickNodeId = referenceNodeClick.version > consumedReferenceNodeClickVersionRef.current ? referenceNodeClick.nodeId : null;
-        return resourceReferences.filter(
-            (reference) => selectedNodeIds.has(reference.nodeId) && ((!composerReferenceIds.includes(reference.nodeId) && !removedReferenceIds.has(reference.nodeId)) || reference.nodeId === pendingClickNodeId),
-        );
+        return resourceReferences.filter((reference) => selectedNodeIds.has(reference.nodeId) && ((!composerReferenceIds.includes(reference.nodeId) && !removedReferenceIds.has(reference.nodeId)) || reference.nodeId === pendingClickNodeId));
     }, [composerReferenceIds, referenceNodeClick, removedReferenceIds, resourceReferences, selectedNodeIds]);
     const iconButtonStyle = { color: theme.node.muted };
     const settleDeleteConfirmation = (confirmed: boolean) => {
@@ -327,6 +342,7 @@ export function CanvasAssistantPanel({
         }
 
         const controller = new AbortController();
+        const batchId = nanoid();
         abortRef.current = controller;
         setIsRunning(true);
         let confirmationQueue = Promise.resolve();
@@ -342,6 +358,7 @@ export function CanvasAssistantPanel({
             confirmationQueue = result.then(() => {});
             return result;
         };
+        onAgentRunStart({ batchId, summary: text });
         try {
             const modelReferences = await resolveCanvasModelReferences(projectId || "", references);
             const runtimeInput = {
@@ -355,19 +372,21 @@ export function CanvasAssistantPanel({
                     if (controller.signal.aborted) throw new DOMException("已停止", "AbortError");
                     const media = provider !== "api" && isCanvasAgentMediaAction(action);
                     const connectionDelete = provider !== "api" && action.name === "delete_connection";
-                    if (action.name !== "delete_node" && !media && !connectionDelete) return onExecuteAction(action, messageReferenceNodeIds);
+                    if (action.name !== "delete_node" && !media && !connectionDelete) { const result = await onExecuteAction(action, messageReferenceNodeIds); onAgentActionResult({ batchId, action, result }); return result; }
                     const nodeId = typeof action.arguments.nodeId === "string" ? action.arguments.nodeId : "";
                     const node = nodes.find((item) => item.id === nodeId);
                     const confirmed = await requestConfirmation({ title: media ? String(action.arguments.title || action.arguments.prompt || "媒体生成").slice(0, 80) : connectionDelete ? `连线 ${action.arguments.connectionId}` : node?.title || "未命名节点", media });
                     if (controller.signal.aborted) throw new DOMException("已停止", "AbortError");
-                    return confirmed ? onExecuteAction(action, messageReferenceNodeIds) : { ok: false, code: "action_cancelled", message: "用户取消本次操作，不要自动重试" };
+                    const result: CanvasAgentToolResult = confirmed ? await onExecuteAction(action, messageReferenceNodeIds) : { ok: false, code: "action_cancelled", message: "用户取消本次操作，不要自动重试" };
+                    onAgentActionResult({ batchId, action, result });
+                    return result;
                 },
                 signal: controller.signal,
                 onContextTrace: (trace: NonNullable<CanvasAssistantMessage["contextTrace"]>[number]) => updateSession(session.id, (current) => ({
                     ...current,
                     messages: current.messages.map((message) => message.id === assistantId ? { ...message, contextTrace: [...(message.contextTrace || []), trace] } : message),
                 })),
-                onEvent: (event: { status: CanvasAssistantMessage["status"]; label: string }) => updateMessage(session.id, assistantId, { status: event.status, activity: event.label }),
+                onEvent: (event: { status: CanvasAssistantMessage["status"]; label: string }) => { updateMessage(session.id, assistantId, { status: event.status, activity: event.label }); onAgentRunProgress({ batchId, message: event.label }); },
                 onCheckpoint: (checkpoint: { state: CanvasAgentState; protocolMessages: CanvasAssistantSession["protocolMessages"] }) =>
                     updateSession(session.id, (current) => ({
                         ...current,
@@ -403,18 +422,19 @@ export function CanvasAssistantPanel({
                 ...current,
                 agentState: result.state,
                 protocolMessages: result.protocolMessages,
-                messages: current.messages.map((message) =>
-                    message.id === assistantId ? { ...message, text: result.reply, status: "success", activity: undefined } : message,
-                ),
+                messages: current.messages.map((message) => (message.id === assistantId ? { ...message, text: result.reply, status: "success", activity: undefined } : message)),
                 updatedAt: new Date().toISOString(),
             }));
+            onAgentRunComplete({ batchId });
         } catch (error) {
             const stopped = error instanceof Error && error.name === "AbortError";
+            const errorMessage = stopped ? "Agent 已由人工停止" : error instanceof Error ? error.message : "Agent 执行失败";
             updateMessage(session.id, assistantId, {
-                text: stopped ? "已停止继续执行。已经创建的节点和已经提交的媒体任务会保留。" : error instanceof Error ? error.message : "Agent 执行失败",
+                text: stopped ? "已停止继续执行。已经创建的节点和已经提交的媒体任务会保留。" : errorMessage,
                 status: stopped ? "waiting" : "error",
                 activity: undefined,
             });
+            onAgentRunComplete({ batchId, error: errorMessage });
         } finally {
             controller.abort();
             settleDeleteConfirmation(false);
@@ -513,7 +533,15 @@ export function CanvasAssistantPanel({
                                     <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" style={iconButtonStyle} icon={<Trash2 className="size-4" />} disabled={!checkedChatIds.length} onClick={() => setDeleteChatIds(checkedChatIds)} />
                                 </Tooltip>
                                 <Tooltip title="删除全部">
-                                    <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" style={iconButtonStyle} icon={<X className="size-4" />} disabled={!historySessions.length} onClick={() => setDeleteChatIds(historySessions.map((session) => session.id))} />
+                                    <Button
+                                        type="text"
+                                        shape="circle"
+                                        className="!h-8 !w-8 !min-w-8"
+                                        style={iconButtonStyle}
+                                        icon={<X className="size-4" />}
+                                        disabled={!historySessions.length}
+                                        onClick={() => setDeleteChatIds(historySessions.map((session) => session.id))}
+                                    />
                                 </Tooltip>
                             </>
                         ) : null}
@@ -536,6 +564,7 @@ export function CanvasAssistantPanel({
                                 />
                             </Tooltip>
                         )}
+                        <Tooltip title="Agent 设置"><Button type="text" shape="circle" style={iconButtonStyle} icon={<Settings2 className="size-4" />} onClick={() => setSettingsOpen(true)} /></Tooltip>
                         <Tooltip title="收起面板">
                             <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" style={iconButtonStyle} icon={<PanelRightClose className="size-4" />} onClick={collapse} />
                         </Tooltip>
@@ -678,6 +707,23 @@ export function CanvasAssistantPanel({
                 ) : null}
 
                 <Modal
+                    title="Agent 设置"
+                    open={settingsOpen}
+                    centered
+                    width={520}
+                    onCancel={() => setSettingsOpen(false)}
+                    footer={<Button type="primary" onClick={() => setSettingsOpen(false)}>完成</Button>}
+                >
+                    <div className="flex items-center justify-between gap-6 py-2">
+                        <div className="min-w-0">
+                            <div className="text-sm font-medium">自动生成图片/视频/音频</div>
+                            <div className="mt-1 text-xs leading-5 opacity-55">开启后，Agent 可直接提交图片/视频/音频生成；关闭时仅创建并配置好节点供人工核准生成</div>
+                        </div>
+                        <Switch checked={Boolean(agentConfig.autoGenerateMedia)} onChange={(autoGenerateMedia) => onAgentConfigChange({ autoGenerateMedia })} />
+                    </div>
+                </Modal>
+
+                <Modal
                     title="删除对话记录？"
                     open={deleteChatIds.length > 0}
                     centered
@@ -759,8 +805,8 @@ function AssistantMessages({ messages, onRetry }: { messages: CanvasAssistantMes
                                     message.role === "user"
                                         ? { background: theme.toolbar.activeBg, color: theme.toolbar.activeText }
                                         : message.status === "error"
-                                            ? { background: theme.node.fill, color: theme.node.text }
-                                            : { background: theme.node.fill, color: theme.node.text }
+                                          ? { background: theme.node.fill, color: theme.node.text }
+                                          : { background: theme.node.fill, color: theme.node.text }
                                 }
                             >
                                 {message.role === "assistant" ? (

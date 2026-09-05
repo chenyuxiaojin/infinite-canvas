@@ -9,6 +9,7 @@ const requireWeb=createRequire(new URL('../../web/package.json',import.meta.url)
 const ts=requireWeb('typescript');
 const {create}=requireWeb('zustand');
 const {persist}=requireWeb('zustand/middleware');
+let requestSequence=0;
 const tick=(ms=0)=>new Promise(resolve=>setTimeout(resolve,ms));
 function load(path,imports,globals={}) {
  const source=readFileSync(new URL('../../web/src/'+path,import.meta.url),'utf8');
@@ -16,6 +17,7 @@ function load(path,imports,globals={}) {
  const module={exports:{}};
  const context=vm.createContext({module,exports:module.exports,console,Blob,URL,ArrayBuffer,Uint8Array,crypto:webcrypto,setTimeout,clearTimeout,structuredClone,...globals});
  context.require=name=>{
+  if(name==="../protocol/canvas-operation-protocol") return load("app/(user)/canvas/protocol/canvas-operation-protocol.ts",{});
   assert.ok(name in imports,`Unexpected import ${name}`);
   // Zustand checks instanceof Promise: evaluate it in the source module's realm.
   if(name==='zustand/middleware') return vm.runInContext('(function(){const exports={};'+readFileSync(requireWeb.resolve('zustand/middleware'),'utf8')+';return exports})()',context);
@@ -27,7 +29,7 @@ function load(path,imports,globals={}) {
 }
 const canvasPath='app/(user)/canvas/';
 const graph=load(canvasPath+'utils/canvas-graph.ts',{});
-const original={id:'audit-film',title:'audit',createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:00Z',nodes:[{id:'n',type:'text',metadata:{content:'saved'}}],connections:[],chatSessions:[],viewport:{x:0,y:0,k:1},sidePanel:{open:true,width:320},agentPanel:{open:false,width:390},__desktopRevision:'base'};
+const original={id:'audit-film',title:'audit',createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:00Z',nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'saved'}}],connections:[],chatSessions:[],viewport:{x:0,y:0,k:1},sidePanel:{open:true,width:320},agentPanel:{open:false,width:390},__desktopRevision:'base'};
 async function storeHarness({desktop=true,deleted=[],local=[original],storage,fail=false,database:initialDatabase}={}) {
  const values=storage||new Map([['infinite-canvas:canvas_store',JSON.stringify({state:{projects:local},version:0})]]);
  const database=initialDatabase||new Map([[original.id,structuredClone(original)]]);const writes=[];let failure=fail;let localFailure=false;let beforeSave=async()=>{};let response=value=>value;let beforeRestore=async()=>{};const restores=[];
@@ -37,7 +39,7 @@ async function storeHarness({desktop=true,deleted=[],local=[original],storage,fa
   const saved={...structuredClone(project),__desktopRevision:'revision-'+writes.length};database.set(project.id,saved);return response(structuredClone(saved));
  }};
  const {useCanvasStore:store}=load(canvasPath+'stores/use-canvas-store.ts',{
-  zustand:{create},'zustand/middleware':{persist},nanoid:{nanoid:()=> 'recovered-film'},'fast-deep-equal':{default:requireWeb('fast-deep-equal')},'../utils/canvas-graph':graph,
+  zustand:{create},'zustand/middleware':{persist},nanoid:{nanoid:()=> 'recovered-film-'+(++requestSequence)},'fast-deep-equal':{default:requireWeb('fast-deep-equal')},'../utils/canvas-graph':graph,
   '@/lib/localforage-storage':{localForageStorage:{getItem:async key=>values.get(key)||null,setItem:async(key,value)=>{if(localFailure)throw Error('injected local storage failure');values.set(key,value)},removeItem:async key=>{values.delete(key)}}},
   '@/services/api/canvas-tasks':{},'@/services/api/user-config':{},'@/stores/use-user-store':{useUserStore:{getState:()=>({token:''})}},'@/services/desktop-runtime':service,
  });
@@ -48,7 +50,7 @@ async function storeHarness({desktop=true,deleted=[],local=[original],storage,fa
 
 test('failed desktop save survives refresh and restart, then an explicit retry saves it',async()=>{
  const h=await storeHarness({fail:true});
- h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',metadata:{content:'keep my edit'}}]});
+ h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'keep my edit'}}]});
  await tick(460);assert.equal(h.store.getState().saveStatus[original.id].state,'error');
  await assert.rejects(h.store.getState().refreshFromDesktop(),/disk failure/);
  assert.equal(h.store.getState().projects[0].nodes[0].metadata.content,'keep my edit');
@@ -61,8 +63,8 @@ test('failed desktop save survives refresh and restart, then an explicit retry s
 
 test('refresh must not rebase pending edits onto another writer without a conflict',async()=>{
  const h=await storeHarness();
- h.store.getState().updateProject(original.id,{title:'my title',nodes:[{id:'n',type:'text',metadata:{content:'my edit'}}]});
- h.database.set(original.id,{...original,__desktopRevision:'someone-else',nodes:[{id:'n',type:'text',metadata:{content:'other edit'}}]});
+ h.store.getState().updateProject(original.id,{title:'my title',nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'my edit'}}]});
+ h.database.set(original.id,{...original,__desktopRevision:'someone-else',nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'other edit'}}]});
  await assert.rejects(h.store.getState().refreshFromDesktop(),/REVISION_CONFLICT/);
  assert.equal(h.database.get(original.id).nodes[0].metadata.content,'other edit');
  assert.equal(h.store.getState().projects[0].nodes[0].metadata.content,'my edit');
@@ -92,10 +94,10 @@ test('an explicit empty project index does not resurrect the legacy whole-store 
 test('rapid edits during a delayed save use the new revision and persist the final edit',async()=>{
  const h=await storeHarness();let release;const gate=new Promise(resolve=>{release=resolve});
  h.beforeSave(async()=>{if(h.writes.length===1)await gate});
- h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',metadata:{content:'first'}}]});
+ h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'first'}}]});
  const saving=h.store.getState().retrySave(original.id);
  for(let i=0;i<100&&!h.writes.length;i++)await tick(1);
- for(let i=0;i<25;i++)h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',metadata:{content:'latest '+i}}]});
+ for(let i=0;i<25;i++)h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'latest '+i}}]});
  assert.equal(h.store.getState().saveStatus[original.id].state,'pending');release();await saving;
  assert.equal(h.database.get(original.id).nodes[0].metadata.content,'latest 24');
  assert.equal(h.store.getState().projects[0].nodes[0].metadata.content,'latest 24');
@@ -104,8 +106,8 @@ test('rapid edits during a delayed save use the new revision and persist the fin
 
 test('JSON object key order in a real IPC response does not cause a false save conflict',async()=>{
  const h=await storeHarness();
- h.response(project=>{const node=project.nodes[0];project.nodes[0]={metadata:node.metadata,type:node.type,id:node.id};return project;});
- h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',metadata:{content:'changed'}}],viewport:{k:2,y:20,x:10}});await h.store.getState().retrySave(original.id);
+ h.response(project=>{const node=project.nodes[0];project.nodes[0]=Object.fromEntries(Object.entries(node).reverse());return project;});
+ h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'changed'}}],viewport:{k:2,y:20,x:10}});await h.store.getState().retrySave(original.id);
  assert.equal(h.store.getState().saveStatus[original.id].state,'saved');
 });
 
@@ -128,7 +130,7 @@ test('invalid graph writes are rejected and retained for repair without touching
 
 test('a committed write with a lost reply is recovered only when every saved field matches',async()=>{
  const h=await storeHarness();h.response(()=>{throw Error('reply lost after commit')});
- h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',metadata:{content:'already committed'}}]});
+ h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'already committed'}}]});
  await assert.rejects(h.store.getState().retrySave(original.id),/reply lost/);
  const restarted=await storeHarness({storage:h.values,database:h.database});
  assert.equal(restarted.store.getState().projects[0].nodes[0].metadata.content,'already committed');
@@ -138,7 +140,7 @@ test('a committed write with a lost reply is recovered only when every saved fie
 });
 
 test('history restore flushes the current edit, receives the latest revision, and persists the restored snapshot',async()=>{
- const h=await storeHarness();h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',metadata:{content:'new edit'}}]});
+ const h=await storeHarness();h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'new edit'}}]});
  await h.store.getState().restoreVersion(original.id,7);
  assert.equal(h.writes.length,1);assert.equal(h.restores[0].expectedRevision,'revision-1');assert.match(h.restores[0].requestId,/^[a-f0-9-]{36}$/);
  assert.equal(h.database.get(original.id).__desktopRevision,'restored-7');assert.equal(h.store.getState().restoredRevisions[original.id],'restored-7');assert.equal(h.store.getState().projects[0].nodes[0].metadata.content,'saved');
@@ -147,7 +149,7 @@ test('history restore flushes the current edit, receives the latest revision, an
 });
 
 test('history preview becomes stale after an edit and active media or chat tasks block restoration',async()=>{
- const stale=await storeHarness();stale.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',metadata:{content:'edited after preview'}}]});
+ const stale=await storeHarness();stale.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'edited after preview'}}]});
  await assert.rejects(stale.store.getState().restoreVersion(original.id,1,'base'),/重新预览/);assert.equal(stale.restores.length,0);
  for(const patch of [
   {nodes:[{id:'n',type:'image',metadata:{status:'loading'}}]},
@@ -163,7 +165,7 @@ test('edits arriving during restore survive in recovery and cannot silently over
  const h=await storeHarness();let release;const gate=new Promise(resolve=>{release=resolve});h.beforeRestore(()=>gate);
  const restoring=h.store.getState().restoreVersion(original.id,3);
  for(let i=0;i<100&&!h.restores.length;i++)await tick(1);
- h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',metadata:{content:'edit while restoring'}}]});
+ h.store.getState().updateProject(original.id,{nodes:[{id:'n',type:'text',title:'原节点',position:{x:0,y:0},width:240,height:160,metadata:{content:'edit while restoring'}}]});
  await tick(450);assert.equal(h.writes.length,0);release();await assert.rejects(restoring,/恢复期间又有新编辑/);
  assert.equal(h.database.get(original.id).nodes[0].metadata.content,'saved');
  assert.equal(h.store.getState().projects[0].nodes[0].metadata.content,'edit while restoring');

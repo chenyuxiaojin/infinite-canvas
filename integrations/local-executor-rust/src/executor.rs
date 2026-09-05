@@ -553,24 +553,9 @@ fn execute_transcode(
     let mut arguments =
         strings_to_args(&["-hide_banner", "-nostdin", "-loglevel", "error", "-n", "-i"]);
     arguments.push(input.as_os_str().to_owned());
-    arguments.extend(strings_to_args(&[
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-c:v",
-        "mpeg4",
-        "-q:v",
-        "3",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-    ]));
+    arguments.extend(strings_to_args(&["-map", "0:v:0", "-map", "0:a:0?"]));
+    arguments.extend(transcode_codec_arguments(&input_probe));
+    arguments.extend(strings_to_args(&["-movflags", "+faststart"]));
     arguments.push(temporary.path().as_os_str().to_owned());
     let run = run_with_deadline(
         inner.tools.ffmpeg(),
@@ -596,6 +581,32 @@ fn execute_transcode(
         sha256,
         probe,
     })
+}
+
+fn transcode_codec_arguments(input_probe: &MediaProbe) -> Vec<OsString> {
+    let video_codec = input_probe
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type == "video")
+        .and_then(|stream| stream.codec_name.as_deref());
+    let audio_codec = input_probe
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type == "audio")
+        .and_then(|stream| stream.codec_name.as_deref());
+    let mut arguments = if video_codec == Some("h264") {
+        strings_to_args(&["-c:v", "copy"])
+    } else {
+        strings_to_args(&[
+            "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+        ])
+    };
+    if audio_codec == Some("aac") {
+        arguments.extend(strings_to_args(&["-c:a", "copy"]));
+    } else {
+        arguments.extend(strings_to_args(&["-c:a", "aac", "-b:a", "128k"]));
+    }
+    arguments
 }
 
 fn execute_verify(
@@ -1296,6 +1307,59 @@ echo '{"streams":[{"index":0,"codec_type":"video","codec_name":"mpeg4","width":1
             thread::sleep(Duration::from_millis(10));
         }
         panic!("condition was not reached before the test deadline");
+    }
+
+    #[test]
+    fn h264_aac_transcode_uses_stream_copy() {
+        let arguments = transcode_codec_arguments(&MediaProbe {
+            duration_ms: Some(1_000),
+            streams: vec![
+                ProbeStream {
+                    index: 0,
+                    codec_type: "video".to_owned(),
+                    codec_name: Some("h264".to_owned()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    sample_rate: None,
+                    channels: None,
+                },
+                ProbeStream {
+                    index: 1,
+                    codec_type: "audio".to_owned(),
+                    codec_name: Some("aac".to_owned()),
+                    width: None,
+                    height: None,
+                    sample_rate: Some(48_000),
+                    channels: Some(2),
+                },
+            ],
+        });
+        assert_eq!(
+            arguments,
+            strings_to_args(&["-c:v", "copy", "-c:a", "copy"])
+        );
+    }
+
+    #[test]
+    fn incompatible_video_transcodes_to_browser_compatible_h264() {
+        let arguments = transcode_codec_arguments(&MediaProbe {
+            duration_ms: Some(1_000),
+            streams: vec![ProbeStream {
+                index: 0,
+                codec_type: "video".to_owned(),
+                codec_name: Some("hevc".to_owned()),
+                width: Some(1920),
+                height: Some(1080),
+                sample_rate: None,
+                channels: None,
+            }],
+        });
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| { pair == strings_to_args(&["-c:v", "libx264"]).as_slice() })
+        );
+        assert!(!arguments.iter().any(|argument| argument == "mpeg4"));
     }
 
     #[cfg(unix)]

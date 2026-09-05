@@ -12,8 +12,10 @@ mod server;
 
 pub use auth::{read_credential_token, CredentialDocument, CredentialStore};
 pub use canvas::{
-    Actor, AgentOperationRequest, CanvasOperation, CanvasOperationAdapter, CanvasOperationResult,
-    ProjectDocument, ProjectSummary, SqliteCanvasAdapter,
+    Actor, AgentOperationRequest, SqliteCanvasAdapter, CanvasOperation, CanvasOperationAdapter,
+    CanvasOperationResult, CanvasProtocolExecutor, CanvasRuntimeTaskReference, CanvasSize,
+    HttpCanvasProtocolExecutor, MediaReferencePayload, Point, ProjectCreateRequest,
+    ProjectCreateResult, ProjectDocument, ProjectSummary, ProtocolOutcome,
 };
 pub use cli::{run_cli, Cli, ExitCode};
 pub use client::BridgeClient;
@@ -22,5 +24,7 @@ pub use mcp::serve_mcp_stdio;
 pub use project_binding::{
     find_project_binding, load_project_binding, setup_project_binding, ProjectBinding,
 };
-pub use runtime::{AgentRuntime, TestClipRequest};
+pub use runtime::{
+    AgentRuntime, ImageIngestRequest, TestClipRequest, VideoGenerationRequest, VideoIngestRequest,
+};
 pub use server::{BridgeServer, BRIDGE_PORT};

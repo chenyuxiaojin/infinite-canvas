@@ -25,6 +25,8 @@ description: 当前项目后续值得处理的事项
 - 提示词按需加载改造已移至 `pending-test.md`；后续如需清理历史订阅全文，应单独确认保留范围及备份方案，不自动删除。
 - 单一应用入口与 Node 静默启动已移至 `pending-test.md`；后续本机更新使用 `desktop` 的 `build:app` / `install:app`，备份保留为 ZIP，不再散放可运行 App。
 
+分支整合已完成代码比对，新增原生验收范围见 [待测试](pending-test.md) 和 [分支核对](canvas-branch-integration.md)。原有产品待办不因分支合并而标为完成。
+
 ## 七项优化的剩余整合
 
 统一要求见 [PRD 第 9 节](../overview/product-requirements.md#9-已批准的七项优化)，已实现部分见 pending-test；数据专项证据见 [数据与请求优化](canvas-data-optimization.md)，前端专项见 [交互与素材优化](canvas-ui-optimization.md)。

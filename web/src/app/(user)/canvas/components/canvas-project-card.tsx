@@ -2,7 +2,7 @@
 
 import { Check, Download, Pencil, Trash2, X } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { Button, Input } from "antd";
+import { Button, Dropdown, Input } from "antd";
 
 import { useCanvasStore, type CanvasProject } from "../stores/use-canvas-store";
 import { useCanvasUiStore } from "../stores/use-canvas-ui-store";

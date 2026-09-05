@@ -1,5 +1,7 @@
 use std::{
     collections::HashSet,
+    sync::Arc,
+    thread,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -11,6 +13,8 @@ use sha2::{Digest, Sha256};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::BridgeError;
+use url::Url;
+const CANVAS_OPERATION_PROTOCOL_VERSION: u64 = 1;
 
 const DESKTOP_LOCAL_USER_ID: &str = "desktop-local";
 const MAX_OPERATIONS: usize = 100;
@@ -37,6 +41,26 @@ pub struct CanvasSize {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MediaReferencePayload {
+    pub asset_id: String,
+    pub storage_key: String,
+    pub root_id: String,
+    pub relative_path: String,
+    pub sha256: String,
+    pub mime_type: String,
+    pub bytes: u64,
+    pub file_name: String,
+    #[serde(default)]
+    pub width: Option<u64>,
+    #[serde(default)]
+    pub height: Option<u64>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    pub mode: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CanvasOperation {
     CreateTextNode {
@@ -45,6 +69,32 @@ pub enum CanvasOperation {
         content: String,
         position: Point,
         size: CanvasSize,
+    },
+    CreateImageNode {
+        node_id: String,
+        title: String,
+        reference: MediaReferencePayload,
+        position: Point,
+        size: CanvasSize,
+    },
+    CreateVideoNode {
+        node_id: String,
+        title: String,
+        reference: MediaReferencePayload,
+        position: Point,
+        size: CanvasSize,
+    },
+    CreateConfigNode {
+        node_id: String,
+        title: String,
+        position: Point,
+        size: CanvasSize,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        generation_size: Option<String>,
+        #[serde(default)]
+        count: Option<u32>,
     },
     MoveNode {
         node_id: String,
@@ -80,6 +130,25 @@ pub struct AgentOperationRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCreateRequest {
+    pub project_id: String,
+    pub request_id: String,
+    pub actor: Actor,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProjectCreateResult {
+    pub project_id: String,
+    pub request_id: String,
+    pub actor: Actor,
+    pub duplicate: bool,
+    pub revision: u64,
+    pub project: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CanvasOperationResult {
     pub project_id: String,
     pub request_id: String,
@@ -107,7 +176,126 @@ pub struct ProjectDocument {
     pub revision: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct CanvasRuntimeTaskReference {
+    pub project_id: String,
+    pub canvas_task_id: String,
+    pub node_id: String,
+    pub kind: String,
+    pub revision: u64,
+    pub status: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProtocolOutcome {
+    pub project: Value,
+    pub ok: bool,
+    pub duplicate: bool,
+    pub previous_revision: u64,
+    pub revision: u64,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub error: Option<Value>,
+}
+
+pub trait CanvasProtocolExecutor: Send + Sync {
+    fn apply(
+        &self,
+        project: Value,
+        batch: Value,
+        now: &str,
+    ) -> Result<ProtocolOutcome, BridgeError>;
+}
+
+pub struct HttpCanvasProtocolExecutor {
+    endpoint: String,
+    client: ureq::Agent,
+}
+
+impl HttpCanvasProtocolExecutor {
+    pub fn new(endpoint: &str) -> Result<Self, BridgeError> {
+        let parsed = Url::parse(endpoint)
+            .map_err(|_| BridgeError::invalid("The canvas protocol endpoint is invalid."))?;
+        if parsed.scheme() != "http"
+            || parsed.host_str() != Some("127.0.0.1")
+            || parsed.port().is_none()
+            || parsed.path() != "/internal/canvas-operation"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err(BridgeError::forbidden(
+                "The canvas protocol executor must use the fixed loopback endpoint.",
+            ));
+        }
+        Ok(Self {
+            endpoint: endpoint.to_owned(),
+            client: ureq::AgentBuilder::new()
+                .redirects(0)
+                .timeout(Duration::from_secs(30))
+                .build(),
+        })
+    }
+}
+
+impl CanvasProtocolExecutor for HttpCanvasProtocolExecutor {
+    fn apply(
+        &self,
+        project: Value,
+        batch: Value,
+        now: &str,
+    ) -> Result<ProtocolOutcome, BridgeError> {
+        let payload = json!({ "project": project, "batch": batch, "now": now });
+        let mut response = None;
+        for attempt in 0..3 {
+            match self.client.post(&self.endpoint).send_json(payload.clone()) {
+                Ok(value) => {
+                    response = Some(value);
+                    break;
+                }
+                Err(ureq::Error::Status(_, _)) => {
+                    return Err(BridgeError::internal(
+                        "The shared canvas operation protocol rejected an internal request.",
+                    ))
+                }
+                Err(ureq::Error::Transport(_)) if attempt < 2 => {
+                    // Next may briefly stop accepting connections while the WebView is
+                    // navigating. Request IDs make replay safe if the response was lost.
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(ureq::Error::Transport(_)) => {
+                    return Err(BridgeError::unavailable(
+                        "The shared canvas operation protocol is not running.",
+                    ))
+                }
+            }
+        }
+        let response = response.ok_or_else(|| {
+            BridgeError::unavailable("The shared canvas operation protocol is not running.")
+        })?;
+        let value = response.into_json::<Value>().map_err(|_| {
+            BridgeError::internal("The shared canvas operation protocol returned invalid JSON.")
+        })?;
+        if value["ok"].as_bool() != Some(true) {
+            return Err(BridgeError::internal(
+                "The shared canvas operation protocol returned an invalid envelope.",
+            ));
+        }
+        parse_protocol_outcome(
+            value
+                .get("outcome")
+                .cloned()
+                .ok_or_else(|| BridgeError::internal("The protocol outcome is missing."))?,
+        )
+    }
+}
+
 pub trait CanvasOperationAdapter: Send + Sync {
+    fn create_project(&self, _request: ProjectCreateRequest) -> Result<ProjectCreateResult, BridgeError> { Err(BridgeError::unavailable("Canvas protocol unavailable")) }
+    fn apply_protocol_batch(&self, _project_id: &str, _batch: Value, _dry_run: bool) -> Result<ProtocolOutcome, BridgeError> { Err(BridgeError::unavailable("Canvas protocol unavailable")) }
+    fn find_runtime_task(&self, _runtime_task_id: &str) -> Result<Option<CanvasRuntimeTaskReference>, BridgeError> { Ok(None) }
+
     fn list_projects(&self) -> Result<Vec<ProjectSummary>, BridgeError>;
     fn get_project(&self, project_id: &str) -> Result<ProjectDocument, BridgeError>;
     fn apply_operations(
@@ -119,6 +307,7 @@ pub trait CanvasOperationAdapter: Send + Sync {
 
 pub struct SqliteCanvasAdapter {
     database_path: PathBuf,
+    protocol: Option<Arc<dyn CanvasProtocolExecutor>>,
 }
 
 impl SqliteCanvasAdapter {
@@ -129,7 +318,7 @@ impl SqliteCanvasAdapter {
                 "The desktop canvas database path must be absolute.",
             ));
         }
-        let adapter = Self { database_path };
+        let adapter = Self { database_path, protocol: None };
         let connection = adapter.connect()?;
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS agent_operation_requests (
@@ -145,6 +334,26 @@ impl SqliteCanvasAdapter {
         crate::history::initialize(&connection)?;
         Ok(adapter)
     }
+
+    pub fn open_with_protocol(database_path: impl Into<PathBuf>, protocol: Arc<dyn CanvasProtocolExecutor>) -> Result<Self, BridgeError> {
+        let mut adapter = Self::open(database_path)?; adapter.protocol = Some(protocol); Ok(adapter)
+    }
+    fn protocol(&self) -> Result<&dyn CanvasProtocolExecutor, BridgeError> {
+        self.protocol.as_deref().ok_or_else(|| BridgeError::unavailable("Canvas operation protocol unavailable"))
+    }
+    pub fn project_updated_at(&self, project_id: &str) -> Result<String, BridgeError> {
+        validate_identifier("project_id", project_id, 64)?;
+        self.connect()?
+            .query_row(
+                "SELECT updated_at FROM canvas_projects
+                 WHERE user_id = ?1 AND id = ?2 AND deleted_at = ''",
+                params![DESKTOP_LOCAL_USER_ID, project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| BridgeError::not_found("The canvas project was not found."))
+    }
+
 
     pub fn database_path(&self) -> &Path {
         &self.database_path
@@ -302,6 +511,188 @@ impl SqliteCanvasAdapter {
 }
 
 impl CanvasOperationAdapter for SqliteCanvasAdapter {
+    fn create_project(
+        &self,
+        request: ProjectCreateRequest,
+    ) -> Result<ProjectCreateResult, BridgeError> {
+        validate_project_create_request(&request)?;
+        let now = now_rfc3339()?;
+        let batch = json!({
+            "protocolVersion": CANVAS_OPERATION_PROTOCOL_VERSION,
+            "actor": "agent",
+            "requestId": request.request_id,
+            "projectId": request.project_id,
+            "baseRevision": 0,
+            "timestamp": now,
+            "operations": [{ "type": "project.update", "title": request.title }],
+        });
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = transaction
+            .query_row(
+                "SELECT project_data, deleted_at FROM canvas_projects
+                 WHERE user_id = ?1 AND id = ?2",
+                params![DESKTOP_LOCAL_USER_ID, request.project_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let existed = current.is_some();
+        let source = if let Some((raw, deleted_at)) = current {
+            if !deleted_at.is_empty() {
+                return Err(BridgeError::conflict(
+                    "PROJECT_DELETED",
+                    "The requested canvas project id belongs to a deleted project.",
+                ));
+            }
+            let project: Value = serde_json::from_str(&raw).map_err(|_| {
+                BridgeError::internal("A desktop canvas project contains invalid JSON.")
+            })?;
+            if project
+                .pointer("/operationState/requests")
+                .and_then(Value::as_object)
+                .is_none_or(|requests| !requests.contains_key(&request.request_id))
+            {
+                return Err(BridgeError::conflict(
+                    "PROJECT_EXISTS",
+                    "The requested canvas project id already exists.",
+                ));
+            }
+            project
+        } else {
+            empty_canvas_project(&request.project_id, &now)
+        };
+        let outcome = self.protocol()?.apply(source, batch, &now)?;
+        if !outcome.ok {
+            return Err(protocol_error(&outcome));
+        }
+        if !existed {
+            let raw = serde_json::to_string(&outcome.project).map_err(|_| {
+                BridgeError::internal("The created canvas project could not be encoded.")
+            })?;
+            transaction.execute(
+                "INSERT INTO canvas_projects
+                 (user_id, id, project_data, created_at, updated_at, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4, '')",
+                params![DESKTOP_LOCAL_USER_ID, request.project_id, raw, now],
+            )?;
+        }
+        let current_revision = project_revision(&outcome.project)?;
+        transaction.commit()?;
+        Ok(ProjectCreateResult {
+            project_id: request.project_id,
+            request_id: request.request_id,
+            actor: request.actor,
+            duplicate: outcome.duplicate,
+            revision: current_revision,
+            project: outcome.project,
+        })
+    }
+
+
+    fn apply_protocol_batch(
+        &self,
+        project_id: &str,
+        mut batch: Value,
+        dry_run: bool,
+    ) -> Result<ProtocolOutcome, BridgeError> {
+        validate_identifier("project_id", project_id, 64)?;
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw = transaction
+            .query_row(
+                "SELECT project_data FROM canvas_projects
+                 WHERE user_id = ?1 AND id = ?2 AND deleted_at = ''",
+                params![DESKTOP_LOCAL_USER_ID, project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| BridgeError::not_found("The canvas project was not found."))?;
+        let project: Value = serde_json::from_str(&raw)
+            .map_err(|_| BridgeError::internal("The canvas project contains invalid JSON."))?;
+        if let Some(expected) = batch["baseRevision"].as_str() {
+            let repeated = batch["requestId"].as_str().is_some_and(|id| project["operationState"]["requests"].get(id).is_some());
+            let operation_revision = project_revision(&project)?;
+            if !repeated && expected != revision(raw.as_bytes()) && expected.parse::<u64>().ok() != Some(operation_revision) {
+                return Err(BridgeError::conflict("REVISION_CONFLICT", "画布已有其他修改，请重新读取后重试。"));
+            }
+            batch["baseRevision"] = json!(operation_revision);
+        }
+        let now = now_rfc3339()?;
+        let outcome = self.protocol()?.apply(project, batch, &now)?;
+
+        if dry_run {
+            transaction.rollback()?;
+            if outcome.ok {
+                return Ok(outcome);
+            }
+            return Err(protocol_error(&outcome));
+        }
+
+        let proposed_raw = serde_json::to_string(&outcome.project).map_err(|_| {
+            BridgeError::internal("The updated canvas project could not be encoded.")
+        })?;
+        let updated_at = outcome.project["updatedAt"]
+            .as_str()
+            .unwrap_or(now.as_str());
+        let updated = transaction.execute(
+            "UPDATE canvas_projects SET project_data = ?1, updated_at = ?2
+             WHERE user_id = ?3 AND id = ?4 AND project_data = ?5 AND deleted_at = ''",
+            params![
+                proposed_raw,
+                updated_at,
+                DESKTOP_LOCAL_USER_ID,
+                project_id,
+                raw
+            ],
+        )?;
+        if updated != 1 {
+            return Err(BridgeError::conflict(
+                "STALE_REVISION",
+                "The canvas changed while the Agent operation was being applied.",
+            ));
+        }
+        crate::history::record_save(&transaction, DESKTOP_LOCAL_USER_ID, project_id, Some(&raw), &proposed_raw)?;
+        transaction.commit()?;
+        if outcome.ok {
+            Ok(outcome)
+        } else {
+            Err(protocol_error(&outcome))
+        }
+    }
+
+    fn find_runtime_task(
+        &self,
+        runtime_task_id: &str,
+    ) -> Result<Option<CanvasRuntimeTaskReference>, BridgeError> {
+        validate_identifier("task_id", runtime_task_id, 128)?;
+        for project in self.list_project_documents()? {
+            let Some(tasks) = project
+                .pointer("/operationState/tasks")
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            for (canvas_task_id, task) in tasks {
+                if task
+                    .pointer("/details/runtimeTaskId")
+                    .and_then(Value::as_str)
+                    != Some(runtime_task_id)
+                {
+                    continue;
+                }
+                return Ok(Some(CanvasRuntimeTaskReference {
+                    project_id: project["id"].as_str().unwrap_or_default().to_owned(),
+                    canvas_task_id: canvas_task_id.clone(),
+                    node_id: task["nodeId"].as_str().unwrap_or_default().to_owned(),
+                    kind: task["kind"].as_str().unwrap_or_default().to_owned(),
+                    revision: project_revision(&project)?,
+                    status: task["status"].as_str().unwrap_or_default().to_owned(),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
     fn list_projects(&self) -> Result<Vec<ProjectSummary>, BridgeError> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
@@ -409,7 +800,14 @@ impl CanvasOperationAdapter for SqliteCanvasAdapter {
         }
         let project: Value = serde_json::from_str(&raw)
             .map_err(|_| BridgeError::internal("The canvas project contains invalid JSON."))?;
-        let mut proposed = apply_to_project(project, &request.operations)?;
+        let mut proposed = if let Some(protocol) = &self.protocol {
+            let now = now_rfc3339()?;
+            let mut batch = canonical_batch(&request, &now)?;
+            batch["baseRevision"] = json!(project_revision(&project)?);
+            let outcome = protocol.apply(project, batch, &now)?;
+            if !outcome.ok { return Err(protocol_error(&outcome)); }
+            outcome.project
+        } else { apply_to_project(project, &request.operations)? };
         if !dry_run {
             proposed["updatedAt"] = Value::String(now_rfc3339()?);
         }
@@ -475,6 +873,307 @@ impl CanvasOperationAdapter for SqliteCanvasAdapter {
     }
 }
 
+fn canonical_batch(request: &AgentOperationRequest, now: &str) -> Result<Value, BridgeError> {
+    let operations = request
+        .operations
+        .iter()
+        .map(canonical_operation)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({
+        "protocolVersion": CANVAS_OPERATION_PROTOCOL_VERSION,
+        "actor": "agent",
+        "requestId": request.request_id,
+        "projectId": request.project_id,
+        "baseRevision": request.base_revision,
+        "timestamp": now,
+        "operations": operations,
+    }))
+}
+
+fn canonical_operation(operation: &CanvasOperation) -> Result<Value, BridgeError> {
+    Ok(match operation {
+        CanvasOperation::CreateTextNode {
+            node_id,
+            title,
+            content,
+            position,
+            size,
+        } => json!({
+            "type": "node.create",
+            "node": {
+                "id": node_id,
+                "type": "text",
+                "title": title,
+                "position": position,
+                "width": size.width,
+                "height": size.height,
+                "metadata": { "content": content, "prompt": content, "status": "success" }
+            }
+        }),
+        CanvasOperation::CreateImageNode {
+            node_id,
+            title,
+            reference,
+            position,
+            size,
+        } => media_node_operation(node_id, "image", title, reference, position, size),
+        CanvasOperation::CreateVideoNode {
+            node_id,
+            title,
+            reference,
+            position,
+            size,
+        } => media_node_operation(node_id, "video", title, reference, position, size),
+        CanvasOperation::CreateConfigNode {
+            node_id,
+            title,
+            position,
+            size,
+            model,
+            generation_size,
+            count,
+        } => {
+            let mut metadata = serde_json::Map::new();
+            if let Some(model) = model {
+                metadata.insert("model".to_owned(), Value::String(model.clone()));
+            }
+            if let Some(generation_size) = generation_size {
+                metadata.insert("size".to_owned(), Value::String(generation_size.clone()));
+            }
+            if let Some(count) = count {
+                metadata.insert("count".to_owned(), json!(count));
+            }
+            json!({
+                "type": "node.create",
+                "node": {
+                    "id": node_id,
+                    "type": "config",
+                    "title": title,
+                    "position": position,
+                    "width": size.width,
+                    "height": size.height,
+                    "metadata": metadata
+                }
+            })
+        }
+        CanvasOperation::MoveNode { node_id, position } => {
+            json!({ "type": "node.update", "nodeId": node_id, "patch": { "position": position } })
+        }
+        CanvasOperation::SetNodeText {
+            node_id,
+            title,
+            content,
+        } => {
+            let mut patch = json!({
+                "metadata": { "content": content, "prompt": content, "status": "success" }
+            });
+            if let Some(title) = title {
+                patch["title"] = Value::String(title.clone());
+            }
+            json!({ "type": "node.update", "nodeId": node_id, "patch": patch })
+        }
+        CanvasOperation::SetProjectTitle { title } => {
+            json!({ "type": "project.update", "title": title })
+        }
+        CanvasOperation::AddConnection {
+            connection_id,
+            from_node_id,
+            to_node_id,
+        } => json!({
+            "type": "connection.create",
+            "connection": {
+                "id": connection_id,
+                "fromNodeId": from_node_id,
+                "toNodeId": to_node_id
+            }
+        }),
+        CanvasOperation::RemoveConnection { connection_id } => {
+            json!({ "type": "connection.delete", "connectionId": connection_id })
+        }
+    })
+}
+
+fn media_node_operation(
+    node_id: &str,
+    node_type: &str,
+    title: &str,
+    reference: &MediaReferencePayload,
+    position: &Point,
+    size: &CanvasSize,
+) -> Value {
+    let mut metadata = json!({
+        "content": reference.storage_key,
+        "storageKey": reference.storage_key,
+        "localMedia": reference,
+        "status": "success",
+        "bytes": reference.bytes,
+        "mimeType": reference.mime_type
+    });
+    if let Some(width) = reference.width {
+        metadata["naturalWidth"] = json!(width);
+    }
+    if let Some(height) = reference.height {
+        metadata["naturalHeight"] = json!(height);
+    }
+    if let Some(duration_ms) = reference.duration_ms {
+        metadata["durationMs"] = json!(duration_ms);
+    }
+    json!({
+        "type": "node.create",
+        "node": {
+            "id": node_id,
+            "type": node_type,
+            "title": title,
+            "position": position,
+            "width": size.width,
+            "height": size.height,
+            "metadata": metadata
+        }
+    })
+}
+
+fn parse_protocol_outcome(value: Value) -> Result<ProtocolOutcome, BridgeError> {
+    let project = value
+        .get("project")
+        .cloned()
+        .ok_or_else(|| BridgeError::internal("The shared protocol project is missing."))?;
+    let result = value
+        .get("result")
+        .ok_or_else(|| BridgeError::internal("The shared protocol result is missing."))?;
+    let previous_revision = result["previousRevision"].as_u64().ok_or_else(|| {
+        BridgeError::internal("The shared protocol previous revision is invalid.")
+    })?;
+    let revision = result["revision"]
+        .as_u64()
+        .ok_or_else(|| BridgeError::internal("The shared protocol revision is invalid."))?;
+    let error = result.get("error").cloned();
+    Ok(ProtocolOutcome {
+        project,
+        ok: result["ok"].as_bool() == Some(true),
+        duplicate: result["duplicate"].as_bool() == Some(true),
+        previous_revision,
+        revision,
+        error_code: error
+            .as_ref()
+            .and_then(|value| value["code"].as_str())
+            .map(ToOwned::to_owned),
+        error_message: error
+            .as_ref()
+            .and_then(|value| value["message"].as_str())
+            .map(ToOwned::to_owned),
+        error,
+    })
+}
+
+fn protocol_error(outcome: &ProtocolOutcome) -> BridgeError {
+    let message = outcome
+        .error_message
+        .clone()
+        .unwrap_or_else(|| "The shared canvas operation was rejected.".to_owned());
+    let mut error = match outcome.error_code.as_deref() {
+        Some("stale_revision") => BridgeError::conflict("STALE_REVISION", message),
+        Some("request_id_reused") => BridgeError::conflict("REQUEST_ID_REUSED", message),
+        Some("locked_node") => BridgeError::conflict("LOCKED_NODE", message),
+        Some("node_not_found") | Some("connection_not_found") | Some("task_not_found") => {
+            BridgeError::not_found(message)
+        }
+        Some("node_exists") => BridgeError::conflict("NODE_EXISTS", message),
+        Some("connection_exists") => BridgeError::conflict("CONNECTION_EXISTS", message),
+        _ => BridgeError::invalid(message),
+    };
+    error.details = outcome.error.clone();
+    error
+}
+
+fn project_revision(project: &Value) -> Result<u64, BridgeError> {
+    match project.pointer("/operationState/revision") {
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| BridgeError::internal("The canvas operation revision is invalid.")),
+        None => Ok(0),
+    }
+}
+
+fn empty_canvas_project(project_id: &str, now: &str) -> Value {
+    json!({
+        "id": project_id,
+        "title": "未命名画布",
+        "createdAt": now,
+        "updatedAt": now,
+        "nodes": [],
+        "connections": [],
+        "chatSessions": [],
+        "activeChatId": null,
+        "agentConfig": null,
+        "autoTitlePending": false,
+        "backgroundMode": "lines",
+        "showImageInfo": false,
+        "viewport": { "x": 0, "y": 0, "k": 1 },
+        "sidePanel": { "open": true, "width": 280 },
+        "agentPanel": { "open": false, "width": 390 },
+        "operationState": {
+            "version": CANVAS_OPERATION_PROTOCOL_VERSION,
+            "revision": 0,
+            "locks": {},
+            "tasks": {},
+            "requests": {},
+            "audit": []
+        }
+    })
+}
+
+fn validate_project_create_request(request: &ProjectCreateRequest) -> Result<(), BridgeError> {
+    validate_identifier("project_id", &request.project_id, 64)?;
+    validate_identifier("request_id", &request.request_id, 128)?;
+    validate_text("title", &request.title, 256)
+}
+
+fn validate_media_reference(
+    reference: &MediaReferencePayload,
+    mime_prefix: &str,
+) -> Result<(), BridgeError> {
+    let asset_valid = reference.asset_id.starts_with("asset-")
+        && reference.asset_id.len() <= 80
+        && reference
+            .asset_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    let sha_valid = reference.sha256.len() == 64
+        && reference
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+    let relative = &reference.relative_path;
+    let relative_valid = !relative.is_empty()
+        && relative.len() <= 1024
+        && !relative.starts_with('/')
+        && !relative.contains('\\')
+        && !relative.chars().any(char::is_control)
+        && relative
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    let root_valid = !reference.root_id.is_empty()
+        && reference.root_id.len() <= 80
+        && reference
+            .root_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if !asset_valid
+        || reference.storage_key != format!("local-ref:{}", reference.asset_id)
+        || !sha_valid
+        || !relative_valid
+        || !root_valid
+        || !reference.mime_type.starts_with(mime_prefix)
+        || reference.bytes == 0
+        || !matches!(reference.mode.as_str(), "reference" | "project_copy")
+    {
+        return Err(BridgeError::invalid(
+            "The media reference must be a controlled local-ref asset with a valid root, relative path and SHA-256.",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct ProjectMetadata {
     id: String,
@@ -520,20 +1219,111 @@ fn project_metadata(project: &Value) -> Result<ProjectMetadata, BridgeError> {
 fn validate_request(request: &AgentOperationRequest) -> Result<(), BridgeError> {
     validate_identifier("project_id", &request.project_id, 64)?;
     validate_identifier("request_id", &request.request_id, 128)?;
-    if request.base_revision.len() != 64
-        || !request
-            .base_revision
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(BridgeError::invalid(
-            "base_revision must be a SHA-256 digest.",
-        ));
-    }
+    if request.base_revision.len() != 64 || !request.base_revision.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(BridgeError::invalid("base_revision must be a SHA-256 revision")); }
     if request.operations.is_empty() || request.operations.len() > MAX_OPERATIONS {
         return Err(BridgeError::invalid(
-            "An operation request must contain between 1 and 100 operations.",
+            "The request must contain between 1 and 100 operations.",
         ));
+    }
+    for operation in &request.operations {
+        match operation {
+            CanvasOperation::CreateTextNode {
+                node_id,
+                title,
+                content,
+                position,
+                size,
+            } => {
+                validate_identifier("node_id", node_id, 64)?;
+                validate_text("title", title, 256)?;
+                validate_text("content", content, MAX_TEXT_BYTES)?;
+                validate_point(position)?;
+                validate_size(size)?;
+            }
+            CanvasOperation::CreateImageNode {
+                node_id,
+                title,
+                reference,
+                position,
+                size,
+            } => {
+                validate_identifier("node_id", node_id, 64)?;
+                validate_text("title", title, 256)?;
+                validate_media_reference(reference, "image/")?;
+                validate_point(position)?;
+                validate_size(size)?;
+            }
+            CanvasOperation::CreateVideoNode {
+                node_id,
+                title,
+                reference,
+                position,
+                size,
+            } => {
+                validate_identifier("node_id", node_id, 64)?;
+                validate_text("title", title, 256)?;
+                validate_media_reference(reference, "video/")?;
+                validate_point(position)?;
+                validate_size(size)?;
+            }
+            CanvasOperation::CreateConfigNode {
+                node_id,
+                title,
+                position,
+                size,
+                model,
+                generation_size,
+                count,
+            } => {
+                validate_identifier("node_id", node_id, 64)?;
+                validate_text("title", title, 256)?;
+                validate_point(position)?;
+                validate_size(size)?;
+                if let Some(model) = model {
+                    validate_text("model", model, 64)?;
+                }
+                if let Some(generation_size) = generation_size {
+                    validate_text("generation_size", generation_size, 32)?;
+                }
+                if let Some(count) = count {
+                    if !(1..=9).contains(count) {
+                        return Err(BridgeError::invalid(
+                            "The config node count must be between 1 and 9.",
+                        ));
+                    }
+                }
+            }
+            CanvasOperation::MoveNode { node_id, position } => {
+                validate_identifier("node_id", node_id, 64)?;
+                validate_point(position)?;
+            }
+            CanvasOperation::SetNodeText {
+                node_id,
+                title,
+                content,
+            } => {
+                validate_identifier("node_id", node_id, 64)?;
+                if let Some(title) = title {
+                    validate_text("title", title, 256)?;
+                }
+                validate_text("content", content, MAX_TEXT_BYTES)?;
+            }
+            CanvasOperation::SetProjectTitle { title } => {
+                validate_text("title", title, 256)?;
+            }
+            CanvasOperation::AddConnection {
+                connection_id,
+                from_node_id,
+                to_node_id,
+            } => {
+                validate_identifier("connection_id", connection_id, 64)?;
+                validate_identifier("from_node_id", from_node_id, 64)?;
+                validate_identifier("to_node_id", to_node_id, 64)?;
+            }
+            CanvasOperation::RemoveConnection { connection_id } => {
+                validate_identifier("connection_id", connection_id, 64)?;
+            }
+        }
     }
     Ok(())
 }
@@ -578,6 +1368,13 @@ fn apply_to_project(
                     "height": size.height,
                     "metadata": { "content": content, "status": "success" }
                 }));
+            }
+            CanvasOperation::CreateImageNode { .. } | CanvasOperation::CreateVideoNode { .. } | CanvasOperation::CreateConfigNode { .. } => {
+                let op = canonical_operation(operation)?;
+                let node = op["node"].clone();
+                let nodes = project["nodes"].as_array_mut().ok_or_else(|| BridgeError::invalid("Canvas nodes missing"))?;
+                if nodes.iter().any(|n| n["id"] == node["id"]) { return Err(BridgeError::conflict("NODE_EXISTS", "The node already exists.")); }
+                nodes.push(node);
             }
             CanvasOperation::MoveNode { node_id, position } => {
                 validate_point(position)?;

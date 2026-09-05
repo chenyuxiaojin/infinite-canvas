@@ -3,15 +3,17 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import dynamic from "next/dynamic";
-import { ChevronRight, Image as ImageIcon, Maximize2, Music2, Pause, Play, RefreshCw, Star, Video } from "lucide-react";
+import { CheckCircle2, ChevronRight, Copy, Image as ImageIcon, LockKeyhole, LockKeyholeOpen, Maximize2, Music2, Pause, Play, RefreshCw, Scissors, Settings2, Sparkles, Star, Video, X } from "lucide-react";
+import { message } from "antd";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { approvePaidGeneration, rejectPaidGeneration } from "@/services/desktop-runtime";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { hasCanvasImageSource } from "@/services/canvas-local-image";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
 import { useCanvasImageSource } from "../hooks/use-canvas-image-source";
-import { CanvasNodeType, type CanvasNodeData, type Position } from "../types";
+import { CanvasNodeType, type CanvasNodeData, type CanvasNodeMetadata, type Position } from "../types";
 import { isCanvasImageNodeType } from "../utils/canvas-panorama";
 import type { CanvasResourceReference } from "../utils/canvas-resource-references";
 
@@ -32,6 +34,9 @@ type CanvasNodeProps = {
     editRequestNonce?: number;
     showPanel: boolean;
     showImageInfo: boolean;
+    isLocked?: boolean;
+    isDimmed?: boolean;
+    lastAgentChangedAt?: string;
     mentionReferences?: CanvasResourceReference[];
     mediaLite?: boolean;
     now?: number;
@@ -51,7 +56,11 @@ type CanvasNodeProps = {
     onConnectStart: (event: React.MouseEvent, nodeId: string, handleType: "source" | "target") => void;
     onResize: (nodeId: string, width: number, height: number, position?: Position) => void;
     onContentChange: (nodeId: string, content: string) => void;
+    onMetadataChange?: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
     onTitleChange: (nodeId: string, title: string) => void;
+    onContentCommit?: (nodeId: string) => void;
+    onResizeCommit?: (nodeId: string) => void;
+    onToggleLock?: (nodeId: string) => void;
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (node: CanvasNodeData) => void;
     onRetry?: (node: CanvasNodeData) => void;
@@ -76,6 +85,7 @@ type NodeContentRendererProps = {
     mediaLite?: boolean;
     renderNodeContent?: (node: CanvasNodeData) => ReactNode;
     onContentChange: (nodeId: string, content: string) => void;
+    onMetadataChange?: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
     onStopEditing: () => void;
     mentionReferences: CanvasResourceReference[];
     onRetry?: (node: CanvasNodeData) => void;
@@ -100,6 +110,9 @@ export const CanvasNode = React.memo(function CanvasNode({
     showImageInfo,
     mentionReferences = EMPTY_MENTION_REFERENCES,
     mediaLite = false,
+    isLocked = false,
+    isDimmed = false,
+    lastAgentChangedAt,
     now,
     renderPanel,
     renderNodeContent,
@@ -117,7 +130,11 @@ export const CanvasNode = React.memo(function CanvasNode({
     onConnectStart,
     onResize,
     onContentChange,
+    onMetadataChange,
     onTitleChange,
+    onContentCommit,
+    onResizeCommit,
+    onToggleLock,
     onToggleBatch,
     onSetBatchPrimary,
     onRetry,
@@ -138,6 +155,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     const isBatchRoot = isCanvasImageNodeType(data.type) && Boolean(data.metadata?.isBatchRoot) && batchCount > 1;
     const isBatchChild = isCanvasImageNodeType(data.type) && Boolean(data.metadata?.batchRootId);
     const isActive = isConnectionTarget || isSelected || isFocusRelated;
+    const lastAgentChangeTime = Date.parse(lastAgentChangedAt || "");
+    const wasRecentlyChangedByAgent = Boolean(now && Number.isFinite(lastAgentChangeTime) && now - lastAgentChangeTime < 9_000);
     const imageBorderColor = isActive ? selectionBlue : isRelated && !isBatchChild ? theme.node.muted : "transparent";
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const titleInputRef = useRef<HTMLInputElement>(null);
@@ -259,10 +278,11 @@ export const CanvasNode = React.memo(function CanvasNode({
     );
 
     const handleResizeUp = useCallback(() => {
+        if (resizeRef.current.isResizing) onResizeCommit?.(data.id);
         resizeRef.current.isResizing = false;
         window.removeEventListener("mousemove", handleResizeMove);
         window.removeEventListener("mouseup", handleResizeUp);
-    }, [handleResizeMove]);
+    }, [data.id, handleResizeMove, onResizeCommit]);
 
     const handleResizeMouseDown = (event: React.MouseEvent, corner: ResizeCorner) => {
         event.stopPropagation();
@@ -293,12 +313,13 @@ export const CanvasNode = React.memo(function CanvasNode({
     return (
         <div
             data-node-id={data.id}
-            className={`node-element absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${referenceSelectionState === "available" ? "cursor-pointer" : referenceSelectionState ? "cursor-not-allowed" : ""}`}
+            className={`node-element group/canvas-node absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${referenceSelectionState === "available" ? "cursor-pointer" : referenceSelectionState ? "cursor-not-allowed" : ""}`}
             style={{
                 transform: `translate(${data.position.x}px, ${data.position.y}px)`,
                 width: data.width,
                 height: data.height,
-                transition: "box-shadow 200ms ease",
+                opacity: isDimmed ? 0.18 : 1,
+                transition: "box-shadow 200ms ease, opacity 300ms ease",
                 contain: "layout style",
             }}
             onMouseEnter={() => {
@@ -320,46 +341,60 @@ export const CanvasNode = React.memo(function CanvasNode({
                 else onContextMenu(event, data.id);
             }}
         >
-            {!referenceSelectionState ? <div
-                className="absolute left-3 top-[-28px] z-[65] max-w-[calc(100%-24px)]"
-                onMouseDown={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-            >
-                {isEditingTitle ? (
-                    <input
-                        ref={titleInputRef}
-                        value={titleDraft}
-                        maxLength={64}
-                        className="h-6 max-w-full border-0 border-b border-dashed bg-transparent px-0 text-left text-xs font-medium outline-none"
-                        style={{ borderColor: theme.node.muted, color: theme.node.text }}
-                        onChange={(event) => setTitleDraft(event.target.value)}
-                        onBlur={finishTitleEditing}
-                        onKeyDown={(event) => {
-                            if (event.key === "Enter") finishTitleEditing();
-                            if (event.key === "Escape") {
-                                setTitleDraft(data.title || "");
-                                setIsEditingTitle(false);
-                            }
-                        }}
-                    />
-                ) : (
+            {!referenceSelectionState ? (
+                <div className="absolute left-3 top-[-28px] z-[65] max-w-[calc(100%-24px)]" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+                    {isEditingTitle ? (
+                        <input
+                            ref={titleInputRef}
+                            value={titleDraft}
+                            maxLength={64}
+                            className="h-6 max-w-full border-0 border-b border-dashed bg-transparent px-0 text-left text-xs font-medium outline-none"
+                            style={{ borderColor: theme.node.muted, color: theme.node.text }}
+                            onChange={(event) => setTitleDraft(event.target.value)}
+                            onBlur={finishTitleEditing}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter") finishTitleEditing();
+                                if (event.key === "Escape") {
+                                    setTitleDraft(data.title || "");
+                                    setIsEditingTitle(false);
+                                }
+                            }}
+                        />
+                    ) : (
+                        <button
+                            type="button"
+                            className="block max-w-full truncate border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100"
+                            style={{ color: theme.node.text }}
+                            title="双击修改节点名称"
+                            onDoubleClick={(event) => {
+                                event.stopPropagation();
+                                setIsEditingTitle(true);
+                            }}
+                        >
+                            {data.title || "未命名节点"}
+                        </button>
+                    )}
+                </div>
+            ) : null}
+            {!referenceSelectionState ? (
+                <div className="absolute right-3 top-[-30px] z-[66] flex items-center gap-2" style={{ color: theme.node.text }}>
+                    {isGroup ? <span className="pointer-events-none text-xs opacity-75">{groupChildCount} 个节点</span> : null}
                     <button
                         type="button"
-                        className="block max-w-full truncate border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100"
-                        style={{ color: theme.node.text }}
-                        title="双击修改节点名称"
-                        onDoubleClick={(event) => {
+                        className={`flex h-7 items-center gap-1 rounded-md px-1.5 text-[11px] transition-opacity ${isLocked ? "opacity-100" : "opacity-0 group-hover/canvas-node:opacity-70 focus:opacity-100"}`}
+                        style={{ background: isLocked ? theme.toolbar.panel : "transparent", color: theme.node.text }}
+                        onClick={(event) => {
                             event.stopPropagation();
-                            setIsEditingTitle(true);
+                            onToggleLock?.(data.id);
                         }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        aria-label={isLocked ? `解锁节点 ${data.title}` : `锁定节点 ${data.title}`}
+                        title={isLocked ? "人工已锁定，点击解锁" : "锁定后 Agent 不能覆盖"}
                     >
-                        {data.title || "未命名节点"}
+                        {isLocked ? <LockKeyhole className="size-3.5" /> : <LockKeyholeOpen className="size-3.5" />}
+                        {isLocked ? <span>已锁</span> : null}
                     </button>
-                )}
-            </div> : null}
-            {isGroup && !referenceSelectionState ? (
-                <div className="pointer-events-none absolute right-3 top-[-28px] z-[65] text-xs opacity-75" style={{ color: theme.node.text }}>
-                    {groupChildCount} 个节点
                 </div>
             ) : null}
 
@@ -368,8 +403,18 @@ export const CanvasNode = React.memo(function CanvasNode({
                 className={`relative h-full w-full overflow-visible border ${isGroup ? "rounded-xl" : "rounded-3xl border-2"}`}
                 style={{
                     background: isGroup ? theme.node.panel : hasImageContent || hasVideoContent ? "transparent" : theme.node.fill,
-                    borderColor: isGroup ? isGroupDropTarget || isActive ? selectionBlue : theme.node.stroke : hasImageContent ? imageBorderColor : isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.stroke,
-                    boxShadow: isGroupDropTarget ? `0 0 0 2px ${selectionBlue}66` : isGroup && isSelected ? `0 0 0 1px ${selectionBlue}55` : isActive ? `0 0 0 1px ${selectionBlue}55` : isRelated && !isBatchChild ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)` : undefined,
+                    borderColor: isGroup ? (isGroupDropTarget || isActive ? selectionBlue : theme.node.stroke) : hasImageContent ? imageBorderColor : isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.stroke,
+                    boxShadow: isGroupDropTarget
+                        ? `0 0 0 2px ${selectionBlue}66`
+                        : isGroup && isSelected
+                          ? `0 0 0 1px ${selectionBlue}55`
+                          : isActive
+                            ? `0 0 0 1px ${selectionBlue}55`
+                            : isRelated && !isBatchChild
+                              ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)`
+                              : undefined,
+                    outline: wasRecentlyChangedByAgent ? `2px dashed ${theme.node.activeStroke}` : undefined,
+                    outlineOffset: wasRecentlyChangedByAgent ? 5 : undefined,
                 }}
                 onMouseDown={(event) => onMouseDown(event, data.id)}
                 onDoubleClick={(event) => {
@@ -425,7 +470,11 @@ export const CanvasNode = React.memo(function CanvasNode({
                             renderNodeContent={renderNodeContent}
                             mentionReferences={mentionReferences}
                             onContentChange={onContentChange}
-                            onStopEditing={() => setIsEditingContent(false)}
+                            onMetadataChange={onMetadataChange}
+                            onStopEditing={() => {
+                                setIsEditingContent(false);
+                                onContentCommit?.(data.id);
+                            }}
                             onRetry={onRetry}
                             onGenerateImage={onGenerateImage}
                             onViewImage={onViewImage}
@@ -438,11 +487,30 @@ export const CanvasNode = React.memo(function CanvasNode({
 
                 {showImageInfo && hasImageContent ? <ImageInfoBar node={data} /> : null}
 
-                {!isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
+                {wasRecentlyChangedByAgent ? (
+                    <div className="pointer-events-none absolute left-3 top-3 z-[65] flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium" style={{ background: theme.toolbar.panel, color: theme.node.text }} role="status">
+                        <Sparkles className="size-3" aria-hidden="true" />
+                        Agent 刚修改
+                    </div>
+                ) : null}
+
+                {!isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? (
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} />
+                ) : null}
 
                 {referenceSelectionState && (referenceSelectionState !== "available" || hovered) ? (
-                    <div className="pointer-events-none absolute inset-0 z-[60] grid place-items-center rounded-[inherit]" style={{ background: `color-mix(in srgb, ${theme.canvas.background} ${referenceSelectionState === "target" ? 78 : referenceSelectionState === "disabled" ? 60 : 34}%, transparent)`, boxShadow: referenceSelectionState === "available" ? `inset 0 0 0 2px ${selectionBlue}` : undefined }}>
-                        {referenceSelectionState !== "disabled" ? <span className="rounded-lg px-3 py-2 text-sm font-medium shadow-sm" style={{ background: theme.toolbar.panel, color: theme.node.text }}>{referenceSelectionState === "target" ? "正在添加参考" : "选择"}</span> : null}
+                    <div
+                        className="pointer-events-none absolute inset-0 z-[60] grid place-items-center rounded-[inherit]"
+                        style={{
+                            background: `color-mix(in srgb, ${theme.canvas.background} ${referenceSelectionState === "target" ? 78 : referenceSelectionState === "disabled" ? 60 : 34}%, transparent)`,
+                            boxShadow: referenceSelectionState === "available" ? `inset 0 0 0 2px ${selectionBlue}` : undefined,
+                        }}
+                    >
+                        {referenceSelectionState !== "disabled" ? (
+                            <span className="rounded-lg px-3 py-2 text-sm font-medium shadow-sm" style={{ background: theme.toolbar.panel, color: theme.node.text }}>
+                                {referenceSelectionState === "target" ? "正在添加参考" : "选择"}
+                            </span>
+                        ) : null}
                     </div>
                 ) : null}
 
@@ -459,7 +527,15 @@ export const CanvasNode = React.memo(function CanvasNode({
                 </>
             ) : null}
 
-            {!referenceSelectionState && showPanel && !isGroup && renderPanel ? <div className={"absolute left-1/2 top-full z-[70] max-w-[calc(100vw-24px)] -translate-x-1/2 pt-4 " + (isCanvasImageNodeType(data.type) || data.type === CanvasNodeType.Video || data.type === CanvasNodeType.Audio ? "w-[622px]" : "w-[500px]")}>{renderPanel(data)}</div> : null}
+            {!referenceSelectionState && showPanel && !isGroup && renderPanel ? (
+                <div
+                    className={
+                        "absolute left-1/2 top-full z-[70] max-w-[calc(100vw-24px)] -translate-x-1/2 pt-4 " + (isCanvasImageNodeType(data.type) || data.type === CanvasNodeType.Video || data.type === CanvasNodeType.Audio ? "w-[622px]" : "w-[500px]")
+                    }
+                >
+                    {renderPanel(data)}
+                </div>
+            ) : null}
         </div>
     );
 });
@@ -608,11 +684,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                     onWheel={(event) => event.stopPropagation()}
                 />
             ) : (
-                <div
-                    className="thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent pl-4 pr-14 pt-0 pb-4 font-mono"
-                    style={textStyle}
-                    onWheel={(event) => event.stopPropagation()}
-                >
+                <div className="thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent pl-4 pr-14 pt-0 pb-4 font-mono" style={textStyle} onWheel={(event) => event.stopPropagation()}>
                     {node.metadata?.content || <span style={{ color: theme.node.placeholder }}>双击编辑文字</span>}
                 </div>
             )}
@@ -674,12 +746,14 @@ function PanoramaNodeContent(props: NodeContentRendererProps) {
 }
 
 function EmptyImageContent({ node, theme, isBatchRoot, batchCount, batchExpanded, batchOpening, batchRecovering, onToggleBatch }: NodeContentRendererProps) {
+    const localMediaMissing = node.metadata?.localMediaRuntime?.status === "missing";
     const content = (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
             <div className="flex size-14 items-center justify-center rounded-2xl" style={{ background: theme.toolbar.activeBg }}>
                 <ImageIcon className="size-6 opacity-30" />
             </div>
-            <span className="text-[10px] tracking-[0.18em] opacity-50">{node.type === CanvasNodeType.Panorama ? "空全景图节点" : "空图片节点"}</span>
+            <span className="text-[10px] tracking-[0.18em] opacity-50">{localMediaMissing ? "本机图片已移动或不可用" : node.type === CanvasNodeType.Panorama ? "空全景图节点" : "空图片节点"}</span>
+            {localMediaMissing ? <span className="text-xs opacity-50">请选择“重新定位”</span> : null}
         </div>
     );
     if (isBatchRoot)
@@ -693,42 +767,218 @@ function EmptyImageContent({ node, theme, isBatchRoot, batchCount, batchExpanded
 
 let activeCanvasVideo: HTMLVideoElement | null = null;
 
-function VideoNodeContent({ node, theme, isSelected, mediaLite, onViewImage }: NodeContentRendererProps) {
+function VideoNodeContent({ node, theme, isSelected, mediaLite, onViewImage, onMetadataChange, onRetry }: NodeContentRendererProps) {
     const source = useCanvasImageSource(node.metadata, !mediaLite, false, false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [mediaDurationMs, setMediaDurationMs] = useState(0);
+    const [approvalBusy, setApprovalBusy] = useState<"approve" | "reject" | null>(null);
+    const [approvalError, setApprovalError] = useState<string | null>(null);
+    const [isFlipped, setIsFlipped] = useState(false);
+
+    const effectiveDurationMs = mediaDurationMs || node.metadata?.durationMs || 6000;
+    const trimInMs = node.metadata?.trimInMs ?? 0;
+    const trimOutMs = node.metadata?.trimOutMs ?? effectiveDurationMs;
+    const reviewStatus = node.metadata?.reviewStatus ?? "pending";
+
+    useEffect(() => {
+        const video = videoRef.current;
+        return () => {
+            if (!video) return;
+            video.pause();
+            video.removeAttribute("src");
+            video.load();
+        };
+    }, []);
+
     const togglePlayback = () => {
         const video = videoRef.current;
         if (!video) return;
-        if (video.paused) void video.play();
-        else video.pause();
+        if (video.paused) {
+            if (video.currentTime < trimInMs / 1000 || video.currentTime >= trimOutMs / 1000) {
+                video.currentTime = trimInMs / 1000;
+            }
+            void video.play();
+        } else {
+            video.pause();
+        }
     };
+
+    const handleTimeUpdate = () => {
+        const video = videoRef.current;
+        if (!video || !isPlaying) return;
+        const currentMs = video.currentTime * 1000;
+        if (currentMs >= trimOutMs || currentMs < trimInMs) {
+            video.currentTime = trimInMs / 1000;
+        }
+    };
+
     useEffect(() => {
         if (isSelected) videoRef.current?.focus({ preventScroll: true });
         else if (document.activeElement === videoRef.current) videoRef.current?.blur();
     }, [isSelected, node.metadata?.content]);
+
+    if (!node.metadata?.content && node.metadata?.status === "pending_approval") {
+        const taskId = node.metadata?.localCanvasTaskId;
+        const cost = node.metadata?.estimatedCostYuan;
+        const decide = async (action: "approve" | "reject") => {
+            if (!taskId || approvalBusy) return;
+            setApprovalBusy(action);
+            setApprovalError(null);
+            try {
+                const projectId = decodeURIComponent(window.location.pathname.split("/").filter(Boolean).pop() || "");
+                if (action === "approve") await approvePaidGeneration(projectId, taskId);
+                else await rejectPaidGeneration(projectId, taskId);
+            } catch (error) {
+                setApprovalError(error instanceof Error ? error.message : String(error));
+                setApprovalBusy(null);
+            }
+        };
+        return (
+            <div className="flex h-full w-full flex-col justify-between gap-2 p-3 text-left" data-canvas-no-zoom>
+                <div style={{ color: theme.node.placeholder }}>
+                    <div className="text-xs font-medium">待批准 · 付费生成{typeof cost === "number" ? ` · 预计 ¥${cost.toFixed(2)}` : ""}</div>
+                    <div className="mt-1 line-clamp-4 text-xs opacity-70">{node.metadata?.prompt}</div>
+                </div>
+                {approvalError ? <div className="text-xs text-red-400">{approvalError}</div> : null}
+                <div className="flex gap-2">
+                    <button
+                        type="button"
+                        className="flex-1 rounded-lg px-2 py-1.5 text-xs transition-opacity disabled:opacity-50"
+                        style={{ background: theme.toolbar.activeBg, color: theme.toolbar.item }}
+                        disabled={Boolean(approvalBusy)}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            void decide("approve");
+                        }}
+                    >
+                        {approvalBusy === "approve" ? "已批准，启动中…" : "批准生成"}
+                    </button>
+                    <button
+                        type="button"
+                        className="rounded-lg px-2 py-1.5 text-xs opacity-70 transition-opacity disabled:opacity-50"
+                        style={{ color: theme.node.placeholder }}
+                        disabled={Boolean(approvalBusy)}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            void decide("reject");
+                        }}
+                    >
+                        {approvalBusy === "reject" ? "已拒绝" : "拒绝"}
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
     if (!source.src)
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
                 <Video className="size-7 opacity-35" />
-                <span className="text-sm">{source.error || (node.metadata?.storageKey ? "正在读取原视频" : "空视频节点")}</span>
+                <span className="text-sm">{source.error || (hasCanvasImageSource(node.metadata) ? "正在读取原视频" : "空视频节点")}</span>
+                {node.metadata?.localMediaRuntime?.status === "missing" ? <span className="text-xs opacity-60">请在节点工具栏选择“重新定位”</span> : null}
             </div>
         );
-    if (mediaLite) {
-        return (
-            <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-[18px] bg-black" data-canvas-no-zoom>
-                <Video className="size-7 opacity-50" />
-            </div>
-        );
-    }
+
     const controlStyle = { background: theme.toolbar.panel, color: theme.toolbar.item };
-    const controlClassName = "absolute bottom-2 z-20 flex size-7 items-center justify-center rounded-md opacity-70 backdrop-blur transition-opacity hover:opacity-100";
+    const controlClassName = "flex size-7 items-center justify-center rounded-md opacity-75 backdrop-blur transition-opacity hover:opacity-100";
     const keepVideoFocus = (event: React.MouseEvent<HTMLButtonElement>) => {
         event.preventDefault();
         event.stopPropagation();
         if (isSelected) videoRef.current?.focus({ preventScroll: true });
     };
+
+    const cycleReviewStatus = (event: React.MouseEvent) => {
+        event.stopPropagation();
+        const statuses: Array<"approved" | "pending" | "rejected" | "post_composite"> = ["pending", "approved", "rejected", "post_composite"];
+        const currentIndex = statuses.indexOf(reviewStatus as any);
+        const nextStatus = statuses[(currentIndex + 1) % statuses.length];
+        onMetadataChange?.(node.id, { reviewStatus: nextStatus });
+        const labels: Record<string, string> = { approved: "已拍板 ✅", pending: "待审片 🟡", rejected: "标记废片 🔴", post_composite: "达芬奇后期 🟣" };
+        message.info(`镜头已切换为：${labels[nextStatus] || nextStatus}`);
+    };
+
+    // 格式化秒数
+    const trimSec = ((trimOutMs - trimInMs) / 1000).toFixed(1);
+    const totalSec = (effectiveDurationMs / 1000).toFixed(1);
+    const inSec = (trimInMs / 1000).toFixed(1);
+    const outSec = (trimOutMs / 1000).toFixed(1);
+
+    if (isFlipped) {
+        // 背面：工程态
+        return (
+            <div className="flex h-full w-full flex-col justify-between overflow-y-auto p-3 text-left thin-scrollbar bg-[#141519] rounded-[18px] text-stone-200" data-canvas-no-zoom>
+                <div className="space-y-2">
+                    <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
+                        <span className="text-xs font-bold text-emerald-400">📝 工程参数与 Prompt</span>
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setIsFlipped(false);
+                            }}
+                            className="flex items-center gap-1 text-[11px] text-stone-400 hover:text-white"
+                        >
+                            <X className="size-3.5" />
+                            <span>返回视频</span>
+                        </button>
+                    </div>
+
+                    <div className="space-y-1.5 text-xs">
+                        <div>
+                            <span className="text-[10px] text-stone-400 block font-medium">VISUAL PROMPT</span>
+                            <div className="rounded-lg bg-black/40 p-2 text-[11px] leading-relaxed select-text max-h-24 overflow-y-auto thin-scrollbar">
+                                {node.metadata?.prompt || "无视觉提示词"}
+                            </div>
+                        </div>
+
+                        {node.metadata?.negativePrompt ? (
+                            <div>
+                                <span className="text-[10px] text-stone-400 block font-medium">NEGATIVE PROMPT</span>
+                                <div className="rounded-lg bg-black/40 p-1.5 text-[10px] text-stone-400 select-text">
+                                    {node.metadata?.negativePrompt}
+                                </div>
+                            </div>
+                        ) : null}
+
+                        <div className="grid grid-cols-2 gap-2 text-[10px] text-stone-400 pt-1">
+                            <div>模型: <b className="text-stone-200 font-mono">{node.metadata?.model || "默认视频模型"}</b></div>
+                            <div>单镜成本: <b className="text-emerald-400 font-mono">{typeof node.metadata?.estimatedCostYuan === "number" ? `¥${node.metadata?.estimatedCostYuan.toFixed(2)}` : "¥0.54"}</b></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="flex items-center justify-between border-t border-white/10 pt-2 text-[11px]">
+                    <button
+                        type="button"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            navigator.clipboard.writeText(node.metadata?.prompt || "");
+                            message.success("已复制 Prompt 到剪贴板");
+                        }}
+                        className="flex items-center gap-1 text-stone-300 hover:text-white"
+                    >
+                        <Copy className="size-3" />
+                        <span>复制 Prompt</span>
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onRetry?.(node);
+                        }}
+                        className="flex items-center gap-1 text-amber-400 hover:underline"
+                    >
+                        <RefreshCw className="size-3" />
+                        <span>重跑此镜</span>
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    // 正面：审片态
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[18px] bg-black" data-canvas-no-zoom>
             <video
@@ -894,9 +1144,9 @@ function BatchFrame({ batchCount, batchExpanded, batchOpening, batchRecovering, 
             onDoubleClick={
                 isBatchRoot
                     ? (event) => {
-                        event.stopPropagation();
-                        onToggleBatch?.();
-                    }
+                          event.stopPropagation();
+                          onToggleBatch?.();
+                      }
                     : undefined
             }
         >
@@ -939,8 +1189,7 @@ function ConnectionHandleDot({ side, visible, onMouseDown }: { side: "left" | "r
 
     return (
         <div
-            className={`absolute top-1/2 z-30 flex size-12 -translate-y-1/2 cursor-crosshair items-center justify-center transition-opacity duration-150 ${side === "left" ? "-left-6" : "-right-6"
-                } ${visible ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"}`}
+            className={`absolute top-1/2 z-30 flex size-12 -translate-y-1/2 cursor-crosshair items-center justify-center transition-opacity duration-150 ${side === "left" ? "-left-6" : "-right-6"} ${visible ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"}`}
             onMouseDown={onMouseDown}
         >
             <div className="size-3 rounded-full border-2 transition-all hover:scale-125" style={{ background: theme.node.panel, borderColor: theme.node.muted }} />

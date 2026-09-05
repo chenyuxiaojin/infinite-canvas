@@ -113,7 +113,7 @@ export function CanvasToolbar({
                         {localTaskRunning ? <Square className="size-4" /> : <Cpu className="size-4.5" />}
                     </ToolbarButton>
                 ) : null}
-                <ToolbarButton id="tool-upload" label="上传素材" hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onUpload}>
+                <ToolbarButton id="tool-upload" label="添加本机素材" hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onUpload}>
                     <Upload className="size-4.5" />
                 </ToolbarButton>
                 <Divider theme={theme} />
@@ -308,7 +308,7 @@ function toolLabel(id: string) {
     if (id === "tool-panorama") return "全景图";
     if (id === "tool-director") return "导演台";
     if (id === "tool-config") return "生成配置";
-    if (id === "tool-upload") return "上传素材";
+    if (id === "tool-upload") return "添加本机素材";
     if (id === "tool-library") return "素材库";
     if (id === "tool-assets") return "我的素材";
     if (id === "tool-style") return "画布外观";

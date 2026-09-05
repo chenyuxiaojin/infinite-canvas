@@ -127,7 +127,7 @@ export const CANVAS_AGENT_TOOLS: CanvasAgentToolDefinition[] = [
     defineTool("arrange_nodes", "整理指定节点；不传 nodeIds 时整理当前画布顶层节点。", { nodeIds: STRING_ARRAY }),
     defineTool(
         "generate_image",
-        "调用现有图片任务链路。sourceNodeIds 只放真实直接来源，独立生成必须传空数组；其中图片按数组顺序编号为图片1、图片2。",
+        "创建图片节点和来源连线，并按 Agent 自动生成设置决定是否提交现有图片任务链路。sourceNodeIds 只放真实直接来源，独立生成必须传空数组；其中图片按数组顺序编号为图片1、图片2。",
         {
             prompt: STRING,
             title: STRING,
@@ -139,13 +139,13 @@ export const CANVAS_AGENT_TOOLS: CanvasAgentToolDefinition[] = [
     ),
     defineTool(
         "edit_image",
-        "调用现有图片编辑链路，必须提供至少一个真实图片来源节点；图片按 sourceNodeIds 顺序编号。",
+        "创建图片编辑节点和来源连线，并按 Agent 自动生成设置决定是否提交现有图片编辑链路；必须提供至少一个真实图片来源节点，图片按 sourceNodeIds 顺序编号。",
         { prompt: STRING, title: STRING, sourceNodeIds: STRING_ARRAY, size: STRING, count: { type: "number", minimum: 1, maximum: 15 } },
         ["prompt", "sourceNodeIds"],
     ),
     defineTool(
         "generate_video",
-        "调用现有视频任务链路。sourceNodeIds 只放真实直接来源，独立生成必须传空数组；其中图片、视频、音频分别按各自顺序编号。",
+        "创建视频节点和来源连线，并按 Agent 自动生成设置决定是否提交现有视频任务链路。sourceNodeIds 只放真实直接来源，独立生成必须传空数组；其中图片、视频、音频分别按各自顺序编号。",
         {
             prompt: STRING,
             title: STRING,
@@ -158,7 +158,7 @@ export const CANVAS_AGENT_TOOLS: CanvasAgentToolDefinition[] = [
     ),
     defineTool(
         "generate_audio",
-        "调用现有音频任务链路。prompt 是实际朗读文本，instructions 是音色/演绎说明；sourceNodeIds 只放真实直接来源，独立生成必须传空数组。",
+        "创建音频节点和来源连线，并按 Agent 自动生成设置决定是否提交现有音频任务链路。prompt 是实际朗读文本，instructions 是音色/演绎说明；sourceNodeIds 只放真实直接来源，独立生成必须传空数组。",
         { prompt: STRING, title: STRING, sourceNodeIds: STRING_ARRAY, voice: STRING, instructions: STRING },
         ["prompt", "sourceNodeIds"],
     ),
@@ -316,10 +316,10 @@ export function canvasAgentActionLabel(action: CanvasAgentAction) {
         delete_connection: "正在删除连线",
         create_group: "正在创建分组",
         arrange_nodes: "正在整理画布",
-        generate_image: "正在提交图片生成",
-        edit_image: "正在提交图片编辑",
-        generate_video: "正在提交视频生成",
-        generate_audio: "正在提交音频生成",
+        generate_image: "正在创建图片节点",
+        edit_image: "正在创建图片编辑节点",
+        generate_video: "正在创建视频节点",
+        generate_audio: "正在创建音频节点",
         get_media_task_status: "正在读取媒体任务",
     };
     return labels[action.name];
