@@ -242,12 +242,20 @@ export type CanvasAssistantMessage = {
     text: string;
     status?: CanvasAssistantMessageStatus;
     activity?: string;
+    contextTrace?: import("./agent/canvas-context-trace").CanvasContextTrace[];
     references?: CanvasAssistantReference[];
     images?: CanvasAssistantImage[];
 };
 
 export type CanvasAssistantSession = {
     id: string;
+    provider?: "api" | "codex" | "grok" | "antigravity";
+    localAgentSessionId?: string;
+    localAgentModel?: string;
+    codexThreadId?: string;
+    codexModel?: string;
+    codexUsage?: { inputTokens: number; outputTokens: number; contextWindow: number | null };
+    codexCompaction?: string;
     title: string;
     messages: CanvasAssistantMessage[];
     agentState: CanvasAgentState;

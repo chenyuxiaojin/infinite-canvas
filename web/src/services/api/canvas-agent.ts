@@ -155,13 +155,13 @@ async function requestGeminiCompletion(config: AiConfig, systemPrompt: string, m
         if (message.role === "tool") {
             return { role: "user", parts: [{ functionResponse: { name: message.name, response: parseGeminiToolResponse(message.content) } }] };
         }
-        const parts = await Promise.all((typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content).map(async (part) => {
+        const parts = await Promise.all((typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : (message.content || [])).map(async (part) => {
             if (part.type === "text") return { text: part.text };
             return dataUrlToGeminiInlineData(await imageToDataUrl({ dataUrl: part.image_url.url, url: part.image_url.url }));
         }));
         return { role: "user", parts };
     }));
-    const extraSystemParts = messages.filter((message) => message.role === "system").flatMap((message) => typeof message.content === "string" ? [{ text: message.content }] : message.content.flatMap((part) => part.type === "text" ? [{ text: part.text }] : []));
+    const extraSystemParts = messages.filter((message) => message.role === "system").flatMap((message) => typeof message.content === "string" ? [{ text: message.content }] : (message.content || []).flatMap((part) => part.type === "text" ? [{ text: part.text }] : []));
     const body = {
         model: config.model,
         stream: false,

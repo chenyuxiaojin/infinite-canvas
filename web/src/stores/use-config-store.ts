@@ -6,7 +6,6 @@ import { persist } from "zustand/middleware";
 
 import { apiGet } from "@/services/api/request";
 import type { AdminPublicSettings } from "@/services/api/admin";
-import { useUserStore } from "@/stores/use-user-store";
 
 export type LocalModelChannel = {
     id: string;
@@ -405,7 +404,7 @@ export const useConfigStore = create<ConfigStore>()(
                         activeChannelId: config.activeChannelId || "",
                         syncStorageConfig: config.syncStorageConfig === true,
                         syncWebDAVStorageConfig: config.syncWebDAVStorageConfig === true,
-                        channelMode: config.channelMode || "remote",
+                        channelMode: "local",
                         imageModel: config.imageModel || config.model,
                         videoModel: config.videoModel || "grok-imagine-video",
                         textModel: config.textModel || config.model,
@@ -453,10 +452,7 @@ function normalizeModelList(models: string[]) {
 export function useEffectiveConfig() {
     const config = useConfigStore((state) => state.config);
     const modelChannel = useConfigStore((state) => state.publicSettings?.modelChannel || null);
-    const token = useUserStore((state) => state.token);
-    const user = useUserStore((state) => state.user);
-    const canUseRemoteChannel = Boolean(token && user && (user.role === "admin" || modelChannel?.allowUserRemoteChannel === true));
-    return useMemo(() => resolveEffectiveConfig(config, modelChannel, canUseRemoteChannel), [canUseRemoteChannel, config, modelChannel]);
+    return useMemo(() => resolveEffectiveConfig(config, modelChannel, false), [config, modelChannel]);
 }
 
 export function buildApiUrl(baseUrl: string, path: string) {

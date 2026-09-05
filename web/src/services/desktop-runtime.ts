@@ -107,12 +107,17 @@ export function listDesktopCanvasProjects<T>() {
 export async function loadDesktopCanvasProjects<T>() {
     const projectIds = await invoke<string[]>("desktop_canvas_project_ids");
     return Promise.all(
-        projectIds.map((projectId) => invoke<T>("desktop_canvas_project", { projectId })),
+        projectIds.map(async (projectId) => {
+            const document = await invoke<{ project: T; revision: string }>("desktop_canvas_document", { projectId });
+            return { ...document.project, __desktopRevision: document.revision };
+        }),
     );
 }
 
-export function saveDesktopCanvasProject<T>(project: T) {
-    return invoke<T>("save_desktop_canvas_project", { project });
+export async function saveDesktopCanvasProject<T>(project: T) {
+    const { __desktopRevision, ...content } = project as T & { __desktopRevision?: string };
+    const document = await invoke<{ project: T; revision: string }>("save_desktop_canvas_project", { project: content, expectedRevision: __desktopRevision || "" });
+    return { ...document.project, __desktopRevision: document.revision };
 }
 
 export function deleteDesktopCanvasProjects(projectIds: string[]) {
@@ -125,4 +130,14 @@ export function getDesktopCanvasProjectRevision(projectId: string) {
 
 export function saveCanvasExport(bytes: ArrayBuffer) {
     return invoke<{ saved: boolean; file_name?: string; bytes: number }>("save_canvas_export", bytes);
+}
+
+export function loadDesktopCanvasDeletedIds() {
+    return invoke<string[]>("desktop_canvas_deleted_ids");
+}
+
+export async function restoreDesktopCanvasVersion<T>(projectId: string, sequence: number, expectedRevision: string, requestId: string): Promise<T & { __desktopRevision: string }> {
+    const result = await invoke<{ project: T; revision: string }>("desktop_canvas_history_restore", { projectId, sequence, expectedRevision, requestId });
+    if (!result.project || !result.revision) throw new Error("恢复结果未包含画布，请重新读取版本列表核对");
+    return { ...result.project, __desktopRevision: result.revision };
 }

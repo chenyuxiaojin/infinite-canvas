@@ -14,7 +14,7 @@ import { VIDEO_MULTI_SHOT_SKILL } from "./skills/video-multi-shot";
 import { VIDEO_SINGLE_SHOT_SKILL } from "./skills/video-single-shot";
 import { WORKFLOW_SKILL } from "./skills/workflow";
 
-export function buildCanvasAgentSkillPrompt(phase: CanvasAgentPhase, userText: string, context: CanvasAgentContext) {
+export function buildCanvasAgentSkillBundle(phase: CanvasAgentPhase, userText: string, context: CanvasAgentContext) {
     const intent = buildIntentText(userText, context);
     const selectedTypes = new Set<string>(context.nodes.filter((node) => context.selectedNodeIds.includes(node.id)).map((node) => node.type));
     const skills = [CORE_SKILL, WORKFLOW_SKILL];
@@ -73,7 +73,10 @@ export function buildCanvasAgentSkillPrompt(phase: CanvasAgentPhase, userText: s
     if (wantsAudio) skills.push(AUDIO_SKILL);
     if (wantsOrganize) skills.push(ORGANIZE_SKILL);
 
-    return skills.join("\n\n") + "\n\n【当前真实画布上下文 JSON】\n" + serializeCanvasAgentContext(context);
+    return {
+        prompt: skills.join("\n\n") + "\n\n【当前真实画布上下文 JSON】\n" + serializeCanvasAgentContext(context),
+        sources: skills.map((content) => ({ source: `内置 SOP / ${SKILL_SOURCES.get(content) || "unknown"}.ts`, content })),
+    };
 }
 
 function buildIntentText(userText: string, context: CanvasAgentContext) {
@@ -82,4 +85,24 @@ function buildIntentText(userText: string, context: CanvasAgentContext) {
         .map((node) => [node.title, node.prompt, node.text].filter(Boolean).join(" "))
         .join(" ");
     return [userText, context.agentState.brief, context.agentState.approvedPlan, selectedText].filter(Boolean).join(" ");
+}
+
+const SKILL_SOURCES = new Map<string, string>([
+    [CORE_SKILL, "skills/core"],
+    [WORKFLOW_SKILL, "skills/workflow"],
+    [SCRIPT_SKILL, "skills/script"],
+    [IMAGE_SKILL, "skills/image"],
+    [IMAGE_CHARACTER_SHEET_SKILL, "skills/image-character-sheet"],
+    [IMAGE_STORYBOARD_SKILL, "skills/image-storyboard"],
+    [VIDEO_SKILL, "skills/video"],
+    [VIDEO_EXTENSION_SKILL, "skills/video-extension"],
+    [VIDEO_EDITING_SKILL, "skills/video-editing"],
+    [VIDEO_MULTI_SHOT_SKILL, "skills/video-multi-shot"],
+    [VIDEO_SINGLE_SHOT_SKILL, "skills/video-single-shot"],
+    [AUDIO_SKILL, "skills/audio"],
+    [ORGANIZE_SKILL, "skills/organize"],
+]);
+
+export function buildCanvasAgentSkillPrompt(phase: CanvasAgentPhase, userText: string, context: CanvasAgentContext) {
+    return buildCanvasAgentSkillBundle(phase, userText, context).prompt;
 }

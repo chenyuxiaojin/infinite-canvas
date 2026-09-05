@@ -19,6 +19,7 @@ import {
 import { bindCanvasProjectDirectory, selectFilmDirectory } from "@/services/desktop-terminal";
 import { isDesktopRuntime, probeDesktopRuntime, type DesktopRuntimeReport } from "@/services/desktop-runtime";
 import { useCanvasStore } from "./canvas/stores/use-canvas-store";
+import { CanvasBindingLabel } from "./canvas/components/canvas-binding-label";
 
 export default function IndexPage() {
     const { message } = App.useApp();
@@ -91,7 +92,7 @@ export default function IndexPage() {
     };
 
     const ffmpegReady = runtimeReport?.ffmpeg?.status === "available";
-    const connectedTools = runtimeReport?.connectors?.filter((connector) => connector.status === "ready").length || 0;
+    const connectedTools = runtimeReport?.connectors?.filter((connector) => ["ready", "available"].includes(connector.status)).length || 0;
 
     return (
         <main className="h-full overflow-y-auto bg-stone-50 text-stone-950 dark:bg-stone-950 dark:text-stone-100">
@@ -107,7 +108,7 @@ export default function IndexPage() {
                                 {latestProject ? "继续把这部片子做完" : "从一部片子开始创作"}
                             </h1>
                             <p className="mt-3 max-w-xl text-sm leading-6 text-stone-500 dark:text-stone-400">
-                                进入画布后，选中图片、文字或视频，右侧 AI 会自动带上这些节点。也可以直接在同一个侧栏启动 Codex 或 Claude。
+                                进入画布后，选中图片、文字或视频，可以交给画布 Agent；也可以打开终端，自行输入要运行的命令。
                             </p>
 
                             {latestProject ? (
@@ -116,6 +117,7 @@ export default function IndexPage() {
                                         <div className="min-w-0">
                                             <div className="text-xs text-stone-500 dark:text-stone-400">最近编辑</div>
                                             <div className="mt-1 truncate text-lg font-semibold">{latestProject.title || "未命名片子"}</div>
+                                            <CanvasBindingLabel projectId={latestProject.id} />
                                             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
                                                 <span>{latestProject.nodes?.length || 0} 个节点</span>
                                                 <span>{latestProject.connections?.length || 0} 条连线</span>
@@ -138,7 +140,7 @@ export default function IndexPage() {
                             <HomeAction icon={<Plus />} title="新建片子" description="选目录，建画布" onClick={() => void handleCreateProject()} loading={creating} />
                             <HomeAction icon={<LayoutGrid />} title="全部画布" description={`${projects.length} 个本地项目`} onClick={() => router.push("/canvas")} />
                             <HomeAction icon={<Bot />} title="画布 Agent" description="对话并操作节点" onClick={() => openLatest("agent")} />
-                            <HomeAction icon={<Terminal />} title="本地 AI" description="启动 Codex / Claude" onClick={() => openLatest("terminal")} />
+                            <HomeAction icon={<Terminal />} title="终端" description="自行输入命令" onClick={() => openLatest("terminal")} />
                         </div>
                     </div>
                 </section>
@@ -172,6 +174,7 @@ export default function IndexPage() {
                                         <span className="text-xs text-stone-400">{new Date(project.updatedAt).toLocaleDateString("zh-CN")}</span>
                                     </div>
                                     <div className="mt-4 truncate font-medium">{project.title || "未命名片子"}</div>
+                                    <CanvasBindingLabel projectId={project.id} />
                                     <div className="mt-auto flex items-center justify-between pt-3 text-xs text-stone-500 dark:text-stone-400">
                                         <span>{project.nodes?.length || 0} 节点 · {project.connections?.length || 0} 连线</span>
                                         <ArrowRight className="size-4 opacity-0 transition group-hover:translate-x-0.5 group-hover:opacity-100" />

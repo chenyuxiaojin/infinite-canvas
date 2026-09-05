@@ -1,23 +1,25 @@
 "use client";
 
-import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Empty, Input, Pagination, Select, Spin } from "antd";
+import { useStoredMediaSource } from "@/hooks/use-stored-media-source";
+import { assetMediaReference } from "@/services/asset-media-reference";
+import { memo, useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { Empty, Input, Spin } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, ChevronRight, Clapperboard, Eye, FileText, Group, Image as ImageIcon, Music2, Plus, Search, Settings2, Type, Video } from "lucide-react";
+import { BookOpen, ChevronRight, Eye, FileText, Music2, Plus, Search } from "lucide-react";
 import { motion } from "motion/react";
 
 import { AssetFormModal } from "@/components/assets/asset-form-modal";
 import { PromptDetailDialog } from "@/components/prompts/prompt-detail-dialog";
+import { usePromptActions } from "@/components/prompts/use-prompt-actions";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { cn } from "@/lib/utils";
-import { fetchAssetLibrary, type AssetLibraryItem } from "@/services/api/assets";
 import { fetchPrompts, type Prompt } from "@/services/api/prompts";
 import { useAssetStore, type Asset } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 
-import { CanvasNodeType, type CanvasNodeData } from "../types";
-import { isCanvasImageNodeType } from "../utils/canvas-panorama";
+import type { CanvasNodeData } from "../types";
+import { CanvasNodeOutline } from "./canvas-node-outline";
 import type { InsertAssetPayload } from "./asset-picker-modal";
 
 export const CANVAS_ASSET_DRAG_TYPE = "application/x-infinite-canvas-asset";
@@ -26,7 +28,6 @@ const PANEL_MOTION_SECONDS = 0.5;
 const PANEL_EASE = [0.22, 1, 0.36, 1] as const;
 const PANEL_MIN_WIDTH = 220;
 const PANEL_MAX_WIDTH = 480;
-const ASSET_PAGE_SIZE = 12;
 const PROMPT_CACHE_TIME = 24 * 60 * 60 * 1000;
 
 type PanelTab = "canvas" | "assets" | "prompts";
@@ -43,40 +44,6 @@ type Props = {
     onInsertAsset: (payload: InsertAssetPayload) => void;
 };
 
-const NODE_TYPE_ICON = {
-    [CanvasNodeType.Image]: ImageIcon,
-    [CanvasNodeType.Panorama]: ImageIcon,
-    [CanvasNodeType.Video]: Video,
-    [CanvasNodeType.Audio]: Music2,
-    [CanvasNodeType.Text]: Type,
-    [CanvasNodeType.Config]: Settings2,
-    [CanvasNodeType.Director]: Clapperboard,
-    [CanvasNodeType.Group]: Group,
-};
-
-const NODE_TYPE_LABEL = {
-    [CanvasNodeType.Image]: "图片",
-    [CanvasNodeType.Panorama]: "全景图",
-    [CanvasNodeType.Video]: "视频",
-    [CanvasNodeType.Audio]: "音频",
-    [CanvasNodeType.Text]: "文本",
-    [CanvasNodeType.Config]: "生成配置",
-    [CanvasNodeType.Director]: "导演台",
-    [CanvasNodeType.Group]: "组",
-};
-
-const NODE_FILTER_OPTIONS = [
-    { label: "全部", value: "all" },
-    { label: "图片", value: CanvasNodeType.Image },
-    { label: "全景图", value: CanvasNodeType.Panorama },
-    { label: "文本", value: CanvasNodeType.Text },
-    { label: "配置", value: CanvasNodeType.Config },
-    { label: "视频", value: CanvasNodeType.Video },
-    { label: "音频", value: CanvasNodeType.Audio },
-    { label: "导演台", value: CanvasNodeType.Director },
-    { label: "组", value: CanvasNodeType.Group },
-];
-
 const ASSET_TYPE_OPTIONS = [
     { label: "全部", value: "" },
     { label: "文本", value: "text" },
@@ -84,12 +51,6 @@ const ASSET_TYPE_OPTIONS = [
     { label: "视频", value: "video" },
     { label: "音频", value: "audio" },
 ];
-
-const STATUS_COLOR: Record<string, string> = {
-    success: "#22c55e",
-    loading: "#f59e0b",
-    error: "#ef4444",
-};
 
 export function CanvasSidePanel({ nodes, selectedNodeIds, open, width, onWidthChange, onFocusNode, onAssetDragStart, onAssetDragEnd, onInsertAsset }: Props) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -152,7 +113,7 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, open, width, onWidthCh
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
-                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} theme={theme} />
+                        <CanvasNodeOutline nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab theme={theme} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />
                     ) : (
@@ -174,87 +135,12 @@ function PanelTabButton({ label, active, theme, onClick }: { label: string; acti
     );
 }
 
-function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; theme: CanvasTheme }) {
-    const [keyword, setKeyword] = useState("");
-    const [typeFilter, setTypeFilter] = useState<string>("all");
-    const rowRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-
-    const filtered = useMemo(() => {
-        const query = keyword.trim().toLowerCase();
-        return nodes.filter((node) => {
-            if (typeFilter !== "all" && node.type !== typeFilter) return false;
-            return !query || [node.title, NODE_TYPE_LABEL[node.type], node.metadata?.content, node.metadata?.prompt].filter(Boolean).join(" ").toLowerCase().includes(query);
-        });
-    }, [keyword, nodes, typeFilter]);
-
-    useEffect(() => {
-        const selectedId = Array.from(selectedNodeIds)[0];
-        if (selectedId) rowRefs.current[selectedId]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    }, [selectedNodeIds]);
-
-    return (
-        <div className="flex h-full flex-col">
-            <div className="flex items-center gap-2 px-3 pb-2.5 pt-1">
-                <span className="text-xs font-medium opacity-60">画布元素</span>
-                <span className="text-xs opacity-35">{nodes.length}</span>
-                <Select size="small" variant="borderless" className="w-auto" popupMatchSelectWidth={false} value={typeFilter} onChange={setTypeFilter} options={NODE_FILTER_OPTIONS} />
-            </div>
-            <div className="px-3 pb-2.5">
-                <Input size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} placeholder="搜索节点" value={keyword} onChange={(event) => setKeyword(event.target.value)} />
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-                {filtered.length ? (
-                    <div className="space-y-1.5">
-                        {filtered.map((node) => {
-                            const Icon = NODE_TYPE_ICON[node.type] || FileText;
-                            const hasImage = isCanvasImageNodeType(node.type) && node.metadata?.content;
-                            const active = selectedNodeIds.has(node.id);
-                            return (
-                                <div key={node.id} className={cn("flex w-full items-center rounded-lg transition", active ? "" : "hover:bg-black/5 dark:hover:bg-white/5")} style={active ? { background: theme.toolbar.activeBg } : undefined}>
-                                    <button
-                                        ref={(element) => {
-                                            rowRefs.current[node.id] = element;
-                                        }}
-                                        type="button"
-                                        onClick={() => onFocusNode(node.id)}
-                                        className="flex min-w-0 flex-1 items-center gap-3 px-2 py-2 text-left"
-                                    >
-                                        <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md">
-                                            {hasImage ? <img src={node.metadata?.content} alt={node.title} className="size-full object-cover" /> : <Icon className="size-5 opacity-60" />}
-                                        </span>
-                                        <span className="min-w-0 flex-1 space-y-0.5">
-                                            <span className="block truncate text-sm font-medium leading-snug">{node.title || NODE_TYPE_LABEL[node.type] || "未命名节点"}</span>
-                                            <span className="block truncate text-xs leading-snug opacity-50">{node.type === CanvasNodeType.Text ? node.metadata?.content || node.metadata?.prompt || "" : NODE_TYPE_LABEL[node.type] || node.type}</span>
-                                        </span>
-                                        {node.metadata?.status && node.metadata.status !== "idle" ? <span className="size-1.5 shrink-0 rounded-full" style={{ background: STATUS_COLOR[node.metadata.status] || "transparent" }} /> : null}
-                                    </button>
-                                </div>
-                            );
-                        })}
-                    </div>
-                ) : (
-                    <div className="pt-16 text-center text-sm opacity-40">{nodes.length ? "无匹配节点" : "画布暂无节点"}</div>
-                )}
-            </div>
-        </div>
-    );
-}
-
 const CanvasAssetsTab = memo(function CanvasAssetsTab({ theme, onAssetDragStart, onAssetDragEnd }: { theme: CanvasTheme; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
-    const [source, setSource] = useState<"mine" | "library">("mine");
     const [formOpen, setFormOpen] = useState(false);
 
     return (
         <div className="flex h-full flex-col">
-            <div className="flex items-center gap-4 px-3 pb-2 pt-1">
-                <AssetSourceTab label="我的素材" active={source === "mine"} theme={theme} onClick={() => setSource("mine")} />
-                <AssetSourceTab label="素材库" active={source === "library"} theme={theme} onClick={() => setSource("library")} />
-            </div>
-            {source === "mine" ? (
-                <MyAssetsTab theme={theme} onAdd={() => setFormOpen(true)} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />
-            ) : (
-                <LibraryAssetsTab theme={theme} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />
-            )}
+            <MyAssetsTab theme={theme} onAdd={() => setFormOpen(true)} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />
             <AssetFormModal open={formOpen} onClose={() => setFormOpen(false)} />
         </div>
     );
@@ -297,39 +183,9 @@ function MyAssetsTab({ theme, onAdd, onAssetDragStart, onAssetDragEnd }: { theme
     );
 }
 
-function LibraryAssetsTab({ theme, onAssetDragStart, onAssetDragEnd }: { theme: CanvasTheme; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
-    const [keyword, setKeyword] = useState("");
-    const [type, setType] = useState("");
-    const [page, setPage] = useState(1);
-    const query = useQuery({
-        queryKey: ["canvas-side-library-assets", keyword, type, page],
-        queryFn: () => fetchAssetLibrary({ keyword, type, page, pageSize: ASSET_PAGE_SIZE }),
-        retry: false,
-    });
-    const items = query.data?.items || [];
-
-    useEffect(() => setPage(1), [keyword, type]);
-
-    return (
-        <>
-            <div className="flex items-center gap-2 px-3 pb-2">
-                <Input size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} placeholder="搜索素材" value={keyword} onChange={(event) => setKeyword(event.target.value)} />
-                <Select size="small" variant="borderless" className="w-16" value={type} onChange={setType} options={ASSET_TYPE_OPTIONS} />
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-                {query.isLoading ? <div className="flex justify-center pt-16"><Spin size="small" /></div> : items.length ? <div className="grid grid-cols-2 gap-2 px-1 pt-1">{items.map((asset) => <LibraryAssetDragCard key={asset.id} asset={asset} theme={theme} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />)}</div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无素材" className="pt-16" />}
-                {query.data?.total && query.data.total > ASSET_PAGE_SIZE ? <Pagination className="mt-3 flex justify-center" size="small" current={page} pageSize={ASSET_PAGE_SIZE} total={query.data.total} showSizeChanger={false} onChange={setPage} /> : null}
-            </div>
-        </>
-    );
-}
-
 function AssetDragCard({ asset, theme, onAssetDragStart, onAssetDragEnd }: { asset: Asset; theme: CanvasTheme; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
-    return <DraggableAssetCard theme={theme} title={asset.title} payload={assetPayload(asset)} kind={asset.kind} imageUrl={asset.kind === "text" ? asset.coverUrl : asset.kind === "image" ? asset.coverUrl || asset.data.dataUrl : asset.kind === "video" ? asset.coverUrl || asset.data.url : ""} text={asset.kind === "text" ? asset.data.content : ""} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />;
-}
-
-function LibraryAssetDragCard({ asset, theme, onAssetDragStart, onAssetDragEnd }: { asset: AssetLibraryItem; theme: CanvasTheme; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
-    return <DraggableAssetCard theme={theme} title={asset.title} payload={libraryPayload(asset)} kind={asset.type} imageUrl={asset.coverUrl || asset.url} text={asset.content || asset.description} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} />;
+    const source = useStoredMediaSource({ ...assetMediaReference(asset, true), observe: true });
+    return <div ref={source.ref}><DraggableAssetCard theme={theme} title={asset.title} payload={assetPayload(asset)} kind={asset.kind} imageUrl={source.src} text={asset.kind === "text" ? asset.data.content : ""} onAssetDragStart={onAssetDragStart} onAssetDragEnd={onAssetDragEnd} /></div>;
 }
 
 function DraggableAssetCard({ theme, title, payload, kind, imageUrl, text, onAssetDragStart, onAssetDragEnd }: { theme: CanvasTheme; title: string; payload: InsertAssetPayload; kind: "text" | "image" | "video" | "audio"; imageUrl: string; text: string; onAssetDragStart: (payload: InsertAssetPayload) => void; onAssetDragEnd: () => void }) {
@@ -356,13 +212,6 @@ function assetPayload(asset: Asset): InsertAssetPayload {
     if (asset.kind === "image") return { kind: "image", dataUrl: asset.data.dataUrl, storageKey: asset.data.storageKey, title: asset.title, assetId: asset.id, width: asset.data.width, height: asset.data.height, bytes: asset.data.bytes, mimeType: asset.data.mimeType, source: "asset" };
     if (asset.kind === "video") return { kind: "video", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, assetId: asset.id, width: asset.data.width, height: asset.data.height, bytes: asset.data.bytes, mimeType: asset.data.mimeType, source: "asset" };
     return { kind: "audio", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, assetId: asset.id, bytes: asset.data.bytes, mimeType: asset.data.mimeType, durationMs: asset.data.durationMs, source: "asset" };
-}
-
-function libraryPayload(asset: AssetLibraryItem): InsertAssetPayload {
-    if (asset.type === "text") return { kind: "text", content: asset.content, title: asset.title, assetId: asset.id, source: "library" };
-    if (asset.type === "image") return { kind: "image", dataUrl: asset.url, title: asset.title, assetId: asset.id, source: "library" };
-    if (asset.type === "video") return { kind: "video", url: asset.url, title: asset.title, assetId: asset.id, source: "library" };
-    return { kind: "audio", url: asset.url, title: asset.title, assetId: asset.id, source: "library" };
 }
 
 const CanvasPromptsTab = memo(function CanvasPromptsTab({ theme, onInsert }: { theme: CanvasTheme; onInsert: (payload: InsertAssetPayload) => void }) {
@@ -412,6 +261,7 @@ async function fetchPromptCategory(category: string) {
 }
 
 function PromptGroup({ category, keyword, open, theme, onToggle, onView, onInsert }: { category: string; keyword: string; open: boolean; theme: CanvasTheme; onToggle: () => void; onView: (prompt: Prompt) => void; onInsert: (payload: InsertAssetPayload) => void }) {
+    const actions = usePromptActions();
     const label = category === "system" ? "系统提示词" : category;
     const query = useQuery({
         queryKey: ["canvas-side-prompt-category", category],
@@ -424,7 +274,7 @@ function PromptGroup({ category, keyword, open, theme, onToggle, onView, onInser
     const items = useMemo(() => {
         const queryText = keyword.trim().toLowerCase();
         const cachedItems = query.data || [];
-        return queryText ? cachedItems.filter((item) => [item.title, item.prompt].join(" ").toLowerCase().includes(queryText)) : cachedItems;
+        return queryText ? cachedItems.filter((item) => [item.title, item.preview, ...item.tags].join(" ").toLowerCase().includes(queryText)) : cachedItems;
     }, [keyword, query.data]);
     return (
         <div>
@@ -441,7 +291,7 @@ function PromptGroup({ category, keyword, open, theme, onToggle, onView, onInser
                             加载失败，点击重试
                         </button>
                     ) : items.length ? (
-                        items.map((item) => <PromptRow key={item.id} item={item} theme={theme} onView={() => onView(item)} onInsert={() => onInsert({ kind: "text", content: item.prompt, title: item.title })} />)
+                        items.map((item) => <PromptRow key={item.id} item={item} theme={theme} loading={actions.loadingId === item.id} onView={() => onView(item)} onInsert={() => void actions.run(item, (loaded) => onInsert({ kind: "text", content: loaded.prompt, title: loaded.title }))} />)
                     ) : (
                         <div className="py-4 text-center text-xs opacity-40">{category === "system" ? "暂无提示词" : "该分类暂无提示词"}</div>
                     )}
@@ -451,17 +301,17 @@ function PromptGroup({ category, keyword, open, theme, onToggle, onView, onInser
     );
 }
 
-function PromptRow({ item, theme, onView, onInsert }: { item: Prompt; theme: CanvasTheme; onView: () => void; onInsert: () => void }) {
+function PromptRow({ item, theme, onView, onInsert, loading }: { item: Prompt; theme: CanvasTheme; onView: () => void; onInsert: () => void; loading: boolean }) {
     return (
         <div className="group relative flex items-center gap-2.5 rounded-lg px-2 py-2 transition hover:bg-black/5 dark:hover:bg-white/5">
             {item.coverUrl ? <img src={item.coverUrl} alt="" className="size-10 shrink-0 rounded-md object-cover" loading="lazy" /> : <span className="grid size-10 shrink-0 place-items-center rounded-md" style={{ background: theme.node.panel }}><FileText className="size-4 opacity-50" /></span>}
             <button type="button" onClick={onView} className="min-w-0 flex-1 text-left">
                 <span className="block truncate text-sm font-medium leading-snug">{item.title}</span>
-                <span className="mt-0.5 block truncate text-xs leading-snug opacity-50">{item.prompt}</span>
+                <span className="mt-0.5 block truncate text-xs leading-snug opacity-50">{loading ? "正在加载全文…" : item.preview || "选中后加载全文"}</span>
             </button>
             <div className="flex shrink-0 flex-col items-center gap-0.5">
                 <button type="button" onClick={onView} className="grid size-6 place-items-center rounded-md opacity-60 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10" aria-label="查看详情"><Eye className="size-3.5" /></button>
-                <button type="button" onClick={onInsert} className="grid size-6 place-items-center rounded-md opacity-60 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10" style={{ color: theme.toolbar.activeText }} aria-label="插入画布"><Plus className="size-3.5" /></button>
+                <button type="button" disabled={loading} onClick={onInsert} className="grid size-6 place-items-center rounded-md opacity-60 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10" style={{ color: theme.toolbar.activeText }} aria-label="加载并插入画布"><Plus className="size-3.5" /></button>
             </div>
         </div>
     );

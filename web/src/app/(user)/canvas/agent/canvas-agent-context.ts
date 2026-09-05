@@ -82,8 +82,9 @@ export function buildCanvasAgentContext(input: BuildCanvasAgentContextInput): Ca
         ...input.agentState.approvedNodeIds,
         ...input.agentState.referenceNodeIds,
     ]);
+    const explicitIds = new Set(prioritizedIds);
     input.connections.forEach((connection) => {
-        if (prioritizedIds.has(connection.fromNodeId) || prioritizedIds.has(connection.toNodeId)) {
+        if (explicitIds.has(connection.fromNodeId) || explicitIds.has(connection.toNodeId)) {
             prioritizedIds.add(connection.fromNodeId);
             prioritizedIds.add(connection.toNodeId);
         }
@@ -97,6 +98,7 @@ export function buildCanvasAgentContext(input: BuildCanvasAgentContextInput): Ca
         ...input.nodes.filter((node) => !prioritizedIds.has(node.id)),
     ].slice(0, MAX_CONTEXT_NODES);
     const includedIds = new Set(orderedNodes.map((node) => node.id));
+    const bodyIds = new Set(orderedNodes.filter((node) => prioritizedIds.has(node.id)).slice(0, 16).map((node) => node.id));
     const videoModel = input.config.videoModel || input.config.model;
     const audioModel = input.config.audioModel;
     const grokTts = isGrok2APITtsConfig({ ...input.config, model: audioModel }, audioModel);
@@ -110,7 +112,11 @@ export function buildCanvasAgentContext(input: BuildCanvasAgentContextInput): Ca
         },
         agentState: input.agentState,
         selectedNodeIds,
-        nodes: orderedNodes.map(summarizeNode),
+        nodes: orderedNodes.map((node) => {
+            // Keep an inexpensive directory; only relevant nodes carry body text.
+            if (bodyIds.has(node.id)) return summarizeNode(node);
+            return { id: node.id, type: node.type, title: node.title, status: node.metadata?.status };
+        }),
         connections: input.connections.filter((connection) => includedIds.has(connection.fromNodeId) && includedIds.has(connection.toNodeId)),
         generation: {
             textModel: input.config.textModel || input.config.model,
@@ -161,7 +167,7 @@ function summarizeNode(node: CanvasNodeData): CanvasAgentContextNode {
         title: node.title,
         text: isText && content ? content.slice(0, MAX_TEXT_LENGTH) : undefined,
         mediaUrl,
-        hasMedia: !isText ? Boolean(content) : undefined,
+        hasMedia: !isText ? Boolean(content || node.metadata?.storageKey) : undefined,
         status: node.metadata?.status,
         prompt: node.metadata?.prompt?.slice(0, MAX_TEXT_LENGTH),
         model: node.metadata?.model,

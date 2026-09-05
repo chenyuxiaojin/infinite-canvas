@@ -1,3 +1,4 @@
+import { traceCanvasInput, traceCanvasTool, type CanvasContextTrace } from "./canvas-context-trace";
 import { requestCanvasAgentTurn } from "@/services/api/canvas-agent";
 import type { AiConfig } from "@/stores/use-config-store";
 import type {
@@ -8,7 +9,7 @@ import type {
     CanvasAssistantReference,
 } from "../types";
 import type { CanvasAgentContext } from "./canvas-agent-context";
-import { buildCanvasAgentSkillPrompt } from "./canvas-agent-skills";
+import { buildCanvasAgentSkillBundle } from "./canvas-agent-skills";
 import {
     CANVAS_AGENT_TOOLS,
     canvasAgentActionLabel,
@@ -42,6 +43,7 @@ export type RunCanvasAgentInput = {
     references: CanvasAssistantReference[];
     getContext: (state: CanvasAgentState) => CanvasAgentContext;
     executeAction: (action: CanvasAgentAction) => Promise<CanvasAgentToolResult>;
+    onContextTrace?: (trace: CanvasContextTrace) => void;
     onEvent?: (event: CanvasAgentRuntimeEvent) => void;
     onCheckpoint?: (checkpoint: { state: CanvasAgentState; protocolMessages: CanvasAgentProtocolMessage[] }) => void;
     signal?: AbortSignal;
@@ -76,14 +78,17 @@ export async function runCanvasAgent(input: RunCanvasAgentInput): Promise<RunCan
         throwIfAborted(input.signal);
         input.onEvent?.({ status: "thinking", label: step ? "正在根据画布结果继续" : "正在理解画布和创作目标" });
         const context = input.getContext(state);
+        const bundle = buildCanvasAgentSkillBundle(state.phase, input.userText, context);
+        const trace = input.onContextTrace ? await traceCanvasInput(context, bundle.sources, input.references.filter((ref) => ref.dataUrl).map((ref) => ref.id)) : undefined;
         const turn = await requestCanvasAgentTurn({
             config: input.config,
-            systemPrompt: buildCanvasAgentSkillPrompt(state.phase, input.userText, context),
+            systemPrompt: bundle.prompt,
             messages: protocolMessages,
             tools: CANVAS_AGENT_TOOLS,
             allowTools,
             signal: input.signal,
         });
+        if (trace) input.onContextTrace?.(trace);
         if (turn.usedJsonFallback) allowTools = false;
 
         const parsedJson = parseCanvasAgentJson(turn.content);
@@ -109,6 +114,10 @@ export async function runCanvasAgent(input: RunCanvasAgentInput): Promise<RunCan
             : { role: "assistant", content: turn.content };
 
         const results = await executeActions(actions, state, input.executeAction, input.signal, input.onEvent);
+        for (const { action, result } of results.items) {
+            const trace = traceCanvasTool(action.name, result);
+            if (trace) input.onContextTrace?.({ ...trace, label: trace.label + "（已执行，后续请求是否接收以传输记录为准）" });
+        }
         hasExecutedActions = true;
         state = results.state;
 
@@ -184,6 +193,7 @@ function buildUserContent(text: string, references: CanvasAssistantReference[], 
         : "";
     const imageReferences = references.filter((item) => item.dataUrl && (/^data:image\//.test(item.dataUrl) || /^https?:\/\//.test(item.dataUrl)));
     const imageOrderText = imageReferences.length ? "\n随消息附带的图片顺序：" + imageReferences.map((item, index) => `第 ${index + 1} 张 = ${item.label || item.title}`).join("；") : "";
+    if (imageReferences.length && !supportsCanvasAgentImageInput(modelName)) throw new Error("当前模型尚未确认支持图片输入，请切换支持图片的模型后重试；本次没有按纯文字发送。");
     const images = supportsCanvasAgentImageInput(modelName)
         ? imageReferences.map((item) => ({ type: "image_url" as const, image_url: { url: item.dataUrl as string } }))
         : [];
@@ -214,7 +224,7 @@ function persistCanvasAgentProtocolMessages(messages: CanvasAgentProtocolMessage
     });
 }
 
-function applyAgentState(state: CanvasAgentState, patch: Record<string, unknown>): CanvasAgentState {
+export function applyAgentState(state: CanvasAgentState, patch: Record<string, unknown>): CanvasAgentState {
     return {
         ...state,
         phase: typeof patch.phase === "string" ? (patch.phase as CanvasAgentState["phase"]) : state.phase,
@@ -226,7 +236,7 @@ function applyAgentState(state: CanvasAgentState, patch: Record<string, unknown>
     };
 }
 
-function applyTaskResult(state: CanvasAgentState, result: CanvasAgentToolResult): CanvasAgentState {
+export function applyTaskResult(state: CanvasAgentState, result: CanvasAgentToolResult): CanvasAgentState {
     const taskId = typeof result.taskId === "string" ? result.taskId : "";
     if (!taskId) return state;
     const completed = result.status === "success" || result.status === "completed";

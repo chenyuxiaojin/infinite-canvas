@@ -1,6 +1,6 @@
 "use client";
 
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
     History,
     Bot,
@@ -16,21 +16,27 @@ import {
 import { Button, Modal, Tooltip } from "antd";
 import { motion } from "motion/react";
 import { nanoid } from "nanoid";
+import { useCopyText } from "@/hooks/use-copy-text";
+import { conversationWindow, conversationMatches, CONVERSATION_PAGE_SIZE, CONVERSATION_PAGE_OVERLAP } from "../utils/canvas-conversation-window";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { CanvasTerminalDrawer } from "./canvas-terminal-drawer";
 
 import { ImageGenerationPending } from "@/components/image-generation-pending";
+import { isTauri } from "@tauri-apps/api/core";
+import { codexContextPercent } from "@/services/canvas-codex";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { cn } from "@/lib/utils";
-import { imageToDataUrl } from "@/services/image-storage";
+import { resolveCanvasModelReferences } from "@/services/canvas-media";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { createCanvasAgentState, runCanvasAgent } from "../agent/canvas-agent-runtime";
+import { runCanvasCodex } from "../agent/canvas-codex-runtime";
+import { runCanvasLocalAgent } from "../agent/canvas-local-agent-runtime";
 import type { CanvasAgentContext } from "../agent/canvas-agent-context";
-import type { CanvasAgentAction, CanvasAgentToolResult } from "../agent/canvas-agent-tools";
+import { isCanvasAgentMediaAction, type CanvasAgentAction, type CanvasAgentToolResult } from "../agent/canvas-agent-tools";
 import {
     CanvasNodeType,
     type CanvasAgentConfig,
@@ -73,7 +79,9 @@ type CanvasAssistantPanelProps = {
 };
 
 type PendingDeleteConfirmation = {
+    permission?: boolean;
     title: string;
+    media?: boolean;
     resolve: (confirmed: boolean) => void;
 };
 
@@ -120,7 +128,7 @@ export function CanvasAssistantPanel({
     const [composerReferenceIds, setComposerReferenceIds] = useState<string[]>([]);
     const [removedReferenceIds, setRemovedReferenceIds] = useState<Set<string>>(new Set());
     const [pendingDelete, setPendingDelete] = useState<PendingDeleteConfirmation | null>(null);
-    const [initialSession] = useState(createSession);
+    const [initialSession] = useState(() => createSession(isTauri() ? "codex" : "api"));
     const safeSessions = sessions.length ? sessions : [initialSession];
     const resolvedActiveSessionId = activeSessionId && safeSessions.some((session) => session.id === activeSessionId) ? activeSessionId : safeSessions[0]?.id || null;
     const sessionsRef = useRef<CanvasAssistantSession[]>(safeSessions);
@@ -138,19 +146,68 @@ export function CanvasAssistantPanel({
     }, []);
 
     const activeSession = safeSessions.find((session) => session.id === resolvedActiveSessionId) || safeSessions[0] || null;
+    const provider = activeSession?.provider || "api";
+    const contextPercent = codexContextPercent(activeSession?.codexUsage);
     const historySessions = safeSessions.filter((session) => session.messages.length > 0);
     const messages = activeSession?.messages || [];
+    const copyText = useCopyText();
+    const [historyEndId, setHistoryEndId] = useState<string | null>(null);
+    const [historyQuery, setHistoryQuery] = useState("");
+    const [historyMatch, setHistoryMatch] = useState(0);
+    const [historyNavigation, setHistoryNavigation] = useState(0);
+    const historyPage = useMemo(() => conversationWindow(messages, historyEndId), [messages, historyEndId]);
+    const historyMatches = useMemo(() => conversationMatches(messages, historyQuery), [messages, historyQuery]);
+    const pendingHistoryScroll = useRef<string | "top" | "bottom" | null>(null);
     const hasMessages = messages.length > 0;
     const selectedNodeKey = useMemo(() => Array.from(selectedNodeIds).sort().join(","), [selectedNodeIds]);
 
-    useEffect(() => {
+    const followMessagesRef = useRef(true);
+    const [followingMessages, setFollowingMessages] = useState(true);
+    const jumpToLatest = useCallback(() => {
+        setHistoryEndId(null);
+        pendingHistoryScroll.current = "bottom";
+        setHistoryNavigation((value) => value + 1);
+        followMessagesRef.current = true;
+        setFollowingMessages(true);
+        const element = messageListRef.current;
+        if (element) element.scrollTop = element.scrollHeight;
+    }, []);
+    useEffect(() => { setHistoryQuery(""); setHistoryMatch(0); jumpToLatest(); }, [resolvedActiveSessionId, view, jumpToLatest]);
+    useLayoutEffect(() => {
         if (view !== "chat") return;
-        const frame = window.requestAnimationFrame(() => {
-            const element = messageListRef.current;
-            if (element) element.scrollTop = element.scrollHeight;
-        });
-        return () => window.cancelAnimationFrame(frame);
-    }, [messages, view]);
+        const element = messageListRef.current;
+        if (!element) return;
+        const target = pendingHistoryScroll.current;
+        pendingHistoryScroll.current = null;
+        if (target === "top") element.scrollTop = 0;
+        else if (target && target !== "bottom") element.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(target)}"]`)?.scrollIntoView({ block: "center" });
+        else if (target === "bottom" || (historyPage.latest && followMessagesRef.current)) element.scrollTop = element.scrollHeight;
+    }, [messages, view, historyEndId, historyPage.latest, historyNavigation]);
+    const showHistoryPage = (end: number, scroll: "top" | "bottom" | string) => {
+        followMessagesRef.current = false;
+        setFollowingMessages(false);
+        pendingHistoryScroll.current = scroll;
+        setHistoryNavigation((value) => value + 1);
+        setHistoryEndId(messages[Math.max(0, Math.min(messages.length, end) - 1)]?.id || null);
+    };
+    const showHistoryMatch = (offset: number) => {
+        if (!historyMatches.length) return;
+        const match = (offset + historyMatches.length) % historyMatches.length;
+        setHistoryMatch(match);
+        const index = historyMatches[match];
+        showHistoryPage(Math.min(messages.length, index + Math.ceil(CONVERSATION_PAGE_SIZE / 2)), messages[index].id);
+    };
+    useEffect(() => {
+        const holdSelection = () => {
+            const selection = window.getSelection();
+            if (!selection || selection.isCollapsed || !messageListRef.current?.contains(selection.anchorNode)) return;
+            followMessagesRef.current = false;
+            setFollowingMessages(false);
+            setHistoryEndId((current) => current || messages.at(-1)?.id || null);
+        };
+        document.addEventListener("selectionchange", holdSelection);
+        return () => document.removeEventListener("selectionchange", holdSelection);
+    }, [messages]);
     const resourceReferences = useMemo(() => buildAllCanvasResourceReferences(nodes), [nodes]);
     const resourceReferenceById = useMemo(() => new Map(resourceReferences.map((reference) => [reference.nodeId, reference])), [resourceReferences]);
     const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
@@ -208,11 +265,12 @@ export function CanvasAssistantPanel({
     };
 
     const startChatSession = () => {
+        if (isRunning) return;
         if (activeSession && activeSession.messages.length === 0) {
             commitSessions(sessionsRef.current, activeSession.id);
             return;
         }
-        const session = createSession();
+        const session = createSession(provider);
         commitSessions([session, ...sessionsRef.current], session.id);
     };
 
@@ -237,6 +295,7 @@ export function CanvasAssistantPanel({
     };
 
     const sendMessage = async (text: string, savedReferences?: CanvasAssistantReference[]) => {
+        if (abortRef.current) return;
         const session = activeSession || createSession();
         if (!activeSession) {
             commitSessions([session], session.id);
@@ -258,7 +317,7 @@ export function CanvasAssistantPanel({
             activeChannelId: effectiveConfig.textChannelId || effectiveConfig.activeChannelId,
             textChannelId: effectiveConfig.textChannelId,
         };
-        if (!isAiConfigReady(requestConfig, requestConfig.model)) {
+        if (provider === "api" && !isAiConfigReady(requestConfig, requestConfig.model)) {
             updateMessage(session.id, assistantId, {
                 text: "全局文本模型尚未配置完成。请先从应用原有的全局配置入口选择文本模型和渠道，然后再继续。",
                 status: "error",
@@ -270,45 +329,76 @@ export function CanvasAssistantPanel({
         const controller = new AbortController();
         abortRef.current = controller;
         setIsRunning(true);
+        let confirmationQueue = Promise.resolve();
+        const requestConfirmation = (details: Omit<PendingDeleteConfirmation, "resolve">): Promise<boolean> => {
+            const result = confirmationQueue.then(() => {
+                if (controller.signal.aborted) return false;
+                return new Promise<boolean>((resolve) => {
+                    const pending = { ...details, resolve };
+                    pendingDeleteRef.current = pending;
+                    setPendingDelete(pending);
+                });
+            });
+            confirmationQueue = result.then(() => {});
+            return result;
+        };
         try {
-            const modelReferences = await Promise.all(
-                references.map(async (reference) => {
-                    if (!reference.dataUrl) return reference;
-                    try {
-                        return { ...reference, dataUrl: await imageToDataUrl(reference) };
-                    } catch {
-                        return reference;
-                    }
-                }),
-            );
-            const result = await runCanvasAgent({
+            const modelReferences = await resolveCanvasModelReferences(projectId || "", references);
+            const runtimeInput = {
                 config: requestConfig,
                 initialState: session.agentState,
                 protocolMessages: session.protocolMessages,
                 userText: text,
                 references: modelReferences,
                 getContext: getAgentContext,
-                executeAction: async (action) => {
-                    if (action.name !== "delete_node") return onExecuteAction(action, messageReferenceNodeIds);
+                executeAction: async (action: CanvasAgentAction): Promise<CanvasAgentToolResult> => {
+                    if (controller.signal.aborted) throw new DOMException("已停止", "AbortError");
+                    const media = provider !== "api" && isCanvasAgentMediaAction(action);
+                    const connectionDelete = provider !== "api" && action.name === "delete_connection";
+                    if (action.name !== "delete_node" && !media && !connectionDelete) return onExecuteAction(action, messageReferenceNodeIds);
                     const nodeId = typeof action.arguments.nodeId === "string" ? action.arguments.nodeId : "";
                     const node = nodes.find((item) => item.id === nodeId);
-                    const confirmed = await new Promise<boolean>((resolve) => {
-                        const pending = { title: node?.title || "未命名节点", resolve };
-                        pendingDeleteRef.current = pending;
-                        setPendingDelete(pending);
-                    });
-                    return confirmed ? onExecuteAction(action, messageReferenceNodeIds) : { ok: false, code: "delete_cancelled", message: "用户取消删除，原节点已保留" };
+                    const confirmed = await requestConfirmation({ title: media ? String(action.arguments.title || action.arguments.prompt || "媒体生成").slice(0, 80) : connectionDelete ? `连线 ${action.arguments.connectionId}` : node?.title || "未命名节点", media });
+                    if (controller.signal.aborted) throw new DOMException("已停止", "AbortError");
+                    return confirmed ? onExecuteAction(action, messageReferenceNodeIds) : { ok: false, code: "action_cancelled", message: "用户取消本次操作，不要自动重试" };
                 },
                 signal: controller.signal,
-                onEvent: (event) => updateMessage(session.id, assistantId, { status: event.status, activity: event.label }),
-                onCheckpoint: (checkpoint) =>
+                onContextTrace: (trace: NonNullable<CanvasAssistantMessage["contextTrace"]>[number]) => updateSession(session.id, (current) => ({
+                    ...current,
+                    messages: current.messages.map((message) => message.id === assistantId ? { ...message, contextTrace: [...(message.contextTrace || []), trace] } : message),
+                })),
+                onEvent: (event: { status: CanvasAssistantMessage["status"]; label: string }) => updateMessage(session.id, assistantId, { status: event.status, activity: event.label }),
+                onCheckpoint: (checkpoint: { state: CanvasAgentState; protocolMessages: CanvasAssistantSession["protocolMessages"] }) =>
                     updateSession(session.id, (current) => ({
                         ...current,
                         agentState: checkpoint.state,
                         protocolMessages: checkpoint.protocolMessages,
                         updatedAt: new Date().toISOString(),
                     })),
-            });
+            };
+            const result = provider === "codex"
+                ? await runCanvasCodex({
+                    ...runtimeInput,
+                    projectId: projectId || "",
+                    sessionId: session.id,
+                    threadId: session.codexThreadId,
+                    onCodexUpdate: (patch) => updateSession(session.id, (current) => ({ ...current, ...patch })),
+                    onText: (reply) => updateMessage(session.id, assistantId, { text: reply }),
+                    onInvalidate: () => {
+                        controller.abort();
+                        settleDeleteConfirmation(false);
+                    },
+                })
+                : provider === "grok" || provider === "antigravity"
+                    ? await runCanvasLocalAgent({
+                        ...runtimeInput, provider, projectId: projectId || "", sessionId: session.id, resumeId: session.localAgentSessionId,
+                        onSession: (id) => updateSession(session.id, (current) => ({ ...current, localAgentSessionId: id })),
+                        onModel: (model) => updateSession(session.id, (current) => ({ ...current, localAgentModel: model })),
+                        onText: (reply) => updateMessage(session.id, assistantId, { text: reply }),
+                        onInvalidate: () => { controller.abort(); settleDeleteConfirmation(false); },
+                        onPermission: (title) => requestConfirmation({ title, permission: true }),
+                    })
+                    : await runCanvasAgent(runtimeInput);
             updateSession(session.id, (current) => ({
                 ...current,
                 agentState: result.state,
@@ -326,6 +416,8 @@ export function CanvasAssistantPanel({
                 activity: undefined,
             });
         } finally {
+            controller.abort();
+            settleDeleteConfirmation(false);
             if (abortRef.current === controller) abortRef.current = null;
             setIsRunning(false);
         }
@@ -411,7 +503,7 @@ export function CanvasAssistantPanel({
                             )}
                         >
                             <TerminalIcon className="size-3.5" />
-                            <span>本地 AI</span>
+                            <span>终端</span>
                         </button>
                     </div>
                     <div className="flex items-center gap-1">
@@ -426,7 +518,7 @@ export function CanvasAssistantPanel({
                             </>
                         ) : null}
                         <Tooltip title={view === "history" ? "返回对话" : "历史记录"}>
-                            <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" style={iconButtonStyle} icon={<History className="size-4" />} onClick={() => setView(view === "history" ? "chat" : "history")} />
+                            <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" style={iconButtonStyle} disabled={isRunning} icon={<History className="size-4" />} onClick={() => setView(view === "history" ? "chat" : "history")} />
                         </Tooltip>
                         {view === "chat" && (
                             <Tooltip title="新对话">
@@ -436,7 +528,7 @@ export function CanvasAssistantPanel({
                                     className="!h-8 !w-8 !min-w-8"
                                     style={iconButtonStyle}
                                     icon={<Plus className="size-4" />}
-                                    disabled={!hasMessages}
+                                    disabled={!hasMessages || isRunning}
                                     onClick={() => {
                                         startChatSession();
                                         setView("chat");
@@ -450,6 +542,39 @@ export function CanvasAssistantPanel({
                     </div>
                 </div>
 
+                {view === "chat" ? (
+                    <div className="space-y-1.5 border-b px-3 py-2 text-xs" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                        <div className="flex items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-x-3" aria-label="画布助手来源">
+                                {(["api", "codex", "grok", "antigravity"] as const).map((choice) => (
+                                    <button key={choice} type="button" disabled={isRunning || (choice !== "api" && !isTauri())} aria-pressed={provider === choice}
+                                        className="cursor-pointer border-0 bg-transparent p-0 py-1 disabled:cursor-default disabled:opacity-40"
+                                        style={{ color: provider === choice ? theme.node.text : theme.node.muted, fontWeight: provider === choice ? 600 : 400 }}
+                                        onClick={() => {
+                                            if (choice === provider) return;
+                                            const next = createSession(choice);
+                                            commitSessions([next, ...sessionsRef.current], next.id);
+                                        }}>
+                                        {({ api: "API 模型", codex: "本机 Codex", grok: "Grok", antigravity: "Antigravity" })[choice]}
+                                    </button>
+                                ))}
+                            </div>
+                            {provider === "codex" ? <span title="最近一次模型调用的输入加输出，除以模型窗口；不是账号余额。未返回上限时不猜百分比。">
+                                {contextPercent !== null ? `上下文约 ${contextPercent}%` : activeSession?.codexUsage ? `输入 ${activeSession.codexUsage.inputTokens.toLocaleString()} tokens` : "上下文待测"}
+                            </span> : null}
+                        </div>
+                        {provider === "api" ? <div className="truncate">{effectiveConfig.textModel || effectiveConfig.model || "尚未配置文本模型"}</div> : null}
+                        {provider === "grok" || provider === "antigravity" ? <div>{activeSession?.localAgentModel || "模型尚未由本机工具报告"} · 使用本机登录 · 当前接入仅文字与节点 · 媒体生成另行确认</div> : null}
+                        {provider === "codex" ? <>
+                            <div className="truncate">{activeSession?.codexModel || "使用本机 Codex 的 ChatGPT 登录"} · 媒体生成另行确认</div>
+                            {contextPercent !== null && contextPercent >= 70 ? <div role="status" style={{ color: theme.node.text }}>
+                                {contextPercent >= 85 ? "上下文接近上限；Codex 可能进行摘要压缩，重要定稿请保存在节点中。" : "上下文已超过 70%，建议完成当前阶段后新建对话。"}
+                            </div> : null}
+                            {activeSession?.codexCompaction ? <div role="status">{activeSession.codexCompaction}</div> : null}
+                        </> : null}
+                    </div>
+                ) : null}
+
                 {view === "terminal" ? (
                     <div className="min-h-0 flex-1 overflow-hidden">
                         <CanvasTerminalDrawer
@@ -459,7 +584,14 @@ export function CanvasAssistantPanel({
                         />
                     </div>
                 ) : (
-                    <div ref={messageListRef} className="thin-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
+                    <div ref={messageListRef} onScroll={(event) => {
+                        const element = event.currentTarget;
+                        const following = historyPage.end === messages.length && element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
+                        if (following) setHistoryEndId(null);
+                        else if (historyPage.latest) setHistoryEndId(messages[historyPage.end - 1]?.id || null);
+                        followMessagesRef.current = following;
+                        setFollowingMessages(following);
+                    }} className="thin-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
                         {view === "history" ? (
                             <AssistantHistory
                                 sessions={historySessions}
@@ -473,7 +605,25 @@ export function CanvasAssistantPanel({
                                 onDelete={(id) => setDeleteChatIds([id])}
                             />
                         ) : messages.length ? (
-                            <AssistantMessages messages={messages} onRetry={retryMessage} />
+                            <>
+                                {!followingMessages ? <button type="button" onClick={jumpToLatest} className="sticky top-0 z-10 mx-auto block px-3 py-1 text-xs" style={{ background: theme.node.fill, color: theme.node.text }}>回到最新消息 ↓</button> : null}
+                                {messages.length > CONVERSATION_PAGE_SIZE ? <div className="space-y-2 text-xs" style={{ color: theme.node.text }}>
+                                    <div className="flex items-center gap-2">
+                                        <input aria-label="搜索完整对话" placeholder="搜索完整对话" value={historyQuery} onChange={(event) => { setHistoryQuery(event.target.value); setHistoryMatch(0); }} className="min-w-0 flex-1 bg-transparent px-1 py-1 outline-none" />
+                                        <button type="button" disabled={!historyMatches.length} onClick={() => showHistoryMatch(historyMatch - 1)}>上一处</button>
+                                        <button type="button" disabled={!historyMatches.length} onClick={() => showHistoryMatch(historyMatch)}>定位</button>
+                                        <button type="button" disabled={!historyMatches.length} onClick={() => showHistoryMatch(historyMatch + 1)}>下一处</button>
+                                    </div>
+                                    {historyQuery ? <div>{historyMatches.length} 条消息匹配</div> : null}
+                                    <div className="flex flex-wrap items-center gap-3">
+                                        <button type="button" disabled={!historyPage.start} onClick={() => showHistoryPage(historyPage.start + CONVERSATION_PAGE_OVERLAP, "bottom")}>更早消息</button>
+                                        <span>{historyPage.start + 1}–{historyPage.end} / {messages.length}</span>
+                                        <button type="button" disabled={historyPage.end >= messages.length} onClick={() => showHistoryPage(historyPage.end + CONVERSATION_PAGE_SIZE - CONVERSATION_PAGE_OVERLAP, "top")}>更新消息</button>
+                                        <button type="button" onClick={() => copyText(messages.map((message) => `${message.role === "user" ? "我" : "助手"}：\n${message.text}`).join("\n\n"), "完整对话已复制")}>复制完整对话</button>
+                                    </div>
+                                </div> : null}
+                                <AssistantMessages messages={historyPage.messages} onRetry={retryMessage} />
+                            </>
                         ) : (
                             <div className="flex h-full flex-col items-center justify-center px-8 text-center">
                                 <div className="grid size-12 place-items-center rounded-2xl" style={{ background: theme.node.fill }}>
@@ -491,12 +641,12 @@ export function CanvasAssistantPanel({
                         {pendingDelete ? (
                             <div className="mx-2 mb-2 overflow-hidden rounded-xl border" style={{ background: theme.node.fill, borderColor: theme.node.stroke }}>
                                 <div className="min-w-0 px-3 py-2.5">
-                                    <div className="truncate text-sm font-medium">删除「{pendingDelete.title}」？</div>
-                                    <div className="mt-0.5 text-xs opacity-55">相关连线和任务记录将按现有逻辑清理</div>
+                                    <div className={pendingDelete.permission ? "max-h-48 overflow-auto whitespace-pre-wrap break-all text-sm font-medium" : "truncate text-sm font-medium"}>{pendingDelete.permission ? "允许本次操作" : pendingDelete.media ? "生成" : "删除"}「{pendingDelete.title}」？</div>
+                                    <div className="mt-0.5 text-xs opacity-55">{pendingDelete.permission ? "这是 Grok 请求的本次工具权限，请核对操作内容；取消后不会自动重试。" : pendingDelete.media ? "会调用已配置的媒体服务，可能消耗额度；本次确认只执行这一项。" : "相关连线和任务记录将按现有逻辑清理"}</div>
                                 </div>
                                 <div className="grid grid-cols-2 border-t" style={{ borderColor: theme.node.stroke }}>
                                     <button type="button" className="h-9 cursor-pointer border-0 bg-transparent text-sm" style={{ color: theme.node.text }} onClick={() => settleDeleteConfirmation(false)}>取消</button>
-                                    <button type="button" className="h-9 cursor-pointer border-0 border-l bg-transparent text-sm font-medium" style={{ borderColor: theme.node.stroke, color: "#ef4444" }} onClick={() => settleDeleteConfirmation(true)}>确认删除</button>
+                                    <button type="button" className="h-9 cursor-pointer border-0 border-l bg-transparent text-sm font-medium" style={{ borderColor: theme.node.stroke, color: pendingDelete.media || pendingDelete.permission ? theme.node.text : "#ef4444" }} onClick={() => settleDeleteConfirmation(true)}>{pendingDelete.permission ? "允许一次" : pendingDelete.media ? "确认生成" : "确认删除"}</button>
                                 </div>
                             </div>
                         ) : null}
@@ -559,7 +709,7 @@ const ASSISTANT_MARKDOWN_COMPONENTS: Components = {
     a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" className="font-medium underline underline-offset-4" />,
 };
 
-function AssistantMarkdown({ children }: { children: string }) {
+const AssistantMarkdown = memo(function AssistantMarkdown({ children }: { children: string }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
 
     return (
@@ -591,7 +741,7 @@ function AssistantMarkdown({ children }: { children: string }) {
             </ReactMarkdown>
         </div>
     );
-}
+});
 
 function AssistantMessages({ messages, onRetry }: { messages: CanvasAssistantMessage[]; onRetry: (message: CanvasAssistantMessage) => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -601,7 +751,7 @@ function AssistantMessages({ messages, onRetry }: { messages: CanvasAssistantMes
             {messages.map((message) => {
                 const running = message.status === "thinking" || message.status === "running";
                 return (
-                    <div key={message.id} className={cn("flex flex-col gap-2", message.role === "user" ? "items-end" : "items-start")}>
+                    <div key={message.id} data-message-id={message.id} style={running ? undefined : { contentVisibility: "auto", containIntrinsicSize: "auto 160px" }} className={cn("flex flex-col gap-2", message.role === "user" ? "items-end" : "items-start")}>
                         {message.text ? (
                             <div
                                 className="max-w-[88%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-6"
@@ -622,6 +772,15 @@ function AssistantMessages({ messages, onRetry }: { messages: CanvasAssistantMes
                                 {message.role === "assistant" ? <AssistantMarkdown>{message.text}</AssistantMarkdown> : <UserMessageContent message={message} />}
                             </div>
                         ) : null}
+                        {message.contextTrace?.length ? <details className="max-w-full text-xs opacity-70">
+                            <summary className="cursor-pointer">本次实际上下文与 SOP</summary>
+                            <p className="my-2">下方是传输或工具返回记录；输入框引用是发送前选择。外部文件 SOP 未读取，不代表已采用。</p>
+                            {message.contextTrace.map((trace, index) => <div key={index} className="my-2 break-words">
+                                <div>{trace.label}</div>
+                                {trace.nodes.map((node, i) => <div key={`${node.id}-${i}`}>{node.title} · {node.id} · {node.detail === "image" ? "附图" : node.detail === "body" ? "正文/提示词" : "目录信息"}</div>)}
+                                {trace.sources?.map((source) => <div key={source.source} className="my-1 select-text">{source.source}<br />SHA-256：{source.sha256}</div>)}
+                            </div>)}
+                        </details> : null}
                         {running ? <ImageGenerationPending compact label={message.activity || "正在执行"} className="w-[250px] rounded-2xl border" /> : null}
                         {message.role === "assistant" && !running && message.text ? (
                             <Button shape="circle" size="small" style={{ borderColor: theme.node.stroke }} icon={<RotateCcw className="size-3.5" />} onClick={() => onRetry(message)} title="重试" />
@@ -678,10 +837,11 @@ function nodeToReference(node: CanvasNodeData, resource: CanvasResourceReference
     return content ? { id: node.id, type: node.type, title: node.title, label: resource.label, ...content } : null;
 }
 
-function createSession(): CanvasAssistantSession {
+function createSession(provider: NonNullable<CanvasAssistantSession["provider"]> = "api"): CanvasAssistantSession {
     const now = new Date().toISOString();
     return {
         id: nanoid(),
+        provider,
         title: "新对话",
         messages: [],
         agentState: createCanvasAgentState(),
